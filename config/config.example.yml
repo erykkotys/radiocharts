@@ -20,6 +20,12 @@ sources:
   eska:
     enabled: true
     mode: auto
+  uk:
+    enabled: true
+    mode: auto
+  billboard:
+    enabled: true
+    mode: auto
 
 weights:
   OLIA: 30

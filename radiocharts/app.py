@@ -15,6 +15,9 @@ from radiocharts.db import DB_PATH, init_db, latest_issues, update_note, upsert_
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.seed_demo import seed
 from radiocharts.sources.eska import probe_eska
+from radiocharts.sources.uk import probe_uk
+from radiocharts.sources.billboard import probe_billboard
+from radiocharts.sources.zet import parse_zet_text
 from radiocharts.sources.imports import dataframe_to_issue, parse_tabular
 from radiocharts.sources.olis import probe_olis
 from radiocharts.sources.rmf import probe_rmf
@@ -127,7 +130,7 @@ with st.sidebar:
 
     if st.button("↻ Pobierz dane teraz", use_container_width=True):
         try:
-            with st.spinner("Pobieram RMF/ESKĘ i renderuję OLiA/OLiS w Chromium (to może potrwać kilkanaście sekund)..."):
+            with st.spinner("Pobieram RMF/ESKĘ/UK/Billboard i renderuję OLiA/OLiS w Chromium (to może potrwać kilkadziesiąt sekund)..."):
                 st.session_state["collect_result"] = collect_current()
             st.rerun()
         except Exception as exc:
@@ -169,7 +172,7 @@ with st.sidebar:
             copyable_json(st.session_state["backfill_result"], "backfill")
 
     with st.expander("Diagnostyka źródeł"):
-        diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA"], key="diag_source")
+        diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
         if st.button("Sprawdź odpowiedź", use_container_width=True):
             try:
                 with st.spinner(f"Sprawdzam {diag_source}..."):
@@ -177,8 +180,12 @@ with st.sidebar:
                         diag = probe_rmf()
                     elif diag_source in ("OLIA", "OLIS"):
                         diag = probe_olis(diag_source)
-                    else:
+                    elif diag_source == "ESKA":
                         diag = probe_eska()
+                    elif diag_source == "UK":
+                        diag = probe_uk()
+                    else:
+                        diag = probe_billboard()
                     st.session_state["source_diag"] = diag
             except Exception as exc:
                 st.session_state["source_diag"] = {
@@ -231,7 +238,8 @@ with tab_dash:
         cols = [
             "artist", "title", "familiarity", "momentum", "format_fit", "recommendation",
             "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
-            "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks", "status",
+            "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
+            "UK_pos", "UK_weeks", "BILLBOARD_pos", "BILLBOARD_weeks", "status",
         ]
         show = view[[c for c in cols if c in view.columns]]
         pos_cols = [c for c in show.columns if c.endswith("_pos")]
@@ -267,7 +275,7 @@ with tab_song:
         st.write(f"**Rekomendacja:** {row.recommendation}")
 
         source_rows = []
-        for src in ["OLIA", "RMF", "ZET", "OLIS", "ESKA"]:
+        for src in ["OLIA", "RMF", "ZET", "OLIS", "ESKA", "UK", "BILLBOARD"]:
             source_rows.append({
                 "Źródło": src,
                 "Pozycja": row.get(f"{src}_pos"),
@@ -298,10 +306,10 @@ with tab_song:
 with tab_import:
     st.subheader("Import notowania")
     st.write("Format minimalny: `position, artist, title`. Może też zawierać `release_date`.")
-    source = st.selectbox("Źródło", ["ZET", "OLIA", "OLIS", "ESKA", "RMF"])
+    source = st.selectbox("Źródło", ["ZET", "OLIA", "OLIS", "ESKA", "RMF", "UK", "BILLBOARD"])
     chart_date = st.date_input("Data notowania", value=date.today())
     issue_key = st.text_input("Id/notowanie (opcjonalne)", value="")
-    chart_size = st.number_input("Rozmiar listy", min_value=1, max_value=500, value=100 if source in ("OLIA", "OLIS") else 20)
+    chart_size = st.number_input("Rozmiar listy", min_value=1, max_value=500, value=100 if source in ("OLIA", "OLIS", "UK", "BILLBOARD") else 20)
     uploaded = st.file_uploader("CSV / JSON / XLSX", type=["csv", "json", "xlsx", "xls"])
     if uploaded:
         try:
@@ -321,6 +329,19 @@ with tab_import:
         "text/csv",
     )
 
+    st.divider()
+    st.subheader("Radio ZET — ręczne wklejenie")
+    st.caption("Automatyczny crawler ZET pozostaje wyłączony. Skopiuj tekst bieżącej listy ze strony Radia ZET i wklej poniżej; parser wyciągnie Top 20 lokalnie.")
+    zet_text = st.text_area("Tekst strony/listy ZET", height=180, key="zet_paste")
+    if st.button("Parsuj i zapisz ZET", use_container_width=True):
+        try:
+            issue = parse_zet_text(zet_text, fallback_date=chart_date)
+            upsert_issue(issue["source"], issue["chart_date"], issue["issue_key"], issue["chart_size"], issue["entries"], issue.get("source_url"))
+            st.success(f"Zaimportowano ZET: {len(issue['entries'])} pozycji z {issue['chart_date']}.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"ZET: {type(exc).__name__}: {exc}")
+
 with tab_about:
     st.markdown(
         """
@@ -332,7 +353,7 @@ with tab_about:
 **Format Fit** ma większy nacisk na RMF i ZET (40/35), bo odpowiada raczej na pytanie „czy ten hit przypomina nasz format?” niż „czy jest popularny wszędzie?”.
 
 ### Źródła w MVP
-RMF jest pobierany automatycznie i ma backfill archiwalnych notowań. OLiA, OLiS Single w streamie i ESKA są od 0.1.4 pobierane automatycznie w trybie eksperymentalnym; ich diagnostykę można skopiować z panelu bocznego. ZET pozostaje importem ręcznym.
+RMF jest pobierany automatycznie i ma backfill archiwalnych notowań. OLiA i OLiS są rozwijane po kliknięciu „zobacz pełną listę”, ESKA ma fallback przez Chromium. UK Official Singles Chart i Billboard Hot 100 są pobierane automatycznie jako dodatkowe sygnały trendu — nie wchodzą do wag Familiarity. ZET pozostaje importem ręcznym; w zakładce Import można wkleić tekst listy bezpośrednio.
 
 ### Ważne
 Progi są celowo konfigurowalne. Po zebraniu historii skalibrujemy je na utworach, które sam oznaczysz jako Current / Current Familiar / Recurrent.

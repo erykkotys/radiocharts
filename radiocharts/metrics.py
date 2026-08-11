@@ -97,6 +97,7 @@ def compute_scores() -> pd.DataFrame:
     available = {s for s in latest if s in weights}
     coverage = sum(weights[s] for s in available)
 
+    external_sources = ["UK", "BILLBOARD"]
     rows = []
     for song_id, sg in df.groupby("song_id"):
         per = {}
@@ -144,7 +145,7 @@ def compute_scores() -> pd.DataFrame:
             "coverage": round(coverage,1), "recommendation": recommendation,
             "heard": heard, "status": status, "note": note,
         }
-        for source in weights:
+        for source in list(weights) + external_sources:
             st = per.get(source)
             row[f"{source}_pos"] = st["latest_position"] if st else None
             row[f"{source}_weeks"] = st["weeks"] if st else 0

@@ -12,6 +12,8 @@ from radiocharts.db import init_db, upsert_issue
 from radiocharts.sources.rmf import fetch_rmf
 from radiocharts.sources.olis import fetch_olis
 from radiocharts.sources.eska import fetch_eska
+from radiocharts.sources.uk import fetch_uk
+from radiocharts.sources.billboard import fetch_billboard
 
 LOCK_PATH = Path("/app/data/collector.lock") if Path("/app").exists() else Path(__file__).resolve().parent.parent / "data" / "collector.lock"
 
@@ -42,6 +44,10 @@ def collect_current() -> list[str]:
             jobs.append(("OLIS", lambda: fetch_olis("OLIS")))
         if _enabled(cfg, "eska"):
             jobs.append(("ESKA", fetch_eska))
+        if _enabled(cfg, "uk"):
+            jobs.append(("UK", fetch_uk))
+        if _enabled(cfg, "billboard"):
+            jobs.append(("BILLBOARD", fetch_billboard))
 
         for name, fn in jobs:
             try:

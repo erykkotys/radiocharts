@@ -268,7 +268,7 @@ def _request(source: str, timeout: int = 30):
 
 
 def _render(source: str):
-    return render_page(URLS[source.upper()])
+    return render_page(URLS[source.upper()], click_texts=["zobacz pełną listę"], auto_scroll=True)
 
 
 def probe_olis(source: str, timeout: int = 30) -> dict:
@@ -318,6 +318,7 @@ def probe_olis(source: str, timeout: int = 30) -> dict:
         "body_sha256": hashlib.sha256(r.content).hexdigest()[:16],
         "raw_visible_start": raw_visible[:350],
         "rendered_lines_start": rendered_lines[:80],
+        "rendered_lines_tail": rendered_lines[-40:] if rendered_lines else [],
     }
 
 
@@ -327,5 +328,7 @@ def fetch_olis(source: str, timeout: int = 30) -> dict:
         raise ValueError(f"Nieznane źródło: {source}")
     rendered = _render(source)
     data = parse_olis_rendered(rendered.html, rendered.text, source)
+    if len(data["entries"]) < 50:
+        raise ValueError(f"Parser {source} odczytał tylko {len(data['entries'])} pozycji po kliknięciu pełnej listy")
     data["source_url"] = rendered.url
     return data
