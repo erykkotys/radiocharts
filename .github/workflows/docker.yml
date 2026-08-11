@@ -3,8 +3,14 @@ name: Build Docker image
 on:
   push:
     branches: ["main"]
-    tags: ["v*"]
   workflow_dispatch:
+
+# `latest` is a mutable pointer. Without concurrency, two builds started close
+# together can finish out of order and an older commit may overwrite `latest`.
+# Keep only the newest main build active so the newest commit wins.
+concurrency:
+  group: radiocharts-docker-main
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -15,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Read version
         id: version
@@ -40,16 +48,14 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/radiocharts
           tags: |
             type=raw,value=${{ steps.version.outputs.value }}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=sha,prefix=sha-
-            type=ref,event=tag
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           pull: true
-          no-cache: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |

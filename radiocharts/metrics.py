@@ -26,6 +26,7 @@ def _load_entries() -> pd.DataFrame:
         return pd.read_sql_query("""
             SELECT s.id AS song_id,s.artist,s.title,s.release_date,
                    i.source,i.chart_date,i.issue_key,i.chart_size,e.position,
+                   e.reported_weeks,e.reported_peak,
                    n.heard,n.status,n.note
             FROM chart_entries e
             JOIN chart_issues i ON i.id=e.issue_id
@@ -53,9 +54,13 @@ def _weekly_source_stats(g: pd.DataFrame, latest_date: str) -> dict:
     weeks_since_seen = max(0.0, (latest_global-latest_seen).days/7.0)
     recency = math.exp(-weeks_since_seen/3.0)
     current = float(weekly.iloc[-1]["strength"]) * recency
-    peak_pos = int(g["position"].min())
-    peak = rank_score(peak_pos, int(g.loc[g["position"].idxmin(), "chart_size"]))
-    weeks = int(weekly.shape[0])
+    local_peak = int(g["position"].min())
+    reported_peaks = pd.to_numeric(g.get("reported_peak"), errors="coerce").dropna() if "reported_peak" in g else pd.Series(dtype=float)
+    peak_pos = min(local_peak, int(reported_peaks.min())) if not reported_peaks.empty else local_peak
+    peak = rank_score(peak_pos, size)
+    local_weeks = int(weekly.shape[0])
+    reported_weeks = pd.to_numeric(g.get("reported_weeks"), errors="coerce").dropna() if "reported_weeks" in g else pd.Series(dtype=float)
+    weeks = max(local_weeks, int(reported_weeks.max())) if not reported_weeks.empty else local_weeks
     weeks_top10 = int(g.assign(week=g["date"].dt.to_period("W-SUN").astype(str)).query("position <= 10")["week"].nunique())
     longevity = min(100.0, weeks / 10.0 * 100.0)
     persistence = min(100.0, weeks_top10 / 6.0 * 100.0)

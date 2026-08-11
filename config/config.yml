@@ -12,14 +12,14 @@ sources:
     enabled: false
     mode: manual_import
   olia:
-    enabled: false
-    mode: manual_import
+    enabled: true
+    mode: auto
   olis:
-    enabled: false
-    mode: manual_import
+    enabled: true
+    mode: auto
   eska:
-    enabled: false
-    mode: manual_import
+    enabled: true
+    mode: auto
 
 weights:
   OLIA: 30

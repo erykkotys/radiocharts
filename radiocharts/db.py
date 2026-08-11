@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS chart_entries (
     song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
     previous_position INTEGER,
+    reported_weeks INTEGER,
+    reported_peak INTEGER,
     UNIQUE(issue_id, song_id),
     UNIQUE(issue_id, position)
 );
@@ -91,6 +93,12 @@ def connect():
 def init_db() -> None:
     with connect() as con:
         con.executescript(SCHEMA)
+        # Lightweight migrations for existing MVP databases.
+        cols = {row["name"] for row in con.execute("PRAGMA table_info(chart_entries)").fetchall()}
+        if "reported_weeks" not in cols:
+            con.execute("ALTER TABLE chart_entries ADD COLUMN reported_weeks INTEGER")
+        if "reported_peak" not in cols:
+            con.execute("ALTER TABLE chart_entries ADD COLUMN reported_peak INTEGER")
 
 
 def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release_date: str | None = None) -> int:
@@ -130,8 +138,13 @@ def upsert_issue(source: str, chart_date: str | date, issue_key: str, chart_size
         for e in entries:
             song_id = get_or_create_song(con, e["artist"], e["title"], e.get("release_date"))
             con.execute(
-                "INSERT INTO chart_entries(issue_id,song_id,position,previous_position) VALUES (?,?,?,?)",
-                (issue_id, song_id, int(e["position"]), e.get("previous_position")),
+                """INSERT INTO chart_entries(
+                    issue_id,song_id,position,previous_position,reported_weeks,reported_peak
+                ) VALUES (?,?,?,?,?,?)""",
+                (
+                    issue_id, song_id, int(e["position"]), e.get("previous_position"),
+                    e.get("reported_weeks"), e.get("reported_peak"),
+                ),
             )
         return issue_id
 
@@ -144,3 +157,17 @@ def update_note(song_id: int, heard: bool, status: str, note: str) -> None:
                ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,note=excluded.note,updated_at=excluded.updated_at""",
             (song_id, int(heard), status, note, _utcnow()),
         )
+
+
+def latest_issues() -> list[dict]:
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """SELECT i.source, i.chart_date, i.issue_key, i.retrieved_at, COUNT(e.id) AS entries
+               FROM chart_issues i LEFT JOIN chart_entries e ON e.issue_id=i.id
+               WHERE i.chart_date = (
+                   SELECT MAX(i2.chart_date) FROM chart_issues i2 WHERE i2.source=i.source
+               )
+               GROUP BY i.id ORDER BY i.source"""
+        ).fetchall()
+        return [dict(r) for r in rows]
