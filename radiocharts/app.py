@@ -8,6 +8,8 @@ import plotly.express as px
 import streamlit as st
 
 from radiocharts.collector import collect_current
+from radiocharts.build_info import VERSION, GIT_SHA, BUILD_DATE, display_version
+from radiocharts.sources.rmf import probe_rmf
 from radiocharts.db import init_db, upsert_issue, update_note, DB_PATH
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.imports import parse_tabular, dataframe_to_issue
@@ -20,6 +22,9 @@ st.title("📻 RadioCharts Research")
 st.caption("MVP: familiarity, momentum i format fit. Wynik wspiera odsłuch i ręczną decyzję — nie zastępuje jej.")
 
 with st.sidebar:
+    st.caption(f"Build: **{display_version()}**")
+    if BUILD_DATE != "unknown":
+        st.caption(f"Zbudowano: {BUILD_DATE}")
     st.subheader("Dane")
     st.caption(f"DB: {DB_PATH}")
     if st.button("↻ Pobierz RMF teraz", use_container_width=True):
@@ -30,6 +35,15 @@ with st.sidebar:
             st.rerun()
         except Exception as e:
             st.error(f"Błąd: {e}")
+    with st.expander("Diagnostyka RMF"):
+        st.caption("Pokazuje, co kontener faktycznie otrzymuje z rmf.fm. Nie zapisuje danych.")
+        if st.button("Sprawdź odpowiedź RMF", use_container_width=True):
+            try:
+                with st.spinner("Sprawdzam RMF..."):
+                    diag = probe_rmf()
+                st.json(diag)
+            except Exception as e:
+                st.error(f"Diagnostyka RMF: {type(e).__name__}: {e}")
     if st.button("Załaduj dane demonstracyjne RMF+ZET", use_container_width=True):
         seed(); st.success("Załadowano."); st.rerun()
     st.divider()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html as html_lib
 import re
 from datetime import date
@@ -147,11 +148,49 @@ def parse_rmf(html: str) -> dict:
     }
 
 
-def fetch_rmf(issue: int | None = None, timeout: int = 25) -> dict:
-    url = ARCHIVE_URL.format(issue=issue) if issue is not None else CURRENT_URL
 
+def _request_rmf(issue: int | None = None, timeout: int = 25):
+    url = ARCHIVE_URL.format(issue=issue) if issue is not None else CURRENT_URL
     with requests.Session() as session:
-        r = session.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
+        # First touch the RMF domain like a normal browser would.  Some CDN/WAF
+        # setups attach cookies on the landing request; failure here is harmless.
+        try:
+            session.get("https://www.rmf.fm/", timeout=min(timeout, 10), headers=HEADERS, allow_redirects=True)
+        except requests.RequestException:
+            pass
+        return session.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
+
+
+def probe_rmf(timeout: int = 25) -> dict:
+    """Fetch RMF without requiring the parser to succeed.
+
+    Used by the dashboard diagnostics.  Never returns the whole page, only a
+    compact fingerprint and a short visible-text sample.
+    """
+    r = _request_rmf(timeout=timeout)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "lxml")
+    title = soup.title.get_text(" ", strip=True) if soup.title else "(brak title)"
+    tokens = _tokens(r.text)
+    issue = None
+    try:
+        _, no, d = _find_issue(r.text, tokens)
+        issue = f"{no} / {d.isoformat()}"
+    except ValueError:
+        pass
+    return {
+        "http_status": r.status_code,
+        "url": r.url,
+        "content_type": r.headers.get("content-type", ""),
+        "bytes": len(r.content),
+        "title": title,
+        "detected_issue": issue,
+        "body_sha256": hashlib.sha256(r.content).hexdigest()[:16],
+        "visible_start": " | ".join(tokens[:25]),
+    }
+
+def fetch_rmf(issue: int | None = None, timeout: int = 25) -> dict:
+    r = _request_rmf(issue=issue, timeout=timeout)
     r.raise_for_status()
 
     try:

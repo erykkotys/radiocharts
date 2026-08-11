@@ -1,6 +1,7 @@
 services:
   web:
-    image: ghcr.io/REPLACE_ME/radiocharts:0.1.0
+    image: ghcr.io/REPLACE_ME/radiocharts:latest
+    pull_policy: always
     command: streamlit run radiocharts/app.py --server.address=0.0.0.0 --server.port=8501
     restart: unless-stopped
     ports:
@@ -15,7 +16,8 @@ services:
       - /mnt/POOL/apps/radiocharts/logs:/app/logs
 
   worker:
-    image: ghcr.io/REPLACE_ME/radiocharts:0.1.0
+    image: ghcr.io/REPLACE_ME/radiocharts:latest
+    pull_policy: always
     command: python -m radiocharts.scheduler
     restart: unless-stopped
     environment:

@@ -1,8 +1,15 @@
 FROM python:3.12-slim
 
+ARG RADIOCHARTS_VERSION=dev
+ARG RADIOCHARTS_GIT_SHA=unknown
+ARG RADIOCHARTS_BUILD_DATE=unknown
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TZ=Europe/Warsaw
+    TZ=Europe/Warsaw \
+    RADIOCHARTS_VERSION=${RADIOCHARTS_VERSION} \
+    RADIOCHARTS_GIT_SHA=${RADIOCHARTS_GIT_SHA} \
+    RADIOCHARTS_BUILD_DATE=${RADIOCHARTS_BUILD_DATE}
 
 WORKDIR /app
 
@@ -16,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY radiocharts ./radiocharts
 COPY config ./config
 COPY sample_imports ./sample_imports
+COPY VERSION ./VERSION
 
 RUN mkdir -p /app/data /app/logs
 
