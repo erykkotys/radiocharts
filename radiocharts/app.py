@@ -115,9 +115,9 @@ def position_display(value) -> str:
         return "—"
 
 
-def song_link(song_id: int, title: str) -> str:
-    safe = str(title).replace("[", "\\[").replace("]", "\\]")
-    return f"[{safe}](?view=song&song={int(song_id)})"
+def song_link(song_id: int, title: str | None = None) -> str:
+    """Relative URL to the song detail view (compatible with LinkColumn)."""
+    return f"?view=song&song={int(song_id)}"
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -304,12 +304,12 @@ if view_key == "dashboard":
             view = view[~view.heard]
         view = view.reset_index(drop=True)
         view["spotify"] = [spotify_search_url(a, t) for a, t in zip(view.artist, view.title)]
-        view["title_link"] = [song_link(sid, title) for sid, title in zip(view.song_id, view.title)]
+        view["details"] = [song_link(sid) for sid in view.song_id]
         view["heard"] = view["heard"].fillna(False).astype(bool)
         view["status"] = view["status"].fillna("Nie słuchałem").astype(str)
 
         cols = [
-            "song_id", "artist", "title_link", "spotify", "heard", "status",
+            "song_id", "artist", "title", "details", "spotify", "heard", "status",
             "familiarity", "momentum", "format_fit", "recommendation",
             "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
             "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
@@ -324,7 +324,8 @@ if view_key == "dashboard":
         column_cfg.update({
             "song_id": None,
             "artist": st.column_config.TextColumn("Wykonawca", width="medium"),
-            "title_link": st.column_config.MarkdownColumn("Tytuł", width="large", help="Kliknij tytuł, aby otworzyć szczegóły."),
+            "title": st.column_config.TextColumn("Tytuł", width="large"),
+            "details": st.column_config.LinkColumn("Szczegóły", display_text="Otwórz", width="small", help="Otwórz kartę utworu."),
             "spotify": st.column_config.LinkColumn("Spotify", display_text="▶", width="small"),
             "heard": st.column_config.CheckboxColumn("✓", help="Przesłuchany", width="small"),
             "status": st.column_config.SelectboxColumn("Status", options=STATUSES, required=True, width="medium"),
@@ -362,20 +363,21 @@ if view_key == "dashboard":
             st.toast(f"Zapisano status dla {changed} utworów.")
             st.rerun()
 
-        st.caption("Tytuł otwiera szczegóły. Status i ✓ zapisują się od razu. Pozycje są z najnowszych notowań; historia służy do tygodni, peaków i trendu.")
+        st.caption("Kolumna Szczegóły otwiera kartę utworu. Status i ✓ zapisują się od razu. Pozycje są z najnowszych notowań; historia służy do tygodni, peaków i trendu.")
 
         st.subheader("🔥 Rising / do przesłuchania")
         rising = df.sort_values("momentum", ascending=False).head(12).copy()
         rising["spotify"] = [spotify_search_url(a, t) for a, t in zip(rising.artist, rising.title)]
-        rising["title_link"] = [song_link(sid, title) for sid, title in zip(rising.song_id, rising.title)]
-        rcols = ["artist", "title_link", "spotify", "familiarity", "momentum", "format_fit", "recommendation"]
+        rising["details"] = [song_link(sid) for sid in rising.song_id]
+        rcols = ["artist", "title", "details", "spotify", "familiarity", "momentum", "format_fit", "recommendation"]
         st.dataframe(
             rising[rcols],
             hide_index=True,
             use_container_width=True,
             column_config={
                 **score_columns(),
-                "title_link": st.column_config.MarkdownColumn("Tytuł", width="large"),
+                "title": st.column_config.TextColumn("Tytuł", width="large"),
+                "details": st.column_config.LinkColumn("Szczegóły", display_text="Otwórz", width="small"),
                 "spotify": st.column_config.LinkColumn("Spotify", display_text="▶", width="small"),
             },
         )
@@ -479,11 +481,11 @@ elif view_key == "archive":
         entries = pd.DataFrame(issue_entries(int(issue_id)))
         if not entries.empty:
             entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
-            entries["title_link"] = [song_link(sid, title) for sid, title in zip(entries.song_id, entries.title)]
+            entries["details"] = [song_link(sid) for sid in entries.song_id]
             for c in ["position", "previous_position", "reported_peak"]:
                 if c in entries:
                     entries[c] = entries[c].map(position_display)
-            archive_cols = ["position", "artist", "title_link", "spotify", "previous_position", "reported_weeks", "reported_peak"]
+            archive_cols = ["position", "artist", "title", "details", "spotify", "previous_position", "reported_weeks", "reported_peak"]
             archive_show = entries[archive_cols]
             st.dataframe(
                 archive_show,
@@ -491,7 +493,8 @@ elif view_key == "archive":
                 use_container_width=True,
                 column_config={
                     "position": st.column_config.TextColumn("Pozycja", width="small"),
-                    "title_link": st.column_config.MarkdownColumn("Tytuł", width="large"),
+                    "title": st.column_config.TextColumn("Tytuł", width="large"),
+                    "details": st.column_config.LinkColumn("Szczegóły", display_text="Otwórz", width="small"),
                     "spotify": st.column_config.LinkColumn("Spotify", display_text="▶", width="small"),
                     "previous_position": st.column_config.TextColumn("Poprzednio", width="small"),
                     "reported_weeks": st.column_config.NumberColumn("Tygodnie"),
