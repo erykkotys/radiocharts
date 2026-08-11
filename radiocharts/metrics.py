@@ -41,7 +41,7 @@ def _latest_sources(df: pd.DataFrame) -> dict[str, str]:
     return df.groupby("source")["chart_date"].max().to_dict()
 
 
-def _weekly_source_stats(g: pd.DataFrame, latest_date: str) -> dict:
+def _weekly_source_stats(g: pd.DataFrame, latest_date: str, source: str = "") -> dict:
     g = g.copy()
     g["date"] = pd.to_datetime(g["chart_date"])
     g["week"] = g["date"].dt.to_period("W-SUN").astype(str)
@@ -63,10 +63,10 @@ def _weekly_source_stats(g: pd.DataFrame, latest_date: str) -> dict:
     latest_position = int(latest_issue_rows.iloc[-1]["position"]) if not latest_issue_rows.empty else None
     local_peak = int(g["position"].min())
     reported_peaks = pd.to_numeric(g.get("reported_peak"), errors="coerce").dropna() if "reported_peak" in g else pd.Series(dtype=float)
+    reported_weeks = pd.to_numeric(g.get("reported_weeks"), errors="coerce").dropna() if "reported_weeks" in g else pd.Series(dtype=float)
     peak_pos = min(local_peak, int(reported_peaks.min())) if not reported_peaks.empty else local_peak
     peak = rank_score(peak_pos, size)
     local_weeks = int(weekly.shape[0])
-    reported_weeks = pd.to_numeric(g.get("reported_weeks"), errors="coerce").dropna() if "reported_weeks" in g else pd.Series(dtype=float)
     weeks = max(local_weeks, int(reported_weeks.max())) if not reported_weeks.empty else local_weeks
     weeks_top10 = int(g.assign(week=g["date"].dt.to_period("W-SUN").astype(str)).query("position <= 10")["week"].nunique())
     longevity = min(100.0, weeks / 10.0 * 100.0)
@@ -109,7 +109,7 @@ def compute_scores() -> pd.DataFrame:
     for song_id, sg in df.groupby("song_id"):
         per = {}
         for source, g in sg.groupby("source"):
-            per[source] = _weekly_source_stats(g, latest[source])
+            per[source] = _weekly_source_stats(g, latest[source], source)
 
         fam_num = mom_num = 0.0
         weight_den = max(1.0, sum(weights[s] for s in available))

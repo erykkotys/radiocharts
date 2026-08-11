@@ -383,7 +383,7 @@ def probe_olis(source: str, timeout: int = 30) -> dict:
 
     export_meta = None
     export_preview = None
-    if source == "OLIA" and (parsed_entries or 0) < 50:
+    if (parsed_entries or 0) < 50:
         export_entries, export_meta = _try_official_export(source)
         if export_entries:
             export_preview = export_entries[:5]
@@ -420,7 +420,7 @@ def fetch_olis(source: str, timeout: int = 30) -> dict:
         raise ValueError(f"Nieznane źródło: {source}")
     rendered = _render(source)
     data = parse_olis_rendered(rendered.html, rendered.text, source)
-    if len(data["entries"]) < 50 and source == "OLIA":
+    if len(data["entries"]) < 50:
         export_entries, export_meta = _try_official_export(source)
         if len(export_entries) >= 50:
             data["entries"] = export_entries

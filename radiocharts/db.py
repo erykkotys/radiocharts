@@ -62,11 +62,17 @@ CREATE TABLE IF NOT EXISTS song_notes (
 
 CREATE INDEX IF NOT EXISTS idx_issue_source_date ON chart_issues(source, chart_date);
 CREATE INDEX IF NOT EXISTS idx_entry_song ON chart_entries(song_id);
+CREATE INDEX IF NOT EXISTS idx_song_title_key ON songs(title_key);
+
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def normalize(value: str) -> str:
@@ -75,6 +81,87 @@ def normalize(value: str) -> str:
     value = value.lower().replace("&", " and ").replace("`", "'")
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def artist_anchor(value: str) -> str:
+    """Stable primary-artist key used only to reconcile cross-source credits.
+
+    Examples: ``Martin Garrix x Ed Sheeran`` and ``Martin Garrix, Ed Sheeran``
+    share the same anchor. Exact artist/title matching is always preferred.
+    """
+    raw = unicodedata.normalize("NFKD", value or "")
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch)).lower()
+    raw = raw.replace("×", " x ")
+    parts = re.split(r"\s+(?:feat\.?|ft\.?|with)\s+|\s+[xX]\s+|,|/|&", raw, maxsplit=1)
+    anchor = normalize(parts[0] if parts else raw)
+    anchor = re.sub(r"\b20\d{2}\b$", "", anchor).strip()
+    return anchor
+
+
+def _merge_duplicate_songs(con: sqlite3.Connection) -> int:
+    """One-time migration for aliases created before artist-anchor matching.
+
+    It only merges records with the same normalized title and the same primary
+    artist anchor. Existing chart history and the newest manual note/status are
+    preserved.
+    """
+    rows = con.execute(
+        """SELECT s.*, COUNT(e.id) AS entry_count
+           FROM songs s LEFT JOIN chart_entries e ON e.song_id=s.id
+           GROUP BY s.id ORDER BY s.id"""
+    ).fetchall()
+    groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        key = (str(row["title_key"]), artist_anchor(str(row["artist"])))
+        if not key[0] or not key[1]:
+            continue
+        groups.setdefault(key, []).append(row)
+
+    merged = 0
+    for variants in groups.values():
+        if len(variants) < 2:
+            continue
+        # Prefer the credit already carrying most chart history.
+        variants = sorted(variants, key=lambda r: (-int(r["entry_count"] or 0), int(r["id"])))
+        canonical = variants[0]
+        cid = int(canonical["id"])
+        ids = [int(v["id"]) for v in variants]
+
+        notes = con.execute(
+            f"SELECT * FROM song_notes WHERE song_id IN ({','.join('?' for _ in ids)}) ORDER BY updated_at DESC",
+            ids,
+        ).fetchall()
+        heard = any(bool(n["heard"]) for n in notes)
+        chosen = notes[0] if notes else None
+        note_texts = []
+        for n in notes:
+            txt = str(n["note"] or "").strip()
+            if txt and txt not in note_texts:
+                note_texts.append(txt)
+        if notes:
+            status = str(chosen["status"] or "Nie słuchałem")
+            con.execute(
+                """INSERT INTO song_notes(song_id,heard,status,note,updated_at) VALUES(?,?,?,?,?)
+                   ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,note=excluded.note,updated_at=excluded.updated_at""",
+                (cid, int(heard), status, "\n---\n".join(note_texts), chosen["updated_at"]),
+            )
+
+        for dup in variants[1:]:
+            did = int(dup["id"])
+            dup_entries = con.execute("SELECT id,issue_id FROM chart_entries WHERE song_id=?", (did,)).fetchall()
+            for ent in dup_entries:
+                conflict = con.execute(
+                    "SELECT id FROM chart_entries WHERE issue_id=? AND song_id=?",
+                    (int(ent["issue_id"]), cid),
+                ).fetchone()
+                if conflict:
+                    con.execute("DELETE FROM chart_entries WHERE id=?", (int(ent["id"]),))
+                else:
+                    con.execute("UPDATE chart_entries SET song_id=? WHERE id=?", (cid, int(ent["id"])))
+            con.execute("DELETE FROM song_notes WHERE song_id=?", (did,))
+            con.execute("DELETE FROM songs WHERE id=?", (did,))
+            merged += 1
+    return merged
 
 
 @contextmanager
@@ -122,10 +209,30 @@ def init_db() -> None:
                  AND source_url='manual seed from public chart'"""
         )
 
+        migration = con.execute("SELECT value FROM app_meta WHERE key='song_alias_merge_v1'").fetchone()
+        if not migration:
+            merged = _merge_duplicate_songs(con)
+            con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v1',?)", (str(merged),))
+
+        bb_reset = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v1'").fetchone()
+        if not bb_reset:
+            con.execute(
+                """UPDATE chart_entries
+                   SET previous_position=NULL, reported_weeks=NULL, reported_peak=NULL
+                   WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
+            )
+            con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v1','done')")
+
 
 def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release_date: str | None = None) -> int:
     akey, tkey = normalize(artist), normalize(title)
     row = con.execute("SELECT id, release_date FROM songs WHERE artist_key=? AND title_key=?", (akey, tkey)).fetchone()
+    if not row:
+        anchor = artist_anchor(artist)
+        candidates = con.execute("SELECT id,artist,release_date FROM songs WHERE title_key=?", (tkey,)).fetchall()
+        matches = [r for r in candidates if artist_anchor(str(r["artist"])) == anchor]
+        if len(matches) == 1:
+            row = matches[0]
     if row:
         if release_date and not row["release_date"]:
             con.execute("UPDATE songs SET release_date=? WHERE id=?", (release_date, row["id"]))
@@ -136,7 +243,6 @@ def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release
     )
     return int(cur.lastrowid)
 
-
 def _validated_entries(source: str, entries: Iterable[dict]) -> list[dict]:
     rows = [dict(e) for e in entries]
     seen_pos: dict[int, str] = {}
@@ -145,7 +251,7 @@ def _validated_entries(source: str, entries: Iterable[dict]) -> list[dict]:
         if "position" not in e or "artist" not in e or "title" not in e:
             raise ValueError(f"{source}: wpis bez position/artist/title: {e!r}")
         pos = int(e["position"])
-        song_key = (normalize(str(e["artist"])), normalize(str(e["title"])))
+        song_key = (artist_anchor(str(e["artist"])), normalize(str(e["title"])))
         if pos in seen_pos:
             raise ValueError(f"{source}: parser zwrócił dwie pozycje #{pos}")
         if song_key in seen_song:
@@ -202,6 +308,20 @@ def update_note(song_id: int, heard: bool, status: str, note: str) -> None:
             (song_id, int(heard), status, note, _utcnow()),
         )
 
+
+
+def db_revision() -> str:
+    """Cheap cache key that changes after chart or note mutations."""
+    init_db()
+    with connect() as con:
+        row = con.execute(
+            """SELECT
+                 COALESCE((SELECT MAX(retrieved_at) FROM chart_issues),'') AS charts,
+                 COALESCE((SELECT MAX(updated_at) FROM song_notes),'') AS notes,
+                 (SELECT COUNT(*) FROM chart_entries) AS entries,
+                 (SELECT COUNT(*) FROM songs) AS songs"""
+        ).fetchone()
+        return f"{row['charts']}|{row['notes']}|{row['entries']}|{row['songs']}"
 
 
 def list_issues(source: str | None = None, limit: int = 1000) -> list[dict]:

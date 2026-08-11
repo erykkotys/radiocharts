@@ -93,6 +93,35 @@ def _clean_artist_from_title_node(title_el) -> str | None:
     return None
 
 
+def _metric_from_labeled_container(row, label_pattern: str) -> int | None:
+    """Read a Billboard metric only when it is explicitly paired with a label.
+
+    This is intentionally conservative: anonymous numbers are ignored because
+    Billboard's responsive DOM contains duplicate/auxiliary numeric spans.
+    """
+    rx = re.compile(label_pattern, re.I)
+    for text_node in row.find_all(string=rx):
+        el = text_node.parent
+        candidates = []
+        if el is not None:
+            candidates.extend([el, el.parent])
+            li = el.find_parent("li")
+            if li is not None:
+                candidates.append(li)
+        for container in candidates:
+            if container is None:
+                continue
+            vals = [re.sub(r"\s+", " ", str(x)).strip() for x in container.stripped_strings if str(x).strip()]
+            for value in vals:
+                if rx.search(value):
+                    continue
+                if _is_int(value):
+                    return int(value)
+                if value.casefold() in {"new", "re", "re-entry", "-", "–", "—"}:
+                    return None
+    return None
+
+
 def _dom_rows(html: str) -> list[dict]:
     """Parse Billboard's actual per-song DOM rows instead of global numbers.
 
@@ -142,18 +171,20 @@ def _dom_rows(html: str) -> list[dict]:
         if rank is None:
             continue
 
-        # Within one chart row the trailing metrics are LW / Peak / Weeks.
-        # A NEW entry uses '-' instead of a numeric LW.
-        tail = tokens[title_idx + 1 :]
-        numeric = [int(x) for x in tail if _is_int(x)]
-        entry: dict = {"position": rank, "title": title, "artist": artist}
-        if len(numeric) >= 3:
-            entry["previous_position"] = numeric[-3]
-            entry["reported_peak"] = numeric[-2]
-            entry["reported_weeks"] = numeric[-1]
-        elif len(numeric) >= 2:
-            entry["reported_peak"] = numeric[-2]
-            entry["reported_weeks"] = numeric[-1]
+        # Do not infer LW/peak/weeks from anonymous numeric spans. Billboard
+        # changes their DOM ordering and this previously produced plausible but
+        # false metadata. Those fields are derived from our stored weekly
+        # history instead; current rank/title/artist remain reliable here.
+        entry = {"position": rank, "title": title, "artist": artist}
+        previous = _metric_from_labeled_container(row, r"^last\s*week$")
+        peak = _metric_from_labeled_container(row, r"^peak\s*pos\.?$")
+        weeks = _metric_from_labeled_container(row, r"^wks\s*on\s*chart$")
+        if previous is not None:
+            entry["previous_position"] = previous
+        if peak is not None:
+            entry["reported_peak"] = peak
+        if weeks is not None:
+            entry["reported_weeks"] = weeks
         entries.append(entry)
 
     # Deduplicate by rank; repeated mobile/desktop DOM variants sometimes exist.
@@ -203,12 +234,20 @@ def _parse_tokens(tokens: list[str]) -> dict:
         nums = [int(x) for x in cleaned if _is_int(x)]
         entry = {"position": pos, "title": title, "artist": artist}
         if len(nums) >= 3:
-            entry["previous_position"] = nums[-3]
-            entry["reported_peak"] = nums[-2]
-            entry["reported_weeks"] = nums[-1]
-        elif len(nums) >= 2:  # new entry: no numeric LW
-            entry["reported_peak"] = nums[-2]
-            entry["reported_weeks"] = nums[-1]
+            previous, peak, weeks = nums[-3], nums[-2], nums[-1]
+            if 1 <= previous <= 100:
+                entry["previous_position"] = previous
+            if 1 <= peak <= pos:
+                entry["reported_peak"] = peak
+            if weeks >= 1:
+                entry["reported_weeks"] = weeks
+        elif len(nums) >= 2:
+            # New/re-entry: no numeric LW. Peak and weeks are still explicit.
+            peak, weeks = nums[-2], nums[-1]
+            if 1 <= peak <= pos:
+                entry["reported_peak"] = peak
+            if weeks >= 1:
+                entry["reported_weeks"] = weeks
         entries.append(entry)
 
     if len(entries) < 25:
@@ -225,16 +264,21 @@ def _parse_tokens(tokens: list[str]) -> dict:
 
 def parse_billboard_html(html: str) -> dict:
     tokens = _tokens_from_html(html)
-    chart_date = _chart_date(tokens)
-    dom_entries = _dom_rows(html)
-    if len(dom_entries) >= 75:
-        result = _build_result(chart_date, dom_entries)
-        result["parser_mode"] = "dom_rows"
+    # Billboard's visible chart order is stable even when responsive DOM row
+    # wrappers change. Parsing the sequential rank/title/artist/LW/Peak/Weeks
+    # token stream avoids mixing auxiliary numbers from nested DOM widgets.
+    try:
+        result = _parse_tokens(tokens)
+        result["parser_mode"] = "global_tokens_v2"
         return result
-    # Fallback retained for site variants where row classes are absent.
-    result = _parse_tokens(tokens)
-    result["parser_mode"] = "global_tokens_fallback"
-    return result
+    except Exception as token_error:
+        chart_date = _chart_date(tokens)
+        dom_entries = _dom_rows(html)
+        if len(dom_entries) >= 75:
+            result = _build_result(chart_date, dom_entries)
+            result["parser_mode"] = "dom_rows_labeled_fallback"
+            return result
+        raise token_error
 
 
 def parse_billboard_text(text: str) -> dict:

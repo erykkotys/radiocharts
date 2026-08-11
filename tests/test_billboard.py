@@ -9,6 +9,7 @@ def test_billboard_shape():
     assert len(d["entries"]) == 100
     assert d["chart_date"] == "2026-08-15"
     assert d["entries"][1]["previous_position"] == 2
+    assert d["entries"][1]["reported_peak"] == 1
     assert d["entries"][1]["reported_weeks"] == 7
 
 from radiocharts.sources.billboard import parse_billboard_html
@@ -37,3 +38,14 @@ def test_billboard_dom_rows_scope_metadata():
     assert 'previous_position' not in d['entries'][1]
     assert d['entries'][1]['reported_peak'] == 2
     assert d['entries'][1]['reported_weeks'] == 12
+
+
+def test_billboard_current_sequence_keeps_weeks_42():
+    lines = ["Billboard Hot 100™", "Week of August 15, 2026", "THIS WEEK", "LAST WEEK", "PEAK POS.", "WKS ON CHART"]
+    lines += ["1", "Choosin' Texas", "Ella Langley", "1", "1", "42"]
+    for i in range(2, 101):
+        lines += [str(i), f"Song {i}", f"Artist {i}", str(max(1, i-1)), "1", "5"]
+    d = parse_billboard_text("\n".join(lines))
+    assert d["entries"][0]["reported_weeks"] == 42
+    assert d["entries"][0]["reported_peak"] == 1
+    assert d["entries"][0]["previous_position"] == 1

@@ -1,5 +1,15 @@
 # RadioCharts Research 0.1
 
+## Zmiany 0.2.1
+
+- cache agregacji i szybszy Dashboard bez Pandas Styler,
+- zakładkowa nawigacja, klikalne tytuły, status edytowany inline,
+- automatyczne scalanie aliasów tego samego utworu między źródłami,
+- poprawiony parser Billboard LW/Peak/Weeks i jednorazowe czyszczenie starych błędnych metadanych,
+- OLiS fallback do oficjalnego eksportu CSV,
+- czytelniejszy widok źródeł i historia z filtrem.
+
+
 Prototyp narzędzia do oceny **Familiarity**, **Momentum** i **Format Fit** utworów na podstawie polskich list radiowych/streamingowych.
 
 ## Wagi Familiarity
