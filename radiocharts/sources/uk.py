@@ -16,7 +16,7 @@ HEADERS = {
     "Accept-Language": "en-GB,en;q=0.9",
 }
 DATE_RE = re.compile(r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*-\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})")
-NUMBER_RE = re.compile(r"^Number\s+(\d{1,3})$", re.I)
+NUMBER_INLINE_RE = re.compile(r"^Number\s+(\d{1,3})$", re.I)
 
 
 def _tokens(html: str) -> list[str]:
@@ -25,7 +25,7 @@ def _tokens(html: str) -> list[str]:
 
 
 def _date_range(tokens: list[str]) -> tuple[str, str]:
-    joined = " ".join(tokens[:300])
+    joined = " ".join(tokens[:400])
     m = DATE_RE.search(joined)
     if not m:
         raise ValueError("UK: nie znaleziono zakresu dat notowania")
@@ -34,39 +34,62 @@ def _date_range(tokens: list[str]) -> tuple[str, str]:
     return start, end
 
 
-def parse_uk(html: str) -> dict:
-    tokens = _tokens(html)
-    start_date, end_date = _date_range(tokens)
-    markers: list[tuple[int, int]] = []
-    for idx, token in enumerate(tokens):
-        m = NUMBER_RE.match(token)
+def _markers(tokens: list[str]) -> list[tuple[int, int, int]]:
+    """Return (position, marker_index, content_start).
+
+    Official Charts currently renders either `Number 1` as one text node or
+    `Number`, `1` as two consecutive text nodes depending on HTML parsing.
+    """
+    out: list[tuple[int, int, int]] = []
+    for i, token in enumerate(tokens):
+        m = NUMBER_INLINE_RE.fullmatch(token)
         if m:
             pos = int(m.group(1))
             if 1 <= pos <= 100:
-                markers.append((pos, idx))
-    # Deduplicate and keep first monotonically ordered chart sequence.
-    selected: list[tuple[int, int]] = []
+                out.append((pos, i, i + 1))
+            continue
+        if token.casefold() == "number" and i + 1 < len(tokens) and re.fullmatch(r"\d{1,3}", tokens[i + 1]):
+            pos = int(tokens[i + 1])
+            if 1 <= pos <= 100:
+                out.append((pos, i, i + 2))
+    return out
+
+
+def parse_uk(html: str) -> dict:
+    tokens = _tokens(html)
+    start_date, end_date = _date_range(tokens)
+    markers = _markers(tokens)
+
+    selected: list[tuple[int, int, int]] = []
     cursor = -1
     for expected in range(1, 101):
-        candidates = [(p, i) for p, i in markers if p == expected and i > cursor]
+        candidates = [m for m in markers if m[0] == expected and m[1] > cursor]
         if not candidates:
             break
-        p, i = candidates[0]
-        selected.append((p, i))
-        cursor = i
+        marker = candidates[0]
+        selected.append(marker)
+        cursor = marker[1]
 
     entries: list[dict] = []
-    for n, (pos, idx) in enumerate(selected):
-        end = selected[n + 1][1] if n + 1 < len(selected) else min(len(tokens), idx + 30)
-        block = tokens[idx + 1 : end]
-        if len(block) < 2:
+    for n, (pos, marker_idx, content_start) in enumerate(selected):
+        end = selected[n + 1][1] if n + 1 < len(selected) else min(len(tokens), content_start + 40)
+        block = tokens[content_start:end]
+        if not block:
             continue
-        title, artist = block[0], block[1]
+
+        # Metadata begins at LW:. Everything before it is title/artist plus
+        # optional badges such as New/Re-entry.
+        meta_idx = next((i for i, x in enumerate(block) if x.casefold().startswith("lw:")), len(block))
+        head = [x for x in block[:meta_idx] if x not in {",", "New", "Re-entry", "Re-Entry"}]
+        if len(head) < 2:
+            continue
+        title, artist = head[0], head[1]
+
         joined = " ".join(block)
-        lw_m = re.search(r"\bLW:\s*(\d+|-)\b", joined, re.I)
-        peak_m = re.search(r"\bPeak:\s*(\d+)\b", joined, re.I)
-        weeks_m = re.search(r"\bWeeks:\s*(\d+)\b", joined, re.I)
-        entry = {"position": pos, "title": title, "artist": artist}
+        lw_m = re.search(r"\bLW:\s*(\d+|New|-)", joined, re.I)
+        peak_m = re.search(r"\bPeak:\s*(\d+)", joined, re.I)
+        weeks_m = re.search(r"\bWeeks:\s*(\d+)", joined, re.I)
+        entry: dict = {"position": pos, "title": title, "artist": artist}
         if lw_m and lw_m.group(1).isdigit():
             entry["previous_position"] = int(lw_m.group(1))
         if peak_m:
@@ -75,7 +98,7 @@ def parse_uk(html: str) -> dict:
             entry["reported_weeks"] = int(weeks_m.group(1))
         entries.append(entry)
 
-    if len(entries) < 40:
+    if len(entries) < 75:
         raise ValueError(f"UK: parser odczytał tylko {len(entries)} pozycji")
     return {
         "source": "UK",
@@ -116,5 +139,5 @@ def probe_uk(timeout: int = 35) -> dict:
         "preview": preview,
         "parse_error": error,
         "body_sha256": hashlib.sha256(r.content).hexdigest()[:16],
-        "visible_start": " | ".join(_tokens(r.text)[:100]),
+        "visible_start": " | ".join(_tokens(r.text)[:140]),
     }

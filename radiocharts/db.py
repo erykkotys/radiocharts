@@ -85,6 +85,10 @@ def connect():
     con.execute("PRAGMA foreign_keys=ON")
     try:
         yield con
+    except Exception:
+        con.rollback()
+        raise
+    else:
         con.commit()
     finally:
         con.close()
@@ -99,6 +103,16 @@ def init_db() -> None:
             con.execute("ALTER TABLE chart_entries ADD COLUMN reported_weeks INTEGER")
         if "reported_peak" not in cols:
             con.execute("ALTER TABLE chart_entries ADD COLUMN reported_peak INTEGER")
+
+        # Remove incomplete 100-position issues left by early experimental
+        # parsers / failed pre-0.1.9 transactions. They would otherwise make
+        # coverage look complete and distort scores until a valid issue lands.
+        con.execute(
+            """DELETE FROM chart_issues
+               WHERE source IN ('OLIA','OLIS','UK','BILLBOARD')
+                 AND chart_size >= 50
+                 AND (SELECT COUNT(*) FROM chart_entries e WHERE e.issue_id=chart_issues.id) < 50"""
+        )
 
 
 def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release_date: str | None = None) -> int:
@@ -115,7 +129,29 @@ def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release
     return int(cur.lastrowid)
 
 
+def _validated_entries(source: str, entries: Iterable[dict]) -> list[dict]:
+    rows = [dict(e) for e in entries]
+    seen_pos: dict[int, str] = {}
+    seen_song: dict[tuple[str, str], int] = {}
+    for e in rows:
+        if "position" not in e or "artist" not in e or "title" not in e:
+            raise ValueError(f"{source}: wpis bez position/artist/title: {e!r}")
+        pos = int(e["position"])
+        song_key = (normalize(str(e["artist"])), normalize(str(e["title"])))
+        if pos in seen_pos:
+            raise ValueError(f"{source}: parser zwrócił dwie pozycje #{pos}")
+        if song_key in seen_song:
+            raise ValueError(
+                f"{source}: parser zwrócił ten sam utwór na pozycjach "
+                f"#{seen_song[song_key]} i #{pos}: {e['artist']} — {e['title']}"
+            )
+        seen_pos[pos] = f"{e['artist']} — {e['title']}"
+        seen_song[song_key] = pos
+    return rows
+
+
 def upsert_issue(source: str, chart_date: str | date, issue_key: str, chart_size: int, entries: Iterable[dict], source_url: str | None = None) -> int:
+    entries = _validated_entries(source.upper(), entries)
     init_db()
     chart_date = chart_date.isoformat() if isinstance(chart_date, date) else str(chart_date)
     source = source.upper()

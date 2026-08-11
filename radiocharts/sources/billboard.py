@@ -69,6 +69,111 @@ def _rank_marker(tokens: list[str], idx: int, expected: int) -> bool:
     return not _is_int(tokens[j]) and tokens[j] not in {"-", "–", "—"}
 
 
+
+def _clean_artist_from_title_node(title_el) -> str | None:
+    # Billboard places artist in the same chart-result <li> as the h3 title.
+    container = title_el.find_parent("li") or title_el.parent
+    if container is None:
+        return None
+    values = [re.sub(r"\s+", " ", x).strip() for x in container.stripped_strings if str(x).strip()]
+    title = re.sub(r"\s+", " ", title_el.get_text(" ", strip=True)).strip()
+    skipped_title = False
+    for value in values:
+        if not skipped_title and value == title:
+            skipped_title = True
+            continue
+        if not skipped_title:
+            continue
+        low = value.casefold()
+        if low in NOISE or low in {"-", "–", "—"} or _is_int(value):
+            continue
+        if low.startswith(("last week", "peak pos", "wks on chart")):
+            continue
+        return value
+    return None
+
+
+def _dom_rows(html: str) -> list[dict]:
+    """Parse Billboard's actual per-song DOM rows instead of global numbers.
+
+    The previous global-token parser could accidentally attach numbers from
+    unrelated widgets to a song. Scoping metadata to each chart row avoids
+    that and prevents duplicate-song DB collisions.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    entries: list[dict] = []
+    for title_el in soup.select("h3#title-of-a-story"):
+        title = re.sub(r"\s+", " ", title_el.get_text(" ", strip=True)).strip()
+        if not title:
+            continue
+        artist = _clean_artist_from_title_node(title_el)
+        if not artist:
+            continue
+
+        row = title_el.find_parent("div", class_=lambda c: c and "o-chart-results-list-row-container" in str(c))
+        if row is None:
+            row = title_el.find_parent("ul", class_=lambda c: c and "o-chart-results-list-row" in str(c))
+        if row is None:
+            # Last-resort small ancestor that contains chart metric labels.
+            for parent in title_el.parents:
+                if getattr(parent, "name", None) not in {"div", "ul", "li"}:
+                    continue
+                txt = re.sub(r"\s+", " ", parent.get_text(" ", strip=True)).casefold()
+                if "peak pos" in txt and "wks on chart" in txt:
+                    row = parent
+                    break
+        if row is None:
+            continue
+
+        tokens = [re.sub(r"\s+", " ", x).strip() for x in row.stripped_strings if str(x).strip()]
+        try:
+            title_idx = tokens.index(title)
+        except ValueError:
+            title_idx = 0
+
+        # Current rank is a numeric token before the title.
+        rank = None
+        for tok in tokens[: title_idx + 1]:
+            if _is_int(tok):
+                n = int(tok)
+                if 1 <= n <= 100:
+                    rank = n
+                    break
+        if rank is None:
+            continue
+
+        # Within one chart row the trailing metrics are LW / Peak / Weeks.
+        # A NEW entry uses '-' instead of a numeric LW.
+        tail = tokens[title_idx + 1 :]
+        numeric = [int(x) for x in tail if _is_int(x)]
+        entry: dict = {"position": rank, "title": title, "artist": artist}
+        if len(numeric) >= 3:
+            entry["previous_position"] = numeric[-3]
+            entry["reported_peak"] = numeric[-2]
+            entry["reported_weeks"] = numeric[-1]
+        elif len(numeric) >= 2:
+            entry["reported_peak"] = numeric[-2]
+            entry["reported_weeks"] = numeric[-1]
+        entries.append(entry)
+
+    # Deduplicate by rank; repeated mobile/desktop DOM variants sometimes exist.
+    by_pos: dict[int, dict] = {}
+    for e in entries:
+        by_pos.setdefault(int(e["position"]), e)
+    return [by_pos[p] for p in sorted(by_pos)]
+
+
+def _build_result(chart_date: str, entries: list[dict]) -> dict:
+    return {
+        "source": "BILLBOARD",
+        "chart_date": chart_date,
+        "issue_key": chart_date,
+        "chart_size": 100,
+        "entries": entries,
+        "source_url": URL,
+    }
+
+
 def _parse_tokens(tokens: list[str]) -> dict:
     chart_date = _chart_date(tokens)
     start = _find_start(tokens)
@@ -119,7 +224,17 @@ def _parse_tokens(tokens: list[str]) -> dict:
 
 
 def parse_billboard_html(html: str) -> dict:
-    return _parse_tokens(_tokens_from_html(html))
+    tokens = _tokens_from_html(html)
+    chart_date = _chart_date(tokens)
+    dom_entries = _dom_rows(html)
+    if len(dom_entries) >= 75:
+        result = _build_result(chart_date, dom_entries)
+        result["parser_mode"] = "dom_rows"
+        return result
+    # Fallback retained for site variants where row classes are absent.
+    result = _parse_tokens(tokens)
+    result["parser_mode"] = "global_tokens_fallback"
+    return result
 
 
 def parse_billboard_text(text: str) -> dict:
@@ -152,6 +267,7 @@ def probe_billboard(timeout: int = 35) -> dict:
     raw_status = raw_bytes = None
     raw_error = rendered_error = None
     raw_preview = rendered_preview = None
+    raw_parser_mode = rendered_parser_mode = None
     raw_sha = None
     try:
         r = requests.get(URL, headers=HEADERS, timeout=timeout, allow_redirects=True)
@@ -161,6 +277,7 @@ def probe_billboard(timeout: int = 35) -> dict:
         r.raise_for_status()
         d = parse_billboard_html(r.text)
         raw_preview = d["entries"][:5]
+        raw_parser_mode = d.get("parser_mode")
     except Exception as exc:
         raw_error = f"{type(exc).__name__}: {exc}"
     if raw_preview is None:
@@ -168,6 +285,7 @@ def probe_billboard(timeout: int = 35) -> dict:
             rendered = render_page(URL, auto_scroll=True, settle_ms=3500)
             d = parse_billboard_text(rendered.text)
             rendered_preview = d["entries"][:5]
+            rendered_parser_mode = d.get("parser_mode", "rendered_global_tokens")
         except Exception as exc:
             rendered_error = f"{type(exc).__name__}: {exc}"
     return {
@@ -175,8 +293,10 @@ def probe_billboard(timeout: int = 35) -> dict:
         "http_status": raw_status,
         "bytes": raw_bytes,
         "raw_preview": raw_preview,
+        "raw_parser_mode": raw_parser_mode,
         "raw_error": raw_error,
         "rendered_preview": rendered_preview,
+        "rendered_parser_mode": rendered_parser_mode,
         "rendered_error": rendered_error,
         "body_sha256": raw_sha,
     }

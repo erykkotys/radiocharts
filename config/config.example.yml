@@ -9,7 +9,7 @@ sources:
     url: https://www.rmf.fm/poplista.html
     chart_size: 20
   zet:
-    enabled: false
+    enabled: true
     mode: manual_import
   olia:
     enabled: true

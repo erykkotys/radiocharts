@@ -195,3 +195,16 @@ def test_parse_rendered_olis_live_shape():
     assert data["entries"][1]["reported_weeks"] == 19
     assert data["entries"][3]["title"] == "Dai Dai"
     assert data["entries"][3]["reported_peak"] == 4
+
+from radiocharts.sources.olis import _parse_export_csv
+
+
+def test_olia_official_csv_export_shape():
+    rows = ["POZYCJA;TYTUŁ;WYKONAWCA;TYGODNIE NA DANEJ LIŚCIE;NAJWYŻSZA POZYCJA NA LIŚCIE"]
+    for i in range(1, 101):
+        rows.append(f"{i};Song {i};Artist {i};{i};1")
+    entries = _parse_export_csv("\n".join(rows).encode("utf-8"))
+    assert len(entries) == 100
+    assert entries[0]['position'] == 1
+    assert entries[0]['reported_weeks'] == 1
+    assert entries[-1]['position'] == 100

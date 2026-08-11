@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime
-from io import StringIO
+from io import BytesIO, StringIO
 
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from radiocharts.sources.browser import render_page
+from radiocharts.sources.browser import download_by_text, render_page
 
 URLS = {
     "OLIA": "https://www.olis.pl/charts/oficjalna-lista-airplay",
@@ -260,6 +260,89 @@ def parse_olis_rendered(html: str, text: str, source: str) -> dict:
     }
 
 
+
+
+def _decode_export(content: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8", "cp1250", "latin-1"):
+        try:
+            return content.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _parse_export_csv(content: bytes) -> list[dict]:
+    """Parse the official OLiA/OLiS CSV export using tolerant column aliases."""
+    text = _decode_export(content)
+    candidates: list[pd.DataFrame] = []
+    # Auto-sniff delimiter first; then common Polish CSV delimiters.
+    for kwargs in (
+        {"sep": None, "engine": "python"},
+        {"sep": ";", "engine": "python"},
+        {"sep": ",", "engine": "python"},
+        {"sep": "\t", "engine": "python"},
+    ):
+        try:
+            df = pd.read_csv(StringIO(text), **kwargs)
+            if not df.empty:
+                candidates.append(_flatten_columns(df))
+        except Exception:
+            pass
+    for df in candidates:
+        pos_col = _find_col(df.columns, ("pozycja", "miejsce", "position", "rank", "lp"))
+        title_col = _find_col(df.columns, ("tytul", "tytuł", "title"))
+        artist_col = _find_col(df.columns, ("wykonawca", "artist"))
+        if pos_col is None or title_col is None or artist_col is None:
+            continue
+        weeks_col = _find_col(df.columns, ("tygodnie", "weeks"))
+        peak_col = _find_col(df.columns, ("najwyzsza", "najwyższa", "peak"))
+        prev_col = _find_col(df.columns, ("poprzednia", "previous", "last week", "lw"))
+        entries: list[dict] = []
+        for _, row in df.iterrows():
+            m = re.search(r"\b(\d{1,3})\b", str(row.get(pos_col, "")))
+            if not m:
+                continue
+            pos = int(m.group(1))
+            if not 1 <= pos <= 100:
+                continue
+            title = str(row.get(title_col, "")).strip()
+            artist = str(row.get(artist_col, "")).strip()
+            if not title or title.lower() == "nan" or not artist or artist.lower() == "nan":
+                continue
+            e: dict = {"position": pos, "artist": artist, "title": title}
+            for col, key in ((weeks_col, "reported_weeks"), (peak_col, "reported_peak"), (prev_col, "previous_position")):
+                if col is None:
+                    continue
+                mm = re.search(r"\b(\d{1,3})\b", str(row.get(col, "")))
+                if mm:
+                    e[key] = int(mm.group(1))
+            entries.append(e)
+        by_pos = {e["position"]: e for e in entries}
+        if len(by_pos) >= 10:
+            return [by_pos[p] for p in sorted(by_pos)]
+    return []
+
+
+def _try_official_export(source: str) -> tuple[list[dict], dict]:
+    """Try the official CSV export exposed by OLiA/OLiS."""
+    meta: dict = {"attempted": True}
+    try:
+        exported = download_by_text(URLS[source.upper()], labels=("CSV",))
+        meta.update({
+            "filename": exported.filename,
+            "bytes": len(exported.content),
+            "via": exported.via,
+            "url": exported.url,
+            "head": _decode_export(exported.content)[:700],
+        })
+        entries = _parse_export_csv(exported.content)
+        meta["parsed_entries"] = len(entries)
+        return entries, meta
+    except Exception as exc:
+        meta["error"] = f"{type(exc).__name__}: {exc}"
+        return [], meta
+
+
 def _request(source: str, timeout: int = 30):
     source = source.upper()
     if source not in URLS:
@@ -298,6 +381,13 @@ def probe_olis(source: str, timeout: int = 30) -> dict:
     except Exception as exc:
         parse_error = f"{type(exc).__name__}: {exc}"
 
+    export_meta = None
+    export_preview = None
+    if source == "OLIA" and (parsed_entries or 0) < 50:
+        export_entries, export_meta = _try_official_export(source)
+        if export_entries:
+            export_preview = export_entries[:5]
+
     return {
         "source": source,
         "http_status": r.status_code,
@@ -314,6 +404,8 @@ def probe_olis(source: str, timeout: int = 30) -> dict:
         "parsed_entries": parsed_entries,
         "parser_mode": parser_mode,
         "preview": preview,
+        "export": export_meta,
+        "export_preview": export_preview,
         "parse_error": parse_error,
         "body_sha256": hashlib.sha256(r.content).hexdigest()[:16],
         "raw_visible_start": raw_visible[:350],
@@ -328,7 +420,16 @@ def fetch_olis(source: str, timeout: int = 30) -> dict:
         raise ValueError(f"Nieznane źródło: {source}")
     rendered = _render(source)
     data = parse_olis_rendered(rendered.html, rendered.text, source)
+    if len(data["entries"]) < 50 and source == "OLIA":
+        export_entries, export_meta = _try_official_export(source)
+        if len(export_entries) >= 50:
+            data["entries"] = export_entries
+            data["parser_mode"] = "official_csv_export"
+            data["export_meta"] = export_meta
     if len(data["entries"]) < 50:
-        raise ValueError(f"Parser {source} odczytał tylko {len(data['entries'])} pozycji po kliknięciu pełnej listy")
+        raise ValueError(
+            f"Parser {source} odczytał tylko {len(data['entries'])} pozycji; "
+            f"pełna lista nie została pobrana"
+        )
     data["source_url"] = rendered.url
     return data
