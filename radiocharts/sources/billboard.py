@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -241,10 +241,15 @@ def parse_billboard_text(text: str) -> dict:
     return _parse_tokens(_tokens_from_text(text))
 
 
-def fetch_billboard(timeout: int = 35) -> dict:
+def fetch_billboard(chart_date: str | date | None = None, timeout: int = 35) -> dict:
+    if chart_date is None:
+        url = URL
+    else:
+        d = date.fromisoformat(chart_date) if isinstance(chart_date, str) else chart_date
+        url = f"{URL}{d.isoformat()}/"
     raw_error = None
     try:
-        r = requests.get(URL, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
         r.raise_for_status()
         data = parse_billboard_html(r.text)
         data["source_url"] = r.url
@@ -252,7 +257,7 @@ def fetch_billboard(timeout: int = 35) -> dict:
     except Exception as exc:
         raw_error = exc
     try:
-        rendered = render_page(URL, auto_scroll=True, settle_ms=3500)
+        rendered = render_page(url, auto_scroll=True, settle_ms=3500)
         data = parse_billboard_text(rendered.text)
         data["source_url"] = rendered.url
         return data

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date, timedelta
 import time
 from pathlib import Path
 from typing import Callable
@@ -92,6 +93,48 @@ def backfill_rmf(
             if progress_callback:
                 progress_callback(idx, len(issues), msg)
             if issue != issues[-1] and pause_seconds > 0:
+                time.sleep(pause_seconds)
+    return messages
+
+
+
+def backfill_weekly_source(
+    source: str,
+    count: int = 26,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    pause_seconds: float = 0.35,
+) -> list[str]:
+    """Backfill stable weekly archives for UK or Billboard.
+
+    OLiA/OLiS/ESKA need separate archive navigation logic and are intentionally
+    not routed through this helper yet.
+    """
+    source = source.upper()
+    if source not in {"UK", "BILLBOARD"}:
+        raise ValueError("Backfill tygodniowy obsługuje obecnie UK i BILLBOARD")
+    count = max(1, min(int(count), 260))
+    current = fetch_uk() if source == "UK" else fetch_billboard()
+    if source == "UK":
+        start = date.fromisoformat(str(current["issue_key"]).split("_")[0])
+        fetcher = fetch_uk
+    else:
+        start = date.fromisoformat(str(current["chart_date"]))
+        fetcher = fetch_billboard
+
+    messages: list[str] = []
+    with FileLock(str(LOCK_PATH), timeout=1):
+        for idx in range(count):
+            target = start - timedelta(days=7 * idx)
+            try:
+                data = current if idx == 0 else fetcher(target)
+                store(data)
+                msg = f"{source} {target.isoformat()}: OK ({data['chart_date']})"
+            except Exception as exc:
+                msg = f"{source} {target.isoformat()}: {type(exc).__name__}: {exc}"
+            messages.append(msg)
+            if progress_callback:
+                progress_callback(idx + 1, count, msg)
+            if idx + 1 < count and pause_seconds > 0:
                 time.sleep(pause_seconds)
     return messages
 

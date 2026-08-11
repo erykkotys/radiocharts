@@ -113,6 +113,14 @@ def init_db() -> None:
                  AND chart_size >= 50
                  AND (SELECT COUNT(*) FROM chart_entries e WHERE e.issue_id=chart_issues.id) < 50"""
         )
+        # Remove the one ZET demonstration issue used by early MVP builds.
+        # RMF demo issue 6180 shares the real RMF issue key and has already been
+        # replaced by the real backfill/current collector.
+        con.execute(
+            """DELETE FROM chart_issues
+               WHERE source='ZET' AND issue_key='ZET-2026-08-06'
+                 AND source_url='manual seed from public chart'"""
+        )
 
 
 def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release_date: str | None = None) -> int:
@@ -193,6 +201,47 @@ def update_note(song_id: int, heard: bool, status: str, note: str) -> None:
                ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,note=excluded.note,updated_at=excluded.updated_at""",
             (song_id, int(heard), status, note, _utcnow()),
         )
+
+
+
+def list_issues(source: str | None = None, limit: int = 1000) -> list[dict]:
+    """Return stored chart issues newest first for archive browsing."""
+    init_db()
+    limit = max(1, min(int(limit), 5000))
+    with connect() as con:
+        if source and source.upper() != "ALL":
+            rows = con.execute(
+                """SELECT i.id,i.source,i.chart_date,i.issue_key,i.chart_size,i.source_url,i.retrieved_at,
+                          COUNT(e.id) AS entries
+                   FROM chart_issues i LEFT JOIN chart_entries e ON e.issue_id=i.id
+                   WHERE i.source=?
+                   GROUP BY i.id
+                   ORDER BY i.chart_date DESC,i.id DESC LIMIT ?""",
+                (source.upper(), limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                """SELECT i.id,i.source,i.chart_date,i.issue_key,i.chart_size,i.source_url,i.retrieved_at,
+                          COUNT(e.id) AS entries
+                   FROM chart_issues i LEFT JOIN chart_entries e ON e.issue_id=i.id
+                   GROUP BY i.id
+                   ORDER BY i.chart_date DESC,i.source,i.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def issue_entries(issue_id: int) -> list[dict]:
+    """Return one archived chart issue in rank order."""
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """SELECT e.position,s.artist,s.title,e.previous_position,e.reported_weeks,e.reported_peak,s.id AS song_id
+               FROM chart_entries e JOIN songs s ON s.id=e.song_id
+               WHERE e.issue_id=? ORDER BY e.position""",
+            (int(issue_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def latest_issues() -> list[dict]:

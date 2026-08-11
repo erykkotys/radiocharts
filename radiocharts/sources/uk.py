@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -110,8 +110,13 @@ def parse_uk(html: str) -> dict:
     }
 
 
-def fetch_uk(timeout: int = 35) -> dict:
-    r = requests.get(URL, headers=HEADERS, timeout=timeout, allow_redirects=True)
+def fetch_uk(start_date: str | date | None = None, timeout: int = 35) -> dict:
+    if start_date is None:
+        url = URL
+    else:
+        d = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+        url = f"{URL}{d.strftime('%Y%m%d')}/"
+    r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
     r.raise_for_status()
     data = parse_uk(r.text)
     data["source_url"] = r.url

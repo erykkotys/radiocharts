@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 from datetime import date
+from urllib.parse import quote
 
 import pandas as pd
 import plotly.express as px
@@ -10,10 +11,9 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from radiocharts.build_info import BUILD_DATE, display_version
-from radiocharts.collector import backfill_rmf, collect_current
-from radiocharts.db import DB_PATH, init_db, latest_issues, update_note, upsert_issue
+from radiocharts.collector import backfill_rmf, backfill_weekly_source, collect_current
+from radiocharts.db import DB_PATH, init_db, issue_entries, latest_issues, list_issues, update_note, upsert_issue
 from radiocharts.metrics import compute_scores, song_history
-from radiocharts.seed_demo import seed
 from radiocharts.sources.eska import probe_eska
 from radiocharts.sources.uk import probe_uk
 from radiocharts.sources.billboard import probe_billboard
@@ -171,6 +171,33 @@ with st.sidebar:
         if "backfill_result" in st.session_state:
             copyable_json(st.session_state["backfill_result"], "backfill")
 
+    with st.expander("Backfill UK / Billboard"):
+        st.caption("Pobiera archiwalne tygodnie z publicznych, stabilnych adresów historycznych. OLiA/OLiS/ESKA dostaną osobny backfill po dopracowaniu nawigacji ich archiwów.")
+        weekly_sources = st.multiselect("Źródła", ["UK", "BILLBOARD"], default=["UK", "BILLBOARD"], key="weekly_backfill_sources")
+        weekly_count = st.number_input("Liczba tygodni", min_value=2, max_value=104, value=26, step=1, key="weekly_backfill_count")
+        if st.button("Pobierz historię UK/Billboard", use_container_width=True):
+            results = {}
+            for src in weekly_sources:
+                bar = st.progress(0.0, text=f"{src}: start...")
+                last = st.empty()
+                def _weekly_progress(done: int, total: int, message: str, _src=src):
+                    bar.progress(done / total, text=f"{_src} {done}/{total}")
+                    last.caption(message)
+                try:
+                    msgs = backfill_weekly_source(src, int(weekly_count), progress_callback=_weekly_progress)
+                    results[src] = {
+                        "requested": int(weekly_count),
+                        "ok": sum(": OK" in x for x in msgs),
+                        "errors": [x for x in msgs if ": OK" not in x],
+                        "last_messages": msgs[-12:],
+                    }
+                except Exception as exc:
+                    results[src] = {"error": f"{type(exc).__name__}: {exc}"}
+            st.session_state["weekly_backfill_result"] = results
+            st.rerun()
+        if "weekly_backfill_result" in st.session_state:
+            copyable_json(st.session_state["weekly_backfill_result"], "weekly-backfill")
+
     with st.expander("Diagnostyka źródeł"):
         diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
         if st.button("Sprawdź odpowiedź", use_container_width=True):
@@ -203,71 +230,158 @@ with st.sidebar:
             for item in issues:
                 st.caption(f"**{item['source']}** · {item['chart_date']} · {item['entries']} pozycji")
 
-    if st.button("Załaduj dane demonstracyjne RMF+ZET", use_container_width=True):
-        seed()
-        st.success("Załadowano.")
-        st.rerun()
-
     st.divider()
     st.markdown("**Wagi Familiarity**")
     st.text("OLiA 30%\nRMF 25%\nZET 20%\nOLiS 15%\nESKA 10%")
 
 
-df = compute_scores()
-tab_dash, tab_song, tab_import, tab_about = st.tabs(["Dashboard", "Utwór", "Import", "Metodologia"])
 
-with tab_dash:
+df = compute_scores()
+STATUSES = ["Nie słuchałem", "Ignore", "Watch", "Candidate", "Current", "Current Familiar", "Recurrent"]
+
+
+def spotify_search_url(artist: str, title: str) -> str:
+    query = quote(f"{artist} {title}", safe="")
+    return f"https://open.spotify.com/search/{query}"
+
+
+def open_song(song_id: int) -> None:
+    # Query-param handoff lets us change the navigation widget on the next run
+    # without mutating an already-instantiated Streamlit widget.
+    st.query_params["song"] = str(int(song_id))
+    st.rerun()
+
+
+requested_song = st.query_params.get("song")
+if requested_song:
+    try:
+        st.session_state["selected_song_id"] = int(requested_song)
+        st.session_state["main_view"] = "Utwór"
+    except (TypeError, ValueError):
+        pass
+    try:
+        del st.query_params["song"]
+    except Exception:
+        pass
+
+views = ["Dashboard", "Utwór", "Archiwum", "Import", "Metodologia"]
+if st.session_state.get("main_view") not in views:
+    st.session_state["main_view"] = "Dashboard"
+view_name = st.radio("Widok", views, horizontal=True, key="main_view", label_visibility="collapsed")
+st.divider()
+
+
+if view_name == "Dashboard":
     if df.empty:
-        st.info("Baza jest pusta. Kliknij po lewej „Pobierz dane teraz” albo załaduj dane demonstracyjne.")
+        st.info("Baza jest pusta. Kliknij po lewej „Pobierz dane teraz”.")
     else:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Utwory", len(df))
         c2.metric("Current Familiar ≥70%", int((df.familiarity >= 70).sum()))
         c3.metric("Rising ≥65%", int((df.momentum >= 65).sum()))
         c4.metric("Pokrycie źródeł", f"{df.coverage.max():.0f}%")
-        st.caption("Pokrycie to suma wag źródeł, które mają już dane. Score jest normalizowany do dostępnych źródeł.")
+        st.caption("Pozycja źródła pokazuje tylko najnowsze notowanie. Historia nadal liczy tygodnie, peak, momentum i familiarity.")
 
         colf1, colf2, colf3 = st.columns(3)
         min_fam = colf1.slider("Min. Familiarity", 0, 100, 0, format="%d%%")
         min_mom = colf2.slider("Min. Momentum", 0, 100, 0, format="%d%%")
         only_unheard = colf3.checkbox("Tylko nieprzesłuchane")
-        view = df[(df.familiarity >= min_fam) & (df.momentum >= min_mom)]
+        view = df[(df.familiarity >= min_fam) & (df.momentum >= min_mom)].copy()
         if only_unheard:
             view = view[~view.heard]
+        view = view.reset_index(drop=True)
+        view["spotify"] = [spotify_search_url(a, t) for a, t in zip(view.artist, view.title)]
 
         cols = [
-            "artist", "title", "familiarity", "momentum", "format_fit", "recommendation",
+            "song_id", "artist", "title", "spotify", "familiarity", "momentum", "format_fit", "recommendation",
             "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
             "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
             "UK_pos", "UK_weeks", "BILLBOARD_pos", "BILLBOARD_weeks", "status",
         ]
-        show = view[[c for c in cols if c in view.columns]]
+        show = view[[c for c in cols if c in view.columns]].copy()
         pos_cols = [c for c in show.columns if c.endswith("_pos")]
-        st.dataframe(
+        column_cfg = score_columns()
+        column_cfg.update({
+            "song_id": None,
+            "spotify": st.column_config.LinkColumn("Spotify", display_text="▶ Spotify"),
+            "status": st.column_config.TextColumn("Mój status"),
+        })
+        st.caption("Kliknij dowolny wiersz, aby otworzyć szczegóły utworu.")
+        event = st.dataframe(
             sortable_positions(show, pos_cols),
             hide_index=True,
             use_container_width=True,
-            column_config=score_columns(),
+            column_config=column_cfg,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="dashboard_song_table",
         )
+        selected_rows = getattr(getattr(event, "selection", None), "rows", [])
+        if selected_rows:
+            idx = int(selected_rows[0])
+            if 0 <= idx < len(view):
+                open_song(int(view.iloc[idx]["song_id"]))
+
+        with st.expander("✏️ Szybka zmiana statusów", expanded=False):
+            st.caption("Status i znacznik „przesłuchany” możesz edytować bez wchodzenia w kartę utworu. Notatki pozostają bez zmian.")
+            quick = view[["song_id", "artist", "title", "heard", "status"]].copy()
+            edited = st.data_editor(
+                quick,
+                hide_index=True,
+                use_container_width=True,
+                disabled=["artist", "title"],
+                column_config={
+                    "song_id": None,
+                    "heard": st.column_config.CheckboxColumn("Przesłuchany"),
+                    "status": st.column_config.SelectboxColumn("Status", options=STATUSES, required=True),
+                },
+                key="quick_status_editor",
+            )
+            if st.button("Zapisz zmiany statusów", type="primary"):
+                notes_by_id = df.set_index("song_id")["note"].to_dict()
+                changed = 0
+                original = quick.set_index("song_id")
+                for r in edited.itertuples(index=False):
+                    sid = int(r.song_id)
+                    before = original.loc[sid]
+                    if bool(r.heard) != bool(before.heard) or str(r.status) != str(before.status):
+                        update_note(sid, bool(r.heard), str(r.status), str(notes_by_id.get(sid, "") or ""))
+                        changed += 1
+                st.success(f"Zapisano zmiany dla {changed} utworów.")
+                st.rerun()
 
         st.subheader("🔥 Rising / do przesłuchania")
-        rising = df.sort_values("momentum", ascending=False).head(12)
-        rcols = ["artist", "title", "familiarity", "momentum", "format_fit", "recommendation"]
+        rising = df.sort_values("momentum", ascending=False).head(12).copy()
+        rising["spotify"] = [spotify_search_url(a, t) for a, t in zip(rising.artist, rising.title)]
+        rcols = ["artist", "title", "spotify", "familiarity", "momentum", "format_fit", "recommendation"]
         st.dataframe(
             rising[rcols],
             hide_index=True,
             use_container_width=True,
-            column_config=score_columns(),
+            column_config={**score_columns(), "spotify": st.column_config.LinkColumn("Spotify", display_text="▶ Spotify")},
         )
 
-with tab_song:
+
+elif view_name == "Utwór":
     if df.empty:
         st.info("Najpierw dodaj dane.")
     else:
-        labels = {f"{r.artist} — {r.title}": int(r.song_id) for r in df.itertuples()}
-        label = st.selectbox("Utwór", list(labels.keys()))
-        song_id = labels[label]
+        ordered = df.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
+        labels = [f"{r.artist} — {r.title}" for r in ordered.itertuples()]
+        ids = [int(r.song_id) for r in ordered.itertuples()]
+        selected_id = int(st.session_state.get("selected_song_id", ids[0]))
+        index = ids.index(selected_id) if selected_id in ids else 0
+        label = st.selectbox("Utwór", labels, index=index)
+        song_id = ids[labels.index(label)]
+        st.session_state["selected_song_id"] = song_id
         row = df[df.song_id == song_id].iloc[0]
+
+        head1, head2 = st.columns([4, 1])
+        with head1:
+            st.subheader(f"{row.artist} — {row.title}")
+        with head2:
+            st.link_button("▶ Otwórz w Spotify", spotify_search_url(row.artist, row.title), use_container_width=True)
+
         a, b, c = st.columns(3)
         a.metric("Familiarity", f"{row.familiarity:.0f}%")
         b.metric("Momentum", f"{row.momentum:.0f}%")
@@ -294,16 +408,62 @@ with tab_song:
 
         with st.form("note_form"):
             heard = st.checkbox("Przesłuchany", value=bool(row.heard))
-            statuses = ["Nie słuchałem", "Ignore", "Watch", "Candidate", "Current", "Current Familiar", "Recurrent"]
-            idx = statuses.index(row.status) if row.status in statuses else 0
-            status = st.selectbox("Mój status", statuses, index=idx)
+            idx = STATUSES.index(row.status) if row.status in STATUSES else 0
+            status = st.selectbox("Mój status", STATUSES, index=idx)
             note = st.text_area("Notatka", value=row.note or "")
             if st.form_submit_button("Zapisz"):
                 update_note(song_id, heard, status, note)
                 st.success("Zapisano")
                 st.rerun()
 
-with tab_import:
+
+elif view_name == "Archiwum":
+    st.subheader("📚 Archiwum notowań")
+    all_issues = list_issues(limit=5000)
+    if not all_issues:
+        st.info("Brak zapisanych notowań.")
+    else:
+        sources = sorted({x["source"] for x in all_issues})
+        src = st.selectbox("Źródło", sources, key="archive_source")
+        source_issues = [x for x in all_issues if x["source"] == src]
+        issue_ids = [int(x["id"]) for x in source_issues]
+        by_id = {int(x["id"]): x for x in source_issues}
+        issue_id = st.selectbox(
+            "Notowanie",
+            issue_ids,
+            format_func=lambda x: f"{by_id[x]['chart_date']} · {by_id[x]['issue_key']} · {by_id[x]['entries']} pozycji",
+            key="archive_issue",
+        )
+        meta = by_id[int(issue_id)]
+        st.caption(f"{meta['source']} · {meta['chart_date']} · zapisano {meta['entries']} pozycji")
+        entries = pd.DataFrame(issue_entries(int(issue_id)))
+        if not entries.empty:
+            entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
+            archive_show = entries[["position", "artist", "title", "spotify", "previous_position", "reported_weeks", "reported_peak", "song_id"]]
+            archive_event = st.dataframe(
+                archive_show,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "song_id": None,
+                    "position": st.column_config.NumberColumn("Pozycja", format="#%d"),
+                    "previous_position": st.column_config.NumberColumn("Poprzednio", format="#%d"),
+                    "reported_weeks": st.column_config.NumberColumn("Tygodnie"),
+                    "reported_peak": st.column_config.NumberColumn("Peak", format="#%d"),
+                    "spotify": st.column_config.LinkColumn("Spotify", display_text="▶ Spotify"),
+                },
+                on_select="rerun",
+                selection_mode="single-row",
+                key="archive_table",
+            )
+            selected_rows = getattr(getattr(archive_event, "selection", None), "rows", [])
+            if selected_rows:
+                ridx = int(selected_rows[0])
+                if 0 <= ridx < len(entries):
+                    open_song(int(entries.iloc[ridx]["song_id"]))
+
+
+elif view_name == "Import":
     st.subheader("Import notowania")
     st.write("Format minimalny: `position, artist, title`. Może też zawierać `release_date`.")
     source = st.selectbox("Źródło", ["ZET", "OLIA", "OLIS", "ESKA", "RMF", "UK", "BILLBOARD"])
@@ -342,7 +502,8 @@ with tab_import:
         except Exception as exc:
             st.error(f"ZET: {type(exc).__name__}: {exc}")
 
-with tab_about:
+
+else:
     st.markdown(
         """
 ### Wskaźniki
@@ -352,8 +513,14 @@ with tab_about:
 
 **Format Fit** ma większy nacisk na RMF i ZET (40/35), bo odpowiada raczej na pytanie „czy ten hit przypomina nasz format?” niż „czy jest popularny wszędzie?”.
 
-### Źródła w MVP
-RMF jest pobierany automatycznie i ma backfill archiwalnych notowań. OLiA i OLiS są rozwijane po kliknięciu „zobacz pełną listę”, ESKA ma fallback przez Chromium. UK Official Singles Chart i Billboard Hot 100 są pobierane automatycznie jako dodatkowe sygnały trendu — nie wchodzą do wag Familiarity. ZET pozostaje importem ręcznym; w zakładce Import można wkleić tekst listy bezpośrednio.
+### Bieżąca pozycja a historia
+Kolumny `*_pos` pokazują wyłącznie najnowsze zapisane notowanie danego źródła. Jeżeli utworu w nim nie ma, widzisz `—`. Starsze notowania pozostają w bazie i nadal są używane do obliczania tygodni, peaków, momentum i Familiarity.
+
+### Backfill
+RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboard Hot 100 mają tygodniowy backfill po stabilnych adresach archiwalnych. OLiA/OLiS oraz ESKA wymagają osobnego mechanizmu nawigacji po ich archiwach — na razie ich oficjalnie raportowane `weeks/peak` już zasilają Familiarity, a historia pozycji będzie gromadzona automatycznie od teraz.
+
+### Spotify
+MVP tworzy link do wyszukiwania `wykonawca + tytuł` w Spotify. Nie wymaga to konta deweloperskiego ani klucza API. Później możemy opcjonalnie dodać Spotify Web API i zapisywać bezpośredni `track_id`/ISRC.
 
 ### Ważne
 Progi są celowo konfigurowalne. Po zebraniu historii skalibrujemy je na utworach, które sam oznaczysz jako Current / Current Familiar / Recurrent.

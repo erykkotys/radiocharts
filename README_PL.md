@@ -171,3 +171,16 @@ Workflow publikuje ten sam build pod trzema nazwami:
 - `ghcr.io/<user>/radiocharts:sha-XXXXXXX` — build związany z konkretnym commitem Git.
 
 `latest` nie jest numerem wersji ani specjalną funkcją Dockera. To zwykły tag, który można przepiąć na inny digest. Dlatego UI zawsze pokazuje też SHA commita.
+
+## 0.1.7
+- parser OLiA/OLiS dopasowany do rzeczywistego DOM po renderowaniu Playwright,
+- parser ESKA oparty na parze `pozycja + trend`,
+- diagnostyka pokazuje preview parsowanych pozycji.
+
+## 0.2.0 — research UI
+- Dashboard: kliknięcie wiersza otwiera kartę utworu.
+- Spotify: link wyszukiwania przy każdym utworze.
+- Archiwum: przegląd zapisanych notowań wszystkich źródeł.
+- Status: szybka edycja na Dashboardzie.
+- Bieżące `*_pos` oznacza wyłącznie najnowsze notowanie; historia służy do weeks/peak/trend.
+- Backfill: RMF + UK + Billboard. OLiA/OLiS/ESKA historyczny backfill jest planowany osobno.

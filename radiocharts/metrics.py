@@ -54,6 +54,13 @@ def _weekly_source_stats(g: pd.DataFrame, latest_date: str) -> dict:
     weeks_since_seen = max(0.0, (latest_global-latest_seen).days/7.0)
     recency = math.exp(-weeks_since_seen/3.0)
     current = float(weekly.iloc[-1]["strength"]) * recency
+
+    # The dashboard current-position column must mean *the newest issue of the
+    # source*, not "the last position where this song happened to appear".
+    # Historical positions still stay in the DB and continue to drive weeks,
+    # peak, trend and familiarity.
+    latest_issue_rows = g[g["chart_date"].astype(str) == str(latest_date)]
+    latest_position = int(latest_issue_rows.iloc[-1]["position"]) if not latest_issue_rows.empty else None
     local_peak = int(g["position"].min())
     reported_peaks = pd.to_numeric(g.get("reported_peak"), errors="coerce").dropna() if "reported_peak" in g else pd.Series(dtype=float)
     peak_pos = min(local_peak, int(reported_peaks.min())) if not reported_peaks.empty else local_peak
@@ -79,7 +86,7 @@ def _weekly_source_stats(g: pd.DataFrame, latest_date: str) -> dict:
     avg4 = float(weekly.tail(4)["position"].mean())
     return {
         "weeks": weeks, "weeks_top10": weeks_top10, "peak": peak_pos,
-        "latest_position": int(g.sort_values("date").iloc[-1]["position"]),
+        "latest_position": latest_position,
         "latest_seen": latest_seen.date().isoformat(), "avg4": round(avg4,1),
         "familiarity": round(familiarity,1), "momentum": round(momentum,1),
         "current_strength": round(current,1),
