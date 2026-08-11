@@ -1,4 +1,4 @@
-# RadioCharts Research 0.1
+# RadioCharts Research 0.2.3
 
 ## Zmiany 0.2.1
 

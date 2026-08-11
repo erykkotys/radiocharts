@@ -23,6 +23,18 @@ NOISE = {
     "streaming gainer", "airplay gainer", "sales gainer", "this week",
     "last week", "peak pos.", "peak pos", "wks on chart", "awards",
 }
+META_LABELS = {
+    "weeks", "week", "peak", "lw", "position", "rank", "this week",
+    "last week", "peak pos", "peak pos.", "wks on chart", "weeks on chart",
+}
+
+def _is_meta_label(value: str) -> bool:
+    return re.sub(r"\s+", " ", str(value)).strip().casefold().rstrip(":") in META_LABELS
+
+def _valid_song_pair(title: str, artist: str) -> bool:
+    # Defensive filter for responsive header fragments such as WEEKS — PEAK
+    # that occasionally appear between real chart rows in Billboard HTML/text.
+    return not (_is_meta_label(title) and _is_meta_label(artist))
 
 
 def _tokens_from_html(html: str) -> list[str]:
@@ -64,9 +76,22 @@ def _rank_marker(tokens: list[str], idx: int, expected: int) -> bool:
         j += 1
     if j >= len(tokens):
         return False
-    # Real rank is followed by a title. Numeric metadata from the previous row
-    # is followed by more numeric metadata or the next rank.
-    return not _is_int(tokens[j]) and tokens[j] not in {"-", "–", "—"}
+    # Real rank is followed by title + artist. Numeric metadata from the previous
+    # row is usually followed by more numbers, while responsive header fragments
+    # can look like: 19 / WEEKS / PEAK. Reject both cases.
+    if _is_int(tokens[j]) or tokens[j] in {"-", "–", "—"}:
+        return False
+    textual = []
+    for value in tokens[j : min(len(tokens), j + 8)]:
+        low = value.casefold()
+        if low in NOISE or _is_int(value) or value in {"-", "–", "—", ","}:
+            continue
+        textual.append(value)
+        if len(textual) >= 2:
+            break
+    if len(textual) < 2:
+        return False
+    return _valid_song_pair(textual[0], textual[1])
 
 
 
@@ -136,7 +161,7 @@ def _dom_rows(html: str) -> list[dict]:
         if not title:
             continue
         artist = _clean_artist_from_title_node(title_el)
-        if not artist:
+        if not artist or not _valid_song_pair(title, artist):
             continue
 
         row = title_el.find_parent("div", class_=lambda c: c and "o-chart-results-list-row-container" in str(c))
@@ -231,6 +256,8 @@ def _parse_tokens(tokens: list[str]) -> dict:
         if len(textual) < 2:
             continue
         title, artist = textual[0], textual[1]
+        if not _valid_song_pair(title, artist):
+            continue
         nums = [int(x) for x in cleaned if _is_int(x)]
         entry = {"position": pos, "title": title, "artist": artist}
         if len(nums) >= 3:
@@ -264,21 +291,20 @@ def _parse_tokens(tokens: list[str]) -> dict:
 
 def parse_billboard_html(html: str) -> dict:
     tokens = _tokens_from_html(html)
-    # Billboard's visible chart order is stable even when responsive DOM row
-    # wrappers change. Parsing the sequential rank/title/artist/LW/Peak/Weeks
-    # token stream avoids mixing auxiliary numbers from nested DOM widgets.
-    try:
-        result = _parse_tokens(tokens)
-        result["parser_mode"] = "global_tokens_v2"
+    chart_date = _chart_date(tokens)
+
+    # Prefer actual per-song DOM rows. The global token stream contains
+    # responsive/mobile header fragments and has produced pseudo-songs such as
+    # WEEKS — PEAK during historical backfills.
+    dom_entries = _dom_rows(html)
+    if len(dom_entries) >= 75:
+        result = _build_result(chart_date, dom_entries)
+        result["parser_mode"] = "dom_rows_labeled_v3"
         return result
-    except Exception as token_error:
-        chart_date = _chart_date(tokens)
-        dom_entries = _dom_rows(html)
-        if len(dom_entries) >= 75:
-            result = _build_result(chart_date, dom_entries)
-            result["parser_mode"] = "dom_rows_labeled_fallback"
-            return result
-        raise token_error
+
+    result = _parse_tokens(tokens)
+    result["parser_mode"] = "global_tokens_guarded_v3"
+    return result
 
 
 def parse_billboard_text(text: str) -> dict:

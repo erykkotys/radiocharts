@@ -223,6 +223,15 @@ def init_db() -> None:
             )
             con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v1','done')")
 
+        bb_reset_v2 = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v2'").fetchone()
+        if not bb_reset_v2:
+            con.execute(
+                """UPDATE chart_entries
+                   SET previous_position=NULL, reported_weeks=NULL, reported_peak=NULL
+                   WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
+            )
+            con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v2','done')")
+
 
 def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release_date: str | None = None) -> int:
     akey, tkey = normalize(artist), normalize(title)
@@ -245,6 +254,12 @@ def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release
 
 def _validated_entries(source: str, entries: Iterable[dict]) -> list[dict]:
     rows = [dict(e) for e in entries]
+    if source in {"UK", "BILLBOARD"}:
+        meta = {"weeks", "week", "peak", "lw", "last week", "peak pos", "peak pos.", "wks on chart", "weeks on chart"}
+        rows = [
+            e for e in rows
+            if not (normalize(str(e.get("title", ""))) in meta and normalize(str(e.get("artist", ""))) in meta)
+        ]
     seen_pos: dict[int, str] = {}
     seen_song: dict[tuple[str, str], int] = {}
     for e in rows:

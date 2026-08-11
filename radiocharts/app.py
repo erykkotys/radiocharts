@@ -106,13 +106,13 @@ def score_columns() -> dict:
 
 
 def position_display(value) -> str:
-    """Sortable display rank: #001..#100, missing values last as an em dash."""
+    """Sortable display rank: #001..#100, missing values as ASCII hyphen so ascending sort puts them last."""
     try:
         if value is None or pd.isna(value):
-            return "—"
+            return "-"
         return f"#{int(value):03d}"
     except Exception:
-        return "—"
+        return "-"
 
 
 def song_link(song_id: int, title: str | None = None) -> str:
@@ -145,7 +145,7 @@ def render_nav_tabs(current: str) -> None:
         extra = ""
         if key == "song" and st.query_params.get("song"):
             extra = f"&song={st.query_params.get('song')}"
-        links.append(f'<a class="{cls}" href="?view={key}{extra}">{label}</a>')
+        links.append(f'<a class="{cls}" href="?view={key}{extra}" target="_self">{label}</a>')
     st.markdown('<div class="rc-tabs">' + ''.join(links) + '</div>', unsafe_allow_html=True)
 
 
@@ -161,22 +161,23 @@ with st.sidebar:
     st.subheader("Dane")
     st.caption(f"DB: {DB_PATH}")
 
-    if st.button("↻ Pobierz dane teraz", use_container_width=True):
-        try:
-            with st.spinner("Pobieram RMF/ESKĘ/UK/Billboard i renderuję OLiA/OLiS w Chromium (to może potrwać kilkadziesiąt sekund)..."):
-                st.session_state["collect_result"] = collect_current()
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Błąd collectora: {exc}")
+    with st.expander("Aktualizacja danych", expanded=False):
+        if st.button("↻ Pobierz dane teraz", use_container_width=True):
+            try:
+                with st.spinner("Pobieram RMF/ESKĘ/UK/Billboard i renderuję OLiA/OLiS w Chromium (to może potrwać kilkadziesiąt sekund)..."):
+                    st.session_state["collect_result"] = collect_current()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Błąd collectora: {exc}")
 
-    if "collect_result" in st.session_state:
-        for msg in st.session_state["collect_result"]:
-            if msg.startswith("✅"):
-                st.success(msg)
-            elif msg.startswith("⚠️"):
-                st.warning(msg)
-            else:
-                st.info(msg)
+        if "collect_result" in st.session_state:
+            for msg in st.session_state["collect_result"]:
+                if msg.startswith("✅"):
+                    st.success(msg)
+                elif msg.startswith("⚠️"):
+                    st.warning(msg)
+                else:
+                    st.info(msg)
 
     with st.expander("Backfill RMF"):
         st.caption("Pobiera historyczne notowania przez formularz archiwum RMF. Najpierw przetestuj 5; jeśli przejdzie, uruchom 130.")
@@ -477,9 +478,14 @@ elif view_key == "archive":
             key="archive_issue",
         )
         meta = by_id[int(issue_id)]
+        archive_limit = st.selectbox("Pokaż pozycji", [20, 40, 100], index=0, key="archive_limit")
         st.caption(f"{meta['source']} · {meta['chart_date']} · zapisano {meta['entries']} pozycji")
         entries = pd.DataFrame(issue_entries(int(issue_id)))
         if not entries.empty:
+            total_entries = len(entries)
+            entries = entries.head(int(archive_limit)).copy()
+            if total_entries > len(entries):
+                st.caption(f"Pokazuję pierwsze {len(entries)} z {total_entries} pozycji.")
             entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
             entries["details"] = [song_link(sid) for sid in entries.song_id]
             for c in ["position", "previous_position", "reported_peak"]:

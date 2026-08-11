@@ -49,3 +49,17 @@ def test_billboard_current_sequence_keeps_weeks_42():
     assert d["entries"][0]["reported_weeks"] == 42
     assert d["entries"][0]["reported_peak"] == 1
     assert d["entries"][0]["previous_position"] == 1
+
+
+def test_billboard_rejects_responsive_weeks_peak_pseudo_row():
+    lines = ["Billboard Hot 100™", "Week of May 9, 2026", "THIS WEEK", "LAST WEEK", "PEAK POS.", "WKS ON CHART"]
+    # Insert a false numeric/header fragment before the real #2. A loose parser
+    # used to interpret this as the song WEEKS — PEAK.
+    lines += ["1", "Real Song 1", "Real Artist 1", "1", "1", "10"]
+    lines += ["2", "WEEKS", "PEAK", "19", "59"]
+    for i in range(2, 101):
+        lines += [str(i), f"Real Song {i}", f"Real Artist {i}", str(max(1, i-1)), "1", "5"]
+    d = parse_billboard_text("\n".join(lines))
+    assert len(d["entries"]) == 100
+    assert all(not (x["title"].casefold() == "weeks" and x["artist"].casefold() == "peak") for x in d["entries"])
+    assert d["entries"][1]["title"] == "Real Song 2"

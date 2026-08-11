@@ -18,6 +18,18 @@ HEADERS = {
 DATE_RE = re.compile(r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*-\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})")
 NUMBER_INLINE_RE = re.compile(r"^Number\s+(\d{1,3})$", re.I)
 
+META_LABELS = {
+    "weeks", "week", "peak", "lw", "number", "position", "rank",
+    "last week", "peak pos", "peak pos.", "wks on chart", "weeks on chart",
+}
+
+def _is_meta_label(value: str) -> bool:
+    return re.sub(r"\s+", " ", str(value)).strip().casefold().rstrip(":") in META_LABELS
+
+def _valid_song_pair(title: str, artist: str) -> bool:
+    return not (_is_meta_label(title) and _is_meta_label(artist))
+
+
 
 def _tokens(html: str) -> list[str]:
     soup = BeautifulSoup(html, "html.parser")
@@ -84,6 +96,8 @@ def parse_uk(html: str) -> dict:
         if len(head) < 2:
             continue
         title, artist = head[0], head[1]
+        if not _valid_song_pair(title, artist):
+            continue
 
         joined = " ".join(block)
         lw_m = re.search(r"\bLW:\s*(\d+|New|-)", joined, re.I)
