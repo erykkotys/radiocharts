@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import date
 from pathlib import Path
 import pandas as pd
@@ -16,6 +17,22 @@ from radiocharts.sources.imports import parse_tabular, dataframe_to_issue
 from radiocharts.seed_demo import seed
 
 st.set_page_config(page_title="RadioCharts Research", page_icon="📻", layout="wide")
+
+# Delikatnie większa typografia niż domyślna w Streamlit.
+# Używamy rem, więc powiększenie zachowuje proporcje nagłówków i widgetów.
+st.markdown(
+    """
+    <style>
+      html { font-size: 18px; }
+      [data-testid="stSidebar"] { font-size: 1rem; }
+      [data-testid="stMetricValue"] { font-size: 2rem; }
+      div[data-testid="stDataFrame"] { font-size: 1rem; }
+      .stButton button, .stDownloadButton button { font-size: 1rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 init_db()
 
 st.title("📻 RadioCharts Research")
@@ -40,10 +57,13 @@ with st.sidebar:
         if st.button("Sprawdź odpowiedź RMF", use_container_width=True):
             try:
                 with st.spinner("Sprawdzam RMF..."):
-                    diag = probe_rmf()
-                st.json(diag)
+                    st.session_state["rmf_diag"] = probe_rmf()
             except Exception as e:
                 st.error(f"Diagnostyka RMF: {type(e).__name__}: {e}")
+        if "rmf_diag" in st.session_state:
+            diag_text = json.dumps(st.session_state["rmf_diag"], ensure_ascii=False, indent=2)
+            st.code(diag_text, language="json")
+            st.caption("Kliknij ikonę kopiowania w prawym górnym rogu bloku diagnostyki.")
     if st.button("Załaduj dane demonstracyjne RMF+ZET", use_container_width=True):
         seed(); st.success("Załadowano."); st.rerun()
     st.divider()
@@ -72,14 +92,33 @@ with tab_dash:
         view = df[(df.familiarity>=min_fam)&(df.momentum>=min_mom)]
         if only_unheard: view=view[~view.heard]
         cols = ["artist","title","familiarity","momentum","format_fit","recommendation","RMF_pos","RMF_weeks","ZET_pos","ZET_weeks","OLIA_pos","OLIS_pos","ESKA_pos","status"]
-        st.dataframe(view[[c for c in cols if c in view.columns]], hide_index=True, use_container_width=True,
-                     column_config={"familiarity":st.column_config.ProgressColumn("Familiarity",min_value=0,max_value=100),
-                                    "momentum":st.column_config.ProgressColumn("Momentum",min_value=0,max_value=100),
-                                    "format_fit":st.column_config.ProgressColumn("Format Fit",min_value=0,max_value=100)})
+        score_columns = {
+            "familiarity": st.column_config.ProgressColumn(
+                "Familiarity", help="Score 0–100, nie procent.", format="%.0f / 100", min_value=0.0, max_value=100.0
+            ),
+            "momentum": st.column_config.ProgressColumn(
+                "Momentum", help="Score 0–100; 50 ≈ stabilnie.", format="%.0f / 100", min_value=0.0, max_value=100.0
+            ),
+            "format_fit": st.column_config.ProgressColumn(
+                "Format Fit", help="Score 0–100 dopasowania do profilu RMF/ZET.", format="%.0f / 100", min_value=0.0, max_value=100.0
+            ),
+        }
+        st.dataframe(
+            view[[c for c in cols if c in view.columns]],
+            hide_index=True,
+            use_container_width=True,
+            column_config=score_columns,
+        )
+        st.caption("Familiarity, Momentum i Format Fit są punktami w skali 0–100, a nie wartościami procentowymi.")
 
         st.subheader("🔥 Rising / do przesłuchania")
         rising = df.sort_values("momentum",ascending=False).head(12)
-        st.dataframe(rising[["artist","title","familiarity","momentum","format_fit","recommendation"]],hide_index=True,use_container_width=True)
+        st.dataframe(
+            rising[["artist","title","familiarity","momentum","format_fit","recommendation"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config=score_columns,
+        )
 
 with tab_song:
     if df.empty:
