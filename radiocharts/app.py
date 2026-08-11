@@ -25,10 +25,10 @@ st.set_page_config(page_title="RadioCharts Research", page_icon="📻", layout="
 st.markdown(
     """
     <style>
-      html { font-size: 19px; }
-      [data-testid="stAppViewContainer"] { background: #171b22; }
-      [data-testid="stHeader"] { background: rgba(23, 27, 34, 0.92); }
-      [data-testid="stSidebar"] { background: #1d222b; font-size: 1rem; }
+      html { font-size: 20px; }
+      [data-testid="stAppViewContainer"] { background: #1b2028; }
+      [data-testid="stHeader"] { background: rgba(27, 32, 40, 0.94); }
+      [data-testid="stSidebar"] { background: #222832; font-size: 1.02rem; }
       [data-testid="stMetricValue"] { font-size: 2.05rem; }
       [data-testid="stDataFrame"] { font-size: 1rem; }
       .stButton button, .stDownloadButton button { font-size: 1rem; }
@@ -127,7 +127,7 @@ with st.sidebar:
 
     if st.button("↻ Pobierz dane teraz", use_container_width=True):
         try:
-            with st.spinner("Pobieram RMF, OLiA, OLiS i ESKĘ..."):
+            with st.spinner("Pobieram RMF/ESKĘ i renderuję OLiA/OLiS w Chromium (to może potrwać kilkanaście sekund)..."):
                 st.session_state["collect_result"] = collect_current()
             st.rerun()
         except Exception as exc:
@@ -143,7 +143,7 @@ with st.sidebar:
                 st.info(msg)
 
     with st.expander("Backfill RMF"):
-        st.caption("Pobiera historyczne numery notowań RMF. 30 notowań to mniej więcej 6 tygodni roboczych; 130 ≈ pół roku.")
+        st.caption("Pobiera historyczne notowania przez formularz archiwum RMF. Najpierw przetestuj 5; jeśli przejdzie, uruchom 130.")
         backfill_count = st.number_input("Liczba notowań", min_value=5, max_value=750, value=130, step=5)
         if st.button("Pobierz historię RMF", use_container_width=True):
             bar = st.progress(0.0, text="Startuję backfill...")

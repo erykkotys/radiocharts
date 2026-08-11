@@ -1,22 +1,79 @@
-from radiocharts.sources.olis import parse_olis_html
+from radiocharts.sources.olis import parse_olis_rendered
 
 
-def test_parse_olis_table():
-    rows = "".join(
-        f"<tr><td></td><td>{i}</td><td>Title {i}</td><td>Artist {i}</td><td>Label</td><td>Info</td></tr>"
-        for i in range(1, 21)
-    )
-    html = f"""
-    <html><body>
-    <div>zmień zakres od–do: &lt; 01.08.2026 07.08.2026 &gt;</div>
-    <table>
-      <thead><tr><th>okładka</th><th>pozycja</th><th>tytuł</th><th>wykonawca</th><th>wydawca / dystrybutor</th><th>informacje</th></tr></thead>
-      <tbody>{rows}</tbody>
-    </table>
-    </body></html>
+def test_parse_rendered_olia_cards():
+    text = """
+    oficjalna lista airplay
+    01.08.2026
+    07.08.2026
+    Tydzień 32
+    1 (1)
+    BEZ ZMIAN NA LIŚCIE
+    TYGODNIE NA DANEJ LIŚCIE
+    15
+    Nareszcie
+    Męskie Granie Orkiestra, Igor Herbut, Zalia, Vito Bambino
+    Sony Music
+    2 (3)
+    WZROST
+    TYGODNIE NA DANEJ LIŚCIE
+    9
+    Dai Dai
+    Shakira, Burna Boy
+    Sony Music
+    3 (2)
+    SPADEK
+    TYGODNIE NA DANEJ LIŚCIE
+    10
+    Na błysk
+    Dawid Podsiadło
+    Pur Pur
+    4 (5)
+    WZROST
+    TYGODNIE NA DANEJ LIŚCIE
+    8
+    Run Run River
+    David Guetta, Alok, Stick Figure
+    Warner
+    5 (6)
+    TYGODNIE NA DANEJ LIŚCIE
+    7
+    Self Aware
+    Temper City
+    Label
+    6 (7)
+    TYGODNIE NA DANEJ LIŚCIE
+    6
+    Magnetic
+    The Bausa
+    Label
+    7 (8)
+    TYGODNIE NA DANEJ LIŚCIE
+    5
+    Talk To You
+    ANOTR, 54 Ultra
+    Label
+    8 (9)
+    TYGODNIE NA DANEJ LIŚCIE
+    4
+    My Body Isn't Ready
+    sombr
+    Label
+    9 (10)
+    TYGODNIE NA DANEJ LIŚCIE
+    3
+    Mi Chico
+    DJ Goja, Jason Derulo
+    Label
+    10 (11)
+    TYGODNIE NA DANEJ LIŚCIE
+    2
+    Fate
+    Alan Walker, Ava Max
+    Label
     """
-    data = parse_olis_html(html, "OLIA")
+    data = parse_olis_rendered("<html></html>", text, "OLIA")
     assert data["chart_date"] == "2026-08-07"
-    assert data["issue_key"] == "2026-08-01_2026-08-07"
-    assert len(data["entries"]) == 20
-    assert data["entries"][0]["artist"] == "Artist 1"
+    assert len(data["entries"]) == 10
+    assert data["entries"][0]["title"] == "Nareszcie"
+    assert data["entries"][0]["reported_weeks"] == 15

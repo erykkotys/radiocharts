@@ -18,7 +18,7 @@ HEADERS = {
     "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.7",
 }
 
-TREND = {"▲", "▼", "△", "▽", "-", "N", "n"}
+TREND = {"▲", "▼", "△", "▽", "-", "–", "—", "N", "n"}
 NOISE = {"radio eska", "hity na czasie"}
 
 
@@ -29,12 +29,19 @@ def _tokens(html: str) -> list[str]:
 
 def parse_eska(html: str, chart_date: date | None = None) -> dict:
     tokens = _tokens(html)
-    # Start after the chart heading, avoiding menu/navigation occurrences.
-    starts = [i for i, t in enumerate(tokens) if t.lower() == "gorąca 20"]
-    start = starts[-1] + 1 if starts else 0
+    # The page contains "Gorąca 20" in navigation as well as in the actual
+    # chart heading. Pick the occurrence whose following tokens contain the
+    # first chart position, rather than blindly taking first/last occurrence.
+    starts = [i for i, t in enumerate(tokens) if t.casefold() == "gorąca 20".casefold()]
+    start = 0
+    for candidate in starts:
+        look = tokens[candidate + 1 : candidate + 12]
+        if "1" in look:
+            start = candidate + 1
+            break
     stream = tokens[start:]
 
-    entries = []
+    entries: list[dict] = []
     cursor = 0
     for pos in range(1, 21):
         found = None
@@ -48,32 +55,34 @@ def parse_eska(html: str, chart_date: date | None = None) -> dict:
             break
 
         k = found + 1
-        while k < len(stream) and stream[k] in TREND:
+        if k < len(stream) and stream[k] in TREND:
             k += 1
-        values = []
+
+        values: list[str] = []
         while k < len(stream):
             value = stream[k].strip()
-            low = value.lower()
+            low = value.casefold()
             if value.upper() == "PROPOZYCJE":
                 break
-            if low in NOISE:
-                k += 1
-                # Noise separates one chart card from the next.
-                if values:
-                    break
-                continue
             if value == str(pos + 1) and values:
                 break
+            if low in NOISE:
+                if values:
+                    # Ads separate some cards; once title/artist are already
+                    # collected this is a safe card boundary.
+                    break
+                k += 1
+                continue
             if value not in TREND:
                 values.append(value)
             k += 1
 
         if len(values) < 2:
-            break
+            raise ValueError(f"ESKA pozycja {pos}: za mało pól po karcie: {values!r}")
         title = values[0]
-        artists = [v for v in values[1:] if v.lower() not in NOISE]
+        artists = [v for v in values[1:] if v.casefold() not in NOISE]
         entries.append({"position": pos, "artist": ", ".join(artists), "title": title})
-        cursor = k
+        cursor = max(k, found + 1)
 
     if len(entries) < 10:
         raise ValueError(f"Parser ESKA odczytał tylko {len(entries)} pozycji")
@@ -98,19 +107,24 @@ def probe_eska(timeout: int = 30) -> dict:
     tokens = _tokens(r.text)
     parsed = None
     error = None
+    preview = None
     try:
-        parsed = len(parse_eska(r.text)["entries"])
+        data = parse_eska(r.text)
+        parsed = len(data["entries"])
+        preview = data["entries"][:5]
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     return {
+        "source": "ESKA",
         "http_status": r.status_code,
         "url": r.url,
         "content_type": r.headers.get("content-type", ""),
         "bytes": len(r.content),
         "parsed_entries": parsed,
+        "preview": preview,
         "parse_error": error,
         "body_sha256": hashlib.sha256(r.content).hexdigest()[:16],
-        "visible_start": " | ".join(tokens[:45]),
+        "visible_start": " | ".join(tokens[:80]),
     }
 
 
@@ -122,7 +136,8 @@ def fetch_eska(timeout: int = 30) -> dict:
     except Exception as exc:
         diag = probe_eska(timeout=timeout)
         raise ValueError(
-            f"ESKA: {exc}. HTTP={diag['http_status']}, visible_start={diag['visible_start']!r}"
+            f"ESKA: {exc}. HTTP={diag['http_status']}, parsed={diag['parsed_entries']}, "
+            f"visible_start={diag['visible_start']!r}"
         ) from exc
     data["source_url"] = r.url
     return data

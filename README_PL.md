@@ -143,3 +143,31 @@ ghcr.io/TWOJ_LOGIN_GITHUB/radiocharts:0.1.0
 Repo/publiczny package jest najprostszy do pierwszego testu. Przy prywatnym package trzeba dodać dane logowania registry w TrueNAS.
 
 Potem podmień obraz w `compose.truenas.example.yml` i wklej YAML jako Custom App.
+
+## Zmiany 0.1.3
+- większa typografia interfejsu,
+- diagnostyka RMF jest wyświetlana jako blok kodu z natywnym przyciskiem kopiowania,
+- Familiarity / Momentum / Format Fit są jednoznacznie pokazywane jako score `0–100`, nie jako procent,
+- diagnostyka RMF pozostaje widoczna w sesji po wykonaniu testu.
+
+## Zmiany 0.1.4
+
+- naprawione publikowanie `latest`: workflow buduje tylko z `main`, jawnie przypina `latest`, a `concurrency` anuluje starszy build gdy wpada nowszy push;
+- wersja obrazu nadal jest czytelna w sidebarze jako `VERSION · git SHA`;
+- score'y są prezentowane jako procenty 0–100 (`65%`, nie `6.5%` ani `65/100`);
+- brak pozycji na źródle jest prezentowany jako `—` i przy sortowaniu rosnącym pozycji trafia pod prawdziwe numery;
+- większa typografia i lekko jaśniejsze tło;
+- backfill RMF jest dostępny z UI, domyślnie 130 notowań (~pół roku dni roboczych); wynik można kopiować;
+- `Pobierz dane teraz` próbuje automatycznie pobrać RMF, OLiA, OLiS Single w streamie i ESKĘ; błąd jednego źródła nie zatrzymuje pozostałych;
+- OLiA/OLiS/ESKA mają diagnostykę z przyciskiem kopiowania; parsery OLiA/OLiS są oznaczone jako eksperymentalne, bo serwis może zmieniać markup;
+- ZET pozostaje ręcznym importem.
+
+### Tagi obrazu w GHCR
+
+Workflow publikuje ten sam build pod trzema nazwami:
+
+- `ghcr.io/<user>/radiocharts:0.1.4` — wersja aplikacji z pliku `VERSION`;
+- `ghcr.io/<user>/radiocharts:latest` — ruchomy alias wskazujący najnowszy build `main`;
+- `ghcr.io/<user>/radiocharts:sha-XXXXXXX` — build związany z konkretnym commitem Git.
+
+`latest` nie jest numerem wersji ani specjalną funkcją Dockera. To zwykły tag, który można przepiąć na inny digest. Dlatego UI zawsze pokazuje też SHA commita.

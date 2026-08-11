@@ -5,9 +5,6 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
-# `latest` is a mutable pointer. Without concurrency, two builds started close
-# together can finish out of order and an older commit may overwrite `latest`.
-# Keep only the newest main build active so the newest commit wins.
 concurrency:
   group: radiocharts-docker-main
   cancel-in-progress: true
@@ -20,14 +17,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
 
       - name: Read version
         id: version
         shell: bash
-        run: echo "value=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building VERSION=$VERSION from SHA=${GITHUB_SHA}"
 
       - name: Build date
         id: build_date
@@ -42,7 +43,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - name: Docker metadata
+        uses: docker/metadata-action@v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/radiocharts
@@ -51,7 +53,9 @@ jobs:
             type=raw,value=latest
             type=sha,prefix=sha-
 
-      - uses: docker/build-push-action@v6
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           push: true
@@ -62,3 +66,11 @@ jobs:
             RADIOCHARTS_VERSION=${{ steps.version.outputs.value }}
             RADIOCHARTS_GIT_SHA=${{ github.sha }}
             RADIOCHARTS_BUILD_DATE=${{ steps.build_date.outputs.value }}
+
+      - name: Verify mutable latest points at this build
+        shell: bash
+        run: |
+          echo "Build digest: ${{ steps.build.outputs.digest }}"
+          docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/radiocharts:latest
+          docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/radiocharts:${{ steps.version.outputs.value }}
+          echo "Published latest + version ${{ steps.version.outputs.value }} from ${GITHUB_SHA}"
