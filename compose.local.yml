@@ -1,0 +1,29 @@
+services:
+  web:
+    build: .
+    image: radiocharts:0.1.0
+    command: streamlit run radiocharts/app.py --server.address=0.0.0.0 --server.port=8501
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      TZ: Europe/Warsaw
+      RADIOCHARTS_DB: /app/data/radiocharts.db
+      RADIOCHARTS_CONFIG: /app/config/config.yml
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./logs:/app/logs
+
+  worker:
+    image: radiocharts:0.1.0
+    command: python -m radiocharts.scheduler
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Warsaw
+      RADIOCHARTS_DB: /app/data/radiocharts.db
+      RADIOCHARTS_CONFIG: /app/config/config.yml
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./logs:/app/logs

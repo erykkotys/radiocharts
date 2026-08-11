@@ -1,0 +1,28 @@
+services:
+  web:
+    image: ghcr.io/REPLACE_ME/radiocharts:0.1.0
+    command: streamlit run radiocharts/app.py --server.address=0.0.0.0 --server.port=8501
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      TZ: Europe/Warsaw
+      RADIOCHARTS_DB: /app/data/radiocharts.db
+      RADIOCHARTS_CONFIG: /app/config/config.yml
+    volumes:
+      - /mnt/POOL/apps/radiocharts/data:/app/data
+      - /mnt/POOL/apps/radiocharts/config:/app/config
+      - /mnt/POOL/apps/radiocharts/logs:/app/logs
+
+  worker:
+    image: ghcr.io/REPLACE_ME/radiocharts:0.1.0
+    command: python -m radiocharts.scheduler
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Warsaw
+      RADIOCHARTS_DB: /app/data/radiocharts.db
+      RADIOCHARTS_CONFIG: /app/config/config.yml
+    volumes:
+      - /mnt/POOL/apps/radiocharts/data:/app/data
+      - /mnt/POOL/apps/radiocharts/config:/app/config
+      - /mnt/POOL/apps/radiocharts/logs:/app/logs

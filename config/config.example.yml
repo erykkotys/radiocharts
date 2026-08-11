@@ -1,0 +1,41 @@
+timezone: Europe/Warsaw
+schedule:
+  hour: 23
+  minute: 30
+
+sources:
+  rmf:
+    enabled: true
+    url: https://www.rmf.fm/poplista.html
+    chart_size: 20
+  zet:
+    enabled: false
+    mode: manual_import
+  olia:
+    enabled: false
+    mode: manual_import
+  olis:
+    enabled: false
+    mode: manual_import
+  eska:
+    enabled: false
+    mode: manual_import
+
+weights:
+  OLIA: 30
+  RMF: 25
+  ZET: 20
+  OLIS: 15
+  ESKA: 10
+
+format_fit_weights:
+  RMF: 40
+  ZET: 35
+  OLIA: 15
+  OLIS: 5
+  ESKA: 5
+
+thresholds:
+  current_familiar: 70
+  rising: 65
+  fading: 40
