@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 
 from radiocharts.build_info import BUILD_DATE, display_version
 from radiocharts.collector import backfill_rmf, backfill_weekly_source, collect_current
-from radiocharts.db import DB_PATH, db_revision, init_db, issue_entries, latest_issues, list_issues, update_note, upsert_issue
+from radiocharts.db import DB_PATH, chart_revision, init_db, issue_entries, latest_issues, list_issues, load_notes, update_note, upsert_issue
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.eska import probe_eska
 from radiocharts.sources.uk import probe_uk
@@ -106,13 +106,14 @@ def score_columns() -> dict:
 
 
 def position_display(value) -> str:
-    """Sortable display rank: #001..#100, missing values as ASCII hyphen so ascending sort puts them last."""
+    """Lexically sortable display: 001..100; missing uses an invisible high-codepoint prefix + dash."""
     try:
         if value is None or pd.isna(value):
-            return "-"
-        return f"#{int(value):03d}"
+            # U+2063 is invisible but sorts after ASCII digits in the client grid.
+            return "⁣-"
+        return f"{int(value):03d}"
     except Exception:
-        return "-"
+        return "⁣-"
 
 
 def song_link(song_id: int, title: str | None = None) -> str:
@@ -270,7 +271,20 @@ with st.sidebar:
 
 
 
-df = cached_scores(db_revision())
+df = cached_scores(chart_revision()).copy()
+# User statuses/notes are cheap and live; do not invalidate/recompute all chart metrics.
+if not df.empty:
+    note_rows = load_notes()
+    if note_rows:
+        notes_df = pd.DataFrame(note_rows).set_index("song_id")
+        ids = df["song_id"].astype(int)
+        df["heard"] = [bool(notes_df.at[i, "heard"]) if i in notes_df.index else False for i in ids]
+        df["status"] = [str(notes_df.at[i, "status"]) if i in notes_df.index else "Nie słuchałem" for i in ids]
+        df["note"] = [str(notes_df.at[i, "note"] or "") if i in notes_df.index else "" for i in ids]
+    else:
+        df["heard"] = False
+        df["status"] = "Nie słuchałem"
+        df["note"] = ""
 STATUSES = ["Nie słuchałem", "Ignore", "Watch", "Candidate", "Current", "Current Familiar", "Recurrent"]
 
 
@@ -296,11 +310,26 @@ if view_key == "dashboard":
         c4.metric("Pokrycie źródeł", f"{df.coverage.max():.0f}%")
         st.caption("Pozycja źródła pokazuje tylko najnowsze notowanie. Historia nadal liczy tygodnie, peak, momentum i familiarity.")
 
+        scope = st.radio(
+            "Zakres Dashboardu",
+            ["Polskie aktywne", "Wszystkie aktywne", "Cała historia"],
+            horizontal=True,
+            index=0,
+            help="Dla szybkości domyślnie pokazujemy utwory obecne w najnowszym notowaniu przynajmniej jednego polskiego źródła. Historia nadal pozostaje w bazie i metrykach.",
+        )
+        base = df.copy()
+        core_pos = [c for c in ["OLIA_pos", "RMF_pos", "ZET_pos", "OLIS_pos", "ESKA_pos"] if c in base.columns]
+        all_pos = [c for c in core_pos + ["UK_pos", "BILLBOARD_pos"] if c in base.columns]
+        if scope == "Polskie aktywne" and core_pos:
+            base = base[base[core_pos].notna().any(axis=1)]
+        elif scope == "Wszystkie aktywne" and all_pos:
+            base = base[base[all_pos].notna().any(axis=1)]
+
         colf1, colf2, colf3 = st.columns(3)
         min_fam = colf1.slider("Min. Familiarity", 0, 100, 0, format="%d%%")
         min_mom = colf2.slider("Min. Momentum", 0, 100, 0, format="%d%%")
         only_unheard = colf3.checkbox("Tylko nieprzesłuchane")
-        view = df[(df.familiarity >= min_fam) & (df.momentum >= min_mom)].copy()
+        view = base[(base.familiarity >= min_fam) & (base.momentum >= min_mom)].copy()
         if only_unheard:
             view = view[~view.heard]
         view = view.reset_index(drop=True)
@@ -360,7 +389,6 @@ if view_key == "dashboard":
                 update_note(sid, bool(r.heard), str(r.status), str(notes_by_id.get(sid, "") or ""))
                 changed += 1
         if changed:
-            clear_score_cache()
             st.toast(f"Zapisano status dla {changed} utworów.")
             st.rerun()
 
@@ -455,7 +483,6 @@ elif view_key == "song":
             note = st.text_area("Notatka", value=row.note or "")
             if st.form_submit_button("Zapisz"):
                 update_note(song_id, heard, status, note)
-                clear_score_cache()
                 st.success("Zapisano")
                 st.rerun()
 
@@ -478,14 +505,10 @@ elif view_key == "archive":
             key="archive_issue",
         )
         meta = by_id[int(issue_id)]
-        archive_limit = st.selectbox("Pokaż pozycji", [20, 40, 100], index=0, key="archive_limit")
-        st.caption(f"{meta['source']} · {meta['chart_date']} · zapisano {meta['entries']} pozycji")
+        st.caption(f"{meta['source']} · {meta['chart_date']} · zapisano {meta['entries']} pozycji · tabela pokazuje ok. 20 wierszy i przewija resztę")
         entries = pd.DataFrame(issue_entries(int(issue_id)))
         if not entries.empty:
-            total_entries = len(entries)
-            entries = entries.head(int(archive_limit)).copy()
-            if total_entries > len(entries):
-                st.caption(f"Pokazuję pierwsze {len(entries)} z {total_entries} pozycji.")
+            entries = entries.copy()
             entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
             entries["details"] = [song_link(sid) for sid in entries.song_id]
             for c in ["position", "previous_position", "reported_peak"]:
@@ -497,6 +520,7 @@ elif view_key == "archive":
                 archive_show,
                 hide_index=True,
                 use_container_width=True,
+                height=775,
                 column_config={
                     "position": st.column_config.TextColumn("Pozycja", width="small"),
                     "title": st.column_config.TextColumn("Tytuł", width="large"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from datetime import datetime
 from io import BytesIO, StringIO
 
@@ -418,18 +419,34 @@ def fetch_olis(source: str, timeout: int = 30) -> dict:
     source = source.upper()
     if source not in URLS:
         raise ValueError(f"Nieznane źródło: {source}")
+
+    # The public page initially exposes only ~12 rows and hydrates controls asynchronously.
+    # The official CSV export is therefore the authoritative first choice. Retry because
+    # the export control itself is JavaScript-driven and occasionally appears late.
+    export_errors: list[str] = []
+    export_entries: list[dict] = []
+    export_meta: dict | None = None
+    for attempt in range(1, 4):
+        entries, meta = _try_official_export(source)
+        export_meta = meta
+        if len(entries) >= 50:
+            export_entries = entries
+            break
+        export_errors.append(str(meta.get("error") or f"tylko {len(entries)} pozycji"))
+        if attempt < 3:
+            time.sleep(1.0 * attempt)
+
+    # Render once for the issue date/key and as a fallback if the full DOM happened to load.
     rendered = _render(source)
     data = parse_olis_rendered(rendered.html, rendered.text, source)
-    if len(data["entries"]) < 50:
-        export_entries, export_meta = _try_official_export(source)
-        if len(export_entries) >= 50:
-            data["entries"] = export_entries
-            data["parser_mode"] = "official_csv_export"
-            data["export_meta"] = export_meta
-    if len(data["entries"]) < 50:
+    if len(export_entries) >= 50:
+        data["entries"] = export_entries
+        data["parser_mode"] = "official_csv_export_retry"
+        data["export_meta"] = export_meta
+    elif len(data["entries"]) < 50:
         raise ValueError(
             f"Parser {source} odczytał tylko {len(data['entries'])} pozycji; "
-            f"pełna lista nie została pobrana"
+            f"oficjalny CSV nie dał pełnej listy po 3 próbach: {' | '.join(export_errors[-3:])}"
         )
     data["source_url"] = rendered.url
     return data

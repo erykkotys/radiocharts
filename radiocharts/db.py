@@ -325,8 +325,31 @@ def update_note(song_id: int, heard: bool, status: str, note: str) -> None:
 
 
 
+def chart_revision() -> str:
+    """Cache key for chart-derived metrics only; note/status edits do not invalidate it."""
+    init_db()
+    with connect() as con:
+        row = con.execute(
+            """SELECT
+                 COALESCE((SELECT MAX(retrieved_at) FROM chart_issues),'') AS charts,
+                 (SELECT COUNT(*) FROM chart_entries) AS entries,
+                 (SELECT COUNT(*) FROM songs) AS songs"""
+        ).fetchone()
+        return f"{row['charts']}|{row['entries']}|{row['songs']}"
+
+
+def load_notes() -> list[dict]:
+    """Small live overlay for user state; intentionally separate from expensive chart metrics."""
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            "SELECT song_id,heard,status,note,updated_at FROM song_notes"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def db_revision() -> str:
-    """Cheap cache key that changes after chart or note mutations."""
+    """Backward-compatible full revision key."""
     init_db()
     with connect() as con:
         row = con.execute(
