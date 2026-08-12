@@ -468,11 +468,47 @@ def _download_csv_from_open_page(page, context, timeout_ms: int = 1800) -> tuple
     return [], meta
 
 
-def _extract_open_page(page, context, source: str, export_timeout_ms: int = 1800) -> dict:
+def _wait_for_chart_ready(page, source: str, timeout_ms: int = 4500) -> int:
+    """Wait until ZPAV's dynamic chart has at least the preview rows.
+
+    The page shell arrives much earlier than the chart data. Parsing after a
+    fixed 300 ms caused intermittent 0-row results. This bounded poll waits
+    only for the actual chart body and still fails fast.
+    """
+    deadline = time.monotonic() + max(0.5, timeout_ms / 1000.0)
+    last_count = 0
+    while time.monotonic() < deadline:
+        try:
+            text = page.locator("body").inner_text(timeout=900)
+            _parse_date_range(text)
+            last_count = len(_parse_rendered_text(text, max_position=100))
+            if last_count >= 10:
+                return last_count
+        except Exception:
+            pass
+        page.wait_for_timeout(180)
+    return last_count
+
+
+def _extract_open_page(page, context, source: str, export_timeout_ms: int = 5200) -> dict:
     """Read the currently selected OLiA/OLiS week from one open page."""
-    text = page.locator("body").inner_text(timeout=1500)
+    _wait_for_chart_ready(page, source, timeout_ms=4200)
+    text = page.locator("body").inner_text(timeout=1800)
     html = page.content()
-    data = parse_olis_rendered(html, text, source)
+    preview_error = None
+    try:
+        data = parse_olis_rendered(html, text, source)
+    except Exception as exc:
+        preview_error = f"{type(exc).__name__}: {exc}"
+        start_date, end_date = _parse_date_range(text)
+        data = {
+            "source": source,
+            "chart_date": end_date,
+            "issue_key": f"{start_date}_{end_date}",
+            "chart_size": 100,
+            "entries": [],
+            "parser_mode": "rendered_not_ready",
+        }
     if len(data["entries"]) >= 50:
         data["source_url"] = page.url
         data["parser_mode"] = data.get("parser_mode") or "rendered"
@@ -486,13 +522,15 @@ def _extract_open_page(page, context, source: str, export_timeout_ms: int = 1800
         data["source_url"] = page.url
         return data
     detail = meta.get("error") or f"CSV: {len(export_entries)} pozycji"
+    if preview_error:
+        detail = f"podgląd: {preview_error}; eksport: {detail}"
     raise ValueError(
         f"Parser {source} odczytał tylko {len(data['entries'])} pozycji; "
         f"pełny eksport nie był gotowy ({detail}). Spróbuj ponownie."
     )
 
 
-def _open_chart_browser(source: str, timeout_ms: int = 6500):
+def _open_chart_browser(source: str, timeout_ms: int = 8000):
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -513,7 +551,7 @@ def _open_chart_browser(source: str, timeout_ms: int = 6500):
     page.set_default_timeout(1500)
     try:
         page.goto(URLS[source.upper()], wait_until="domcontentloaded", timeout=timeout_ms)
-        page.wait_for_timeout(300)
+        _wait_for_chart_ready(page, source, timeout_ms=4200)
     except Exception:
         context.close(); browser.close(); pw.stop()
         raise
@@ -556,6 +594,7 @@ def _go_previous_week(page, old_range: str, timeout_ms: int = 2200) -> bool:
             start, end = _parse_date_range(text)
             now = f"{start}_{end}"
             if now != old_range:
+                page.wait_for_timeout(350)
                 return True
         except Exception:
             pass
@@ -573,7 +612,7 @@ def iter_olis_history(source: str, count: int = 12):
     if source not in URLS:
         raise ValueError(f"Nieznane źródło: {source}")
     count = max(1, min(int(count), 104))
-    pw, browser, context, page = _open_chart_browser(source, timeout_ms=6500)
+    pw, browser, context, page = _open_chart_browser(source, timeout_ms=8000)
     try:
         for idx in range(count):
             old_range = ""
@@ -581,7 +620,7 @@ def iter_olis_history(source: str, count: int = 12):
                 text = page.locator("body").inner_text(timeout=1200)
                 start, end = _parse_date_range(text)
                 old_range = f"{start}_{end}"
-                data = _extract_open_page(page, context, source, export_timeout_ms=1600)
+                data = _extract_open_page(page, context, source, export_timeout_ms=5200)
                 yield idx + 1, count, data, None
             except Exception as exc:
                 yield idx + 1, count, None, f"{type(exc).__name__}: {exc}"
@@ -614,8 +653,8 @@ def fetch_olis(source: str, timeout: int = 15) -> dict:
     # retries here; the user can rerun the source if ZPAV's export is not ready.
     pw = browser = context = page = None
     try:
-        pw, browser, context, page = _open_chart_browser(source, timeout_ms=min(7000, max(3500, int(timeout * 1000))))
-        return _extract_open_page(page, context, source, export_timeout_ms=1800)
+        pw, browser, context, page = _open_chart_browser(source, timeout_ms=min(9000, max(5000, int(timeout * 1000))))
+        return _extract_open_page(page, context, source, export_timeout_ms=5200)
     finally:
         if context is not None:
             try: context.close()

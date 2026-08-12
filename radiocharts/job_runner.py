@@ -19,8 +19,8 @@ _CHILD_PID: int | None = None
 
 SOURCE_TIMEOUTS = {
     "RMF": 15,
-    "OLIA": 14,
-    "OLIS": 14,
+    "OLIA": 24,
+    "OLIS": 24,
     "ESKA": 15,
     "UK": 18,
     "BILLBOARD": 22,
@@ -147,30 +147,47 @@ def main() -> int:
         elif args.kind == "collect-source":
             if not args.source:
                 raise ValueError("Brak źródła")
+            _write(done=0, total=1, progress=0.0, message=f"{args.source.upper()}: start…")
             msg = _collect_source_guarded(args.source)
             messages.append(msg)
             progress(1, 1, msg)
         elif args.kind == "backfill-all":
-            rmf_count = max(1, int(params.get("rmf_count", 130)))
-            uk_count = max(1, int(params.get("uk_count", 26)))
-            bb_count = max(1, int(params.get("billboard_count", 26)))
-            total = rmf_count + uk_count + bb_count
+            rmf_count = max(0, int(params.get("rmf_count", 0)))
+            uk_count = max(0, int(params.get("uk_count", 0)))
+            bb_count = max(0, int(params.get("billboard_count", 0)))
+            olia_count = max(0, int(params.get("olia_count", 0)))
+            olis_count = max(0, int(params.get("olis_count", 0)))
+            total = rmf_count + uk_count + bb_count + olia_count + olis_count
+            if total <= 0:
+                raise ValueError("Nie wybrano żadnego backfillu")
+            _write(done=0, total=total, progress=0.0, message="Backfill: start…")
             offset = 0
 
             def cb(done: int, subtotal: int, message: str):
                 progress(offset + done, total, message)
 
-            part = backfill_rmf(rmf_count, progress_callback=cb)
-            messages.extend([m for m in part if m not in messages])
-            offset += rmf_count
-            part = backfill_weekly_source("UK", uk_count, progress_callback=cb)
-            messages.extend([m for m in part if m not in messages])
-            offset += uk_count
-            part = backfill_weekly_source("BILLBOARD", bb_count, progress_callback=cb)
-            messages.extend([m for m in part if m not in messages])
+            jobs = [
+                ("RMF", rmf_count),
+                ("UK", uk_count),
+                ("BILLBOARD", bb_count),
+                ("OLIA", olia_count),
+                ("OLIS", olis_count),
+            ]
+            for src, cnt in jobs:
+                if cnt <= 0:
+                    continue
+                if src == "RMF":
+                    part = backfill_rmf(cnt, progress_callback=cb)
+                elif src in {"UK", "BILLBOARD"}:
+                    part = backfill_weekly_source(src, cnt, progress_callback=cb)
+                else:
+                    part = backfill_olis_source(src, cnt, progress_callback=cb)
+                messages.extend([m for m in part if m not in messages])
+                offset += cnt
         else:
             src = (args.source or "").upper()
             count = max(1, int(args.count or 1))
+            _write(done=0, total=count, progress=0.0, message=f"{src}: backfill start…")
             if src == "RMF":
                 messages = backfill_rmf(count, progress_callback=progress)
             elif src in {"UK", "BILLBOARD"}:
@@ -179,7 +196,23 @@ def main() -> int:
                 messages = backfill_olis_source(src, count, progress_callback=progress)
             else:
                 raise ValueError(f"Brak backfillu dla {src}")
-        _write(state="done", progress=1.0, message="Zakończono.", messages=messages[-50:], finished_at=time.time())
+
+        if args.kind.startswith("backfill"):
+            ok_count = sum(1 for m in messages if ": OK" in m)
+            expected = int(_CURRENT.get("total") or len(messages))
+            error_count = max(0, expected - ok_count)
+            if ok_count == 0 and messages:
+                state = "failed"
+                final_message = f"Backfill zakończony bez zapisanych notowań ({error_count} błędów)."
+            elif error_count:
+                state = "partial"
+                final_message = f"Backfill: zapisano {ok_count}, błędy {error_count}."
+            else:
+                state = "done"
+                final_message = f"Backfill: zapisano {ok_count}."
+            _write(state=state, progress=1.0, message=final_message, messages=messages[-50:], finished_at=time.time())
+        else:
+            _write(state="done", progress=1.0, message="Zakończono.", messages=messages[-50:], finished_at=time.time())
         return 0
     except SystemExit:
         raise

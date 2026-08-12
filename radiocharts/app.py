@@ -217,16 +217,80 @@ def search_key(value: object) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-@st.fragment(run_every=1.0)
-def render_job_status_fragment() -> None:
+def render_live_song_search(frame: pd.DataFrame) -> None:
+    """Client-side live search: no Enter/rerun and normal browser text editing."""
+    rows = []
+    for r in frame[["song_id", "artist", "title"]].itertuples(index=False):
+        rows.append({
+            "id": int(r.song_id),
+            "artist": str(r.artist),
+            "title": str(r.title),
+            "key": search_key(f"{r.artist} {r.title}"),
+            "spotify": spotify_search_url(str(r.artist), str(r.title)),
+        })
+    payload = json.dumps(rows, ensure_ascii=False).replace("<", "\\u003c")
+    components.html(
+        f"""
+        <style>
+          body {{ margin:0; font-family:system-ui,-apple-system,Segoe UI,sans-serif; color:#e7ebf0; background:transparent; }}
+          #q {{ box-sizing:border-box; width:100%; padding:10px 12px; border-radius:7px; border:1px solid #596272; background:#202631; color:#fff; font-size:16px; outline:none; }}
+          #q:focus {{ border-color:#8995a8; }}
+          #hint {{ color:#aeb7c5; font-size:13px; margin:6px 0 8px; }}
+          #results {{ max-height:330px; overflow:auto; border-top:1px solid #343c49; }}
+          .row {{ display:flex; align-items:center; gap:10px; padding:8px 4px; border-bottom:1px solid #303744; }}
+          .song {{ flex:1; min-width:0; color:#f3f5f7; text-decoration:none; }}
+          .song:hover {{ text-decoration:underline; }}
+          .artist {{ color:#aeb7c5; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+          .spot {{ color:#dbe2ea; text-decoration:none; padding:3px 7px; border:1px solid #4d5767; border-radius:6px; }}
+          .empty {{ color:#aeb7c5; padding:10px 4px; }}
+        </style>
+        <input id="q" type="text" autocomplete="off" placeholder="Wykonawca lub tytuł — polskie znaki nie są wymagane">
+        <div id="hint">Wyniki pojawiają się podczas pisania. Ctrl+A / Delete działają normalnie. Kliknięcie utworu otwiera szczegóły w nowej karcie.</div>
+        <div id="results"></div>
+        <script>
+          const songs = {payload};
+          const q = document.getElementById('q');
+          const results = document.getElementById('results');
+          function detailUrl(id) {{
+            try {{
+              const base = new URL(document.referrer);
+              base.search = '?view=song&song=' + encodeURIComponent(id);
+              return base.toString();
+            }} catch(e) {{ return '?view=song&song=' + encodeURIComponent(id); }}
+          }}
+          function esc(s) {{ return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c])); }}
+          function render() {{
+            const query = q.value.toLowerCase().replace(/ł/g,'l').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+            if (!query) {{ results.innerHTML = ''; return; }}
+            const tokens = query.split(/\\s+/).filter(Boolean);
+            const found = songs.filter(s => tokens.every(t => s.key.includes(t))).slice(0, 20);
+            if (!found.length) {{ results.innerHTML = '<div class="empty">Brak wyników.</div>'; return; }}
+            results.innerHTML = found.map(s => `<div class="row"><a class="song" target="_blank" rel="noopener" href="${{detailUrl(s.id)}}"><div>${{esc(s.title)}}</div><div class="artist">${{esc(s.artist)}}</div></a><a class="spot" target="_blank" rel="noopener" href="${{esc(s.spotify)}}">▶</a></div>`).join('');
+          }}
+          q.addEventListener('input', render);
+          q.focus();
+        </script>
+        """,
+        height=420,
+        scrolling=False,
+    )
+
+
+@st.fragment(run_every=0.8)
+def render_job_status_fragment(group: str = "all", key_suffix: str = "main") -> None:
     """Poll background jobs without rerunning the whole application."""
     job = latest_job()
     if not job:
         st.caption("Brak uruchomionych procesów.")
         return
+    kind = str(job.get("kind", ""))
+    if group == "collect" and not kind.startswith("collect"):
+        return
+    if group == "backfill" and not kind.startswith("backfill"):
+        return
     state = str(job.get("state", ""))
     running_now = state in {"running", "starting", "stopping"}
-    icon = {"done":"✅", "failed":"⚠️", "cancelled":"⏹️", "running":"⏳", "starting":"⏳", "stopping":"⏹️"}.get(state, "ℹ️")
+    icon = {"done":"✅", "partial":"⚠️", "failed":"⚠️", "cancelled":"⏹️", "running":"⏳", "starting":"⏳", "stopping":"⏹️"}.get(state, "ℹ️")
     st.markdown(f"**{icon} Proces:** {job.get('kind')} {job.get('source') or ''} — `{state}`")
     total = int(job.get("total") or 0)
     done = int(job.get("done") or 0)
@@ -237,12 +301,13 @@ def render_job_status_fragment() -> None:
         st.caption(job.get("message") or "")
     if job.get("messages"):
         st.code("\n".join(job["messages"][-10:]), language=None)
-    if running_now and st.button("⏹ Zatrzymaj proces", use_container_width=True, key=f"stop_{job.get('job_id')}"):
+    if running_now and st.button("⏹ Zatrzymaj proces", use_container_width=True, key=f"stop_{key_suffix}_{job.get('job_id')}"):
         stop_job(str(job["job_id"]))
         st.rerun()
 
-    previous = st.session_state.get("_rc_job_state")
-    st.session_state["_rc_job_state"] = state
+    state_key = f"_rc_job_state_{key_suffix}"
+    previous = st.session_state.get(state_key)
+    st.session_state[state_key] = state
     if previous in {"running", "starting", "stopping"} and not running_now:
         st.rerun()
 
@@ -384,34 +449,7 @@ elif view_key == "song":
         if selected_id not in ids:
             selected_id = ids[0]
 
-        search = st.text_input(
-            "Szukaj utworu",
-            value="",
-            key="song_search_text",
-            placeholder="Wykonawca lub tytuł — polskie znaki nie są wymagane",
-            help="Wyszukiwanie ignoruje polskie znaki: e=ę, a=ą, l=ł itd. To zwykłe pole tekstowe, więc Ctrl+A/Backspace działa normalnie.",
-        )
-        if search.strip():
-            tokens = search_key(search).split()
-            hay = [search_key(f"{r.artist} {r.title}") for r in ordered.itertuples()]
-            mask = [all(token in value for token in tokens) for value in hay]
-            matches = ordered[pd.Series(mask, index=ordered.index)].head(20).copy()
-            if matches.empty:
-                st.caption("Brak wyników.")
-            else:
-                matches["details"] = [song_link(sid) for sid in matches.song_id]
-                matches["spotify"] = [spotify_search_url(a, t) for a, t in zip(matches.artist, matches.title)]
-                st.dataframe(
-                    matches[["artist", "title", "details", "spotify"]],
-                    hide_index=True, use_container_width=True, height=min(500, 75 + 36 * len(matches)),
-                    column_config={
-                        "artist": "Wykonawca",
-                        "title": st.column_config.TextColumn("Tytuł", width="large"),
-                        "details": st.column_config.LinkColumn("Szczegóły", display_text="Otwórz ↗", width="small"),
-                        "spotify": st.column_config.LinkColumn("Spotify", display_text="▶", width="small"),
-                    },
-                )
-                st.caption("Szczegóły utworu otwierają się w nowej karcie; wpisywanie w wyszukiwarce nie zmienia losowo wybranego utworu.")
+        render_live_song_search(ordered)
 
         song_id = selected_id
         row = df[df.song_id == song_id].iloc[0]
@@ -525,12 +563,9 @@ elif view_key == "archive":
 
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
-    st.caption("Collectory działają poza procesem Streamlita. OLiA/OLiS mają twardy limit czasu — jeśli ZPAV nie poda pełnej listy szybko, dostaniesz błąd zamiast wielominutowego czekania.")
-
-    render_job_status_fragment()
+    st.caption("Pobieranie działa w tle. OLiA/OLiS czekają na dynamiczne dane tylko w ograniczonym oknie czasu; cały pojedynczy collector ma twardy limit 24 s.")
     running = active_job() is not None
 
-    st.divider()
     st.markdown("### Bieżące notowania")
     if st.button("Pobierz wszystkie automatyczne źródła", disabled=running, type="primary", use_container_width=True):
         start_job("collect-all")
@@ -543,8 +578,10 @@ elif view_key == "data":
             start_job("collect-source", source=src)
             st.rerun()
 
+    render_job_status_fragment("collect", "collect")
+
     with st.expander("Radio ZET — szybki import bieżącego notowania", expanded=False):
-        st.caption("Bieżąca lista ZET jest publiczna, ale Eurozet zastrzega brak zgody na automatyczną eksplorację tekstów i danych. Dlatego zostawiam pobranie półręczne: otwierasz stronę, kopiujesz tekst i zapisujesz go tutaj.")
+        st.caption("Bieżąca lista ZET jest publiczna, ale Eurozet zastrzega brak zgody na automatyczną eksplorację tekstów i danych. Dlatego import pozostaje ręczny.")
         st.link_button("Otwórz bieżącą Listę Radia ZET", "https://player.radiozet.pl/Lista-przebojow", use_container_width=True)
         zet_quick = st.text_area("Wklej tekst bieżącej listy ZET", height=150, key="zet_quick_paste")
         if st.button("Zapisz bieżący ZET", disabled=running, use_container_width=True, key="zet_quick_save"):
@@ -557,31 +594,43 @@ elif view_key == "data":
                 st.error(f"ZET: {type(exc).__name__}: {exc}")
 
     st.divider()
-    st.markdown("### Backfill RMF / UK / Billboard")
+    st.markdown("### Backfille")
+    st.caption("Wszystkie kontrolki są razem, a przebieg procesu jest bezpośrednio pod nimi i odświeża się automatycznie.")
+
     b1, b2, b3 = st.columns(3)
-    rmf_count = b1.number_input("RMF · liczba notowań", min_value=5, max_value=750, value=130, step=5)
+    rmf_count = b1.number_input("RMF · notowania", min_value=5, max_value=750, value=130, step=5)
+    uk_count = b2.number_input("UK · tygodnie", min_value=2, max_value=260, value=26, step=1)
+    bb_count = b3.number_input("Billboard · tygodnie", min_value=2, max_value=260, value=26, step=1)
     if b1.button("Backfill RMF", disabled=running, use_container_width=True):
         start_job("backfill", source="RMF", count=int(rmf_count)); st.rerun()
-    uk_count = b2.number_input("UK · liczba tygodni", min_value=2, max_value=260, value=26, step=1)
     if b2.button("Backfill UK", disabled=running, use_container_width=True):
         start_job("backfill", source="UK", count=int(uk_count)); st.rerun()
-    bb_count = b3.number_input("Billboard · liczba tygodni", min_value=2, max_value=260, value=26, step=1)
     if b3.button("Backfill Billboard", disabled=running, use_container_width=True):
         start_job("backfill", source="BILLBOARD", count=int(bb_count)); st.rerun()
-    if st.button("Backfill wszystkie 3", disabled=running, type="primary", use_container_width=True):
-        start_job("backfill-all", params={"rmf_count": int(rmf_count), "uk_count": int(uk_count), "billboard_count": int(bb_count)})
-        st.rerun()
 
-    st.divider()
-    st.markdown("### Backfill OLiA / OLiS — eksperymentalny")
-    st.caption("Serwis ZPAV nie ma osobnych URL-i dla tygodni: archiwum zmienia się przyciskiem poprzedniego tygodnia na tej samej stronie. Backfill idzie jednym Chromium, tydzień po tygodniu; nieudany eksport jest pomijany zamiast blokować cały proces.")
     o1, o2 = st.columns(2)
-    olia_count = o1.number_input("OLiA · liczba tygodni", min_value=2, max_value=104, value=12, step=1)
+    olia_count = o1.number_input("OLiA · tygodnie", min_value=2, max_value=104, value=12, step=1)
+    olis_count = o2.number_input("OLiS · tygodnie", min_value=2, max_value=104, value=12, step=1)
     if o1.button("Backfill OLiA", disabled=running, use_container_width=True):
         start_job("backfill", source="OLIA", count=int(olia_count)); st.rerun()
-    olis_count = o2.number_input("OLiS · liczba tygodni", min_value=2, max_value=104, value=12, step=1)
     if o2.button("Backfill OLiS", disabled=running, use_container_width=True):
         start_job("backfill", source="OLIS", count=int(olis_count)); st.rerun()
+
+    a1, a2, a3 = st.columns(3)
+    if a1.button("Backfill RMF + UK + Billboard", disabled=running, use_container_width=True):
+        start_job("backfill-all", params={"rmf_count": int(rmf_count), "uk_count": int(uk_count), "billboard_count": int(bb_count)})
+        st.rerun()
+    if a2.button("Backfill OLiA + OLiS", disabled=running, use_container_width=True):
+        start_job("backfill-all", params={"olia_count": int(olia_count), "olis_count": int(olis_count)})
+        st.rerun()
+    if a3.button("Backfill wszystkie 5", disabled=running, type="primary", use_container_width=True):
+        start_job("backfill-all", params={
+            "rmf_count": int(rmf_count), "uk_count": int(uk_count), "billboard_count": int(bb_count),
+            "olia_count": int(olia_count), "olis_count": int(olis_count),
+        })
+        st.rerun()
+
+    render_job_status_fragment("backfill", "backfill")
 
     with st.expander("Diagnostyka źródeł", expanded=False):
         diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
