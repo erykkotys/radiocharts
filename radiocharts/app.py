@@ -4,8 +4,9 @@ import html
 import json
 import re
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -13,13 +14,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from radiocharts.build_info import BUILD_DATE, display_version
-from radiocharts.db import DB_PATH, chart_revision, init_db, issue_entries, latest_issues, list_issues, load_notes, update_note, upsert_issue
+from radiocharts.db import DB_PATH, chart_revision, init_db, issue_entries, latest_issues, latest_source_checks, list_issues, load_notes, update_note, upsert_issue
 from radiocharts.job_manager import active_job, latest_job, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.eska import probe_eska
 from radiocharts.sources.uk import probe_uk
 from radiocharts.sources.billboard import probe_billboard
-from radiocharts.sources.zet import parse_zet_text
+from radiocharts.sources.zet import parse_zet_text, probe_zet
 from radiocharts.sources.imports import dataframe_to_issue, parse_tabular
 from radiocharts.sources.olis import probe_olis
 from radiocharts.sources.rmf import probe_rmf
@@ -149,6 +150,57 @@ def cached_scores(revision: str) -> pd.DataFrame:
 
 def clear_score_cache() -> None:
     cached_scores.clear()
+
+
+def source_health_frame() -> tuple[pd.DataFrame, list[str]]:
+    """Show whether every source has actually been checked today.
+
+    Positions always come from the latest *successful* issue. A failed current
+    fetch therefore cannot silently replace good data; this panel makes the
+    stale/missing source explicit.
+    """
+    sources = ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
+    issues = {str(x["source"]): x for x in latest_issues()}
+    checks = {str(x["source"]): x for x in latest_source_checks()}
+    now = datetime.now(ZoneInfo("Europe/Warsaw"))
+    today = now.date()
+    rows = []
+    problems: list[str] = []
+    for src in sources:
+        issue = issues.get(src)
+        check = checks.get(src)
+        checked_local = None
+        checked_today = False
+        success = False
+        message = ""
+        if check:
+            try:
+                checked_local = datetime.fromisoformat(str(check["checked_at"])).astimezone(ZoneInfo("Europe/Warsaw"))
+                checked_today = checked_local.date() == today
+            except Exception:
+                pass
+            success = bool(check.get("success"))
+            message = str(check.get("message") or "")
+        if issue is None:
+            status = "❌ brak danych"
+            problems.append(src)
+        elif checked_today and success:
+            status = "✅ sprawdzone dziś"
+        elif checked_today and not success:
+            status = "❌ dzisiejsze pobranie nieudane"
+            problems.append(src)
+        else:
+            status = "⚠️ nie sprawdzono dziś"
+            problems.append(src)
+        rows.append({
+            "Źródło": src,
+            "Status": status,
+            "Najnowsze notowanie": str(issue.get("chart_date")) if issue else "—",
+            "Pozycji": int(issue.get("entries") or 0) if issue else 0,
+            "Ostatnia próba": checked_local.strftime("%Y-%m-%d %H:%M") if checked_local else "—",
+            "Komunikat": message[-180:] if message else "",
+        })
+    return pd.DataFrame(rows), problems
 
 
 def render_nav_tabs(current: str) -> None:
@@ -322,18 +374,34 @@ if view_key == "dashboard":
     if df.empty:
         st.info("Baza jest pusta. Kliknij po lewej „Pobierz dane teraz”.")
     else:
+        health_df, health_problems = source_health_frame()
+        if health_problems:
+            st.warning(
+                "Nie wszystkie źródła są zweryfikowane dzisiaj: " + ", ".join(health_problems) +
+                ". Pozycje poniżej pozostają z najnowszego poprawnie zapisanego notowania."
+            )
+            st.markdown('<a href="?view=data" target="_self">→ Przejdź do Dane i uzupełnij źródła</a>', unsafe_allow_html=True)
+        else:
+            st.success("Wszystkie źródła zostały sprawdzone dzisiaj.")
+        with st.expander("Stan źródeł / świeżość danych", expanded=bool(health_problems)):
+            st.dataframe(health_df, hide_index=True, use_container_width=True, height=285)
+            st.caption("'Sprawdzone dziś' oznacza, że collector wykonał dziś udaną próbę. Data notowania może być inna dla list tygodniowych albo publikowanych wieczorem.")
+
         scope = st.radio(
             "Zakres Dashboardu",
-            ["Polskie aktywne", "Wszystkie aktywne", "Cała historia"],
+            ["Wszystkie aktywne", "Polskie aktywne", "Zagraniczne aktywne", "Cała historia"],
             horizontal=True,
             index=0,
-            help="Dla szybkości domyślnie pokazujemy utwory obecne w najnowszym notowaniu przynajmniej jednego polskiego źródła. Historia nadal pozostaje w bazie i metrykach.",
+            help="Aktywne = utwór obecny w najnowszym poprawnie zapisanym notowaniu przynajmniej jednego wybranego źródła.",
         )
         base = df.copy()
         core_pos = [c for c in ["OLIA_pos", "RMF_pos", "ZET_pos", "OLIS_pos", "ESKA_pos"] if c in base.columns]
-        all_pos = [c for c in core_pos + ["UK_pos", "BILLBOARD_pos"] if c in base.columns]
+        foreign_pos = [c for c in ["UK_pos", "BILLBOARD_pos"] if c in base.columns]
+        all_pos = core_pos + foreign_pos
         if scope == "Polskie aktywne" and core_pos:
             base = base[base[core_pos].notna().any(axis=1)]
+        elif scope == "Zagraniczne aktywne" and foreign_pos:
+            base = base[base[foreign_pos].notna().any(axis=1)]
         elif scope == "Wszystkie aktywne" and all_pos:
             base = base[base[all_pos].notna().any(axis=1)]
 
@@ -563,7 +631,7 @@ elif view_key == "archive":
 
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
-    st.caption("Pobieranie działa w tle. OLiA/OLiS czekają na dynamiczne dane tylko w ograniczonym oknie czasu; cały pojedynczy collector ma twardy limit 24 s.")
+    st.caption("Pobieranie działa w tle i można je zatrzymać. OLiA/OLiS wróciły do starszego, sprawdzonego mechanizmu renderowania/eksportu; UI pozostaje responsywne.")
     running = active_job() is not None
 
     st.markdown("### Bieżące notowania")
@@ -571,7 +639,7 @@ elif view_key == "data":
         start_job("collect-all")
         st.rerun()
 
-    auto_sources = ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
+    auto_sources = ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
     cols = st.columns(3)
     for idx, src in enumerate(auto_sources):
         if cols[idx % 3].button(f"Pobierz {src}", disabled=running, use_container_width=True, key=f"fetch_{src}"):
@@ -580,8 +648,8 @@ elif view_key == "data":
 
     render_job_status_fragment("collect", "collect")
 
-    with st.expander("Radio ZET — szybki import bieżącego notowania", expanded=False):
-        st.caption("Bieżąca lista ZET jest publiczna, ale Eurozet zastrzega brak zgody na automatyczną eksplorację tekstów i danych. Dlatego import pozostaje ręczny.")
+    with st.expander("Radio ZET — ręczny fallback", expanded=False):
+        st.caption("ZET pobiera się teraz automatycznie. To pole zostaje jako awaryjny ręczny import, gdyby collector zawiódł.")
         st.link_button("Otwórz bieżącą Listę Radia ZET", "https://player.radiozet.pl/Lista-przebojow", use_container_width=True)
         zet_quick = st.text_area("Wklej tekst bieżącej listy ZET", height=150, key="zet_quick_paste")
         if st.button("Zapisz bieżący ZET", disabled=running, use_container_width=True, key="zet_quick_save"):
@@ -597,15 +665,18 @@ elif view_key == "data":
     st.markdown("### Backfille")
     st.caption("Wszystkie kontrolki są razem, a przebieg procesu jest bezpośrednio pod nimi i odświeża się automatycznie.")
 
-    b1, b2, b3 = st.columns(3)
+    b1, b2, b3, b4 = st.columns(4)
     rmf_count = b1.number_input("RMF · notowania", min_value=5, max_value=750, value=130, step=5)
-    uk_count = b2.number_input("UK · tygodnie", min_value=2, max_value=260, value=26, step=1)
-    bb_count = b3.number_input("Billboard · tygodnie", min_value=2, max_value=260, value=26, step=1)
+    zet_count = b2.number_input("ZET · dni", min_value=2, max_value=180, value=30, step=1)
+    uk_count = b3.number_input("UK · tygodnie", min_value=2, max_value=260, value=26, step=1)
+    bb_count = b4.number_input("Billboard · tygodnie", min_value=2, max_value=260, value=26, step=1)
     if b1.button("Backfill RMF", disabled=running, use_container_width=True):
         start_job("backfill", source="RMF", count=int(rmf_count)); st.rerun()
-    if b2.button("Backfill UK", disabled=running, use_container_width=True):
+    if b2.button("Backfill ZET", disabled=running, use_container_width=True):
+        start_job("backfill", source="ZET", count=int(zet_count)); st.rerun()
+    if b3.button("Backfill UK", disabled=running, use_container_width=True):
         start_job("backfill", source="UK", count=int(uk_count)); st.rerun()
-    if b3.button("Backfill Billboard", disabled=running, use_container_width=True):
+    if b4.button("Backfill Billboard", disabled=running, use_container_width=True):
         start_job("backfill", source="BILLBOARD", count=int(bb_count)); st.rerun()
 
     o1, o2 = st.columns(2)
@@ -617,15 +688,19 @@ elif view_key == "data":
         start_job("backfill", source="OLIS", count=int(olis_count)); st.rerun()
 
     a1, a2, a3 = st.columns(3)
-    if a1.button("Backfill RMF + UK + Billboard", disabled=running, use_container_width=True):
-        start_job("backfill-all", params={"rmf_count": int(rmf_count), "uk_count": int(uk_count), "billboard_count": int(bb_count)})
+    if a1.button("Backfill RMF + ZET + UK + Billboard", disabled=running, use_container_width=True):
+        start_job("backfill-all", params={
+            "rmf_count": int(rmf_count), "zet_count": int(zet_count),
+            "uk_count": int(uk_count), "billboard_count": int(bb_count),
+        })
         st.rerun()
     if a2.button("Backfill OLiA + OLiS", disabled=running, use_container_width=True):
         start_job("backfill-all", params={"olia_count": int(olia_count), "olis_count": int(olis_count)})
         st.rerun()
-    if a3.button("Backfill wszystkie 5", disabled=running, type="primary", use_container_width=True):
+    if a3.button("Backfill wszystkie 6", disabled=running, type="primary", use_container_width=True):
         start_job("backfill-all", params={
-            "rmf_count": int(rmf_count), "uk_count": int(uk_count), "billboard_count": int(bb_count),
+            "rmf_count": int(rmf_count), "zet_count": int(zet_count),
+            "uk_count": int(uk_count), "billboard_count": int(bb_count),
             "olia_count": int(olia_count), "olis_count": int(olis_count),
         })
         st.rerun()
@@ -633,11 +708,12 @@ elif view_key == "data":
     render_job_status_fragment("backfill", "backfill")
 
     with st.expander("Diagnostyka źródeł", expanded=False):
-        diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
+        diag_source = st.selectbox("Źródło", ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
         if st.button("Sprawdź odpowiedź", use_container_width=True):
             try:
                 with st.spinner(f"Sprawdzam {diag_source}…"):
                     if diag_source == "RMF": diag = probe_rmf()
+                    elif diag_source == "ZET": diag = probe_zet()
                     elif diag_source in ("OLIA", "OLIS"): diag = probe_olis(diag_source)
                     elif diag_source == "ESKA": diag = probe_eska()
                     elif diag_source == "UK": diag = probe_uk()
@@ -680,9 +756,9 @@ elif view_key == "import":
 
     st.divider()
     st.subheader("Radio ZET — ręczne wklejenie")
-    st.warning("ZET nie pobiera się automatycznie. Po usunięciu danych demonstracyjnych baza ZET pozostaje pusta, dopóki nie wkleisz prawdziwego notowania tutaj.")
+    st.info("ZET pobiera się automatycznie; ręczne wklejenie zostaje jako fallback/import historyczny.")
     st.link_button("Otwórz Listę Przebojów Radia ZET", "https://player.radiozet.pl/Lista-przebojow")
-    st.caption("Skopiuj tekst bieżącego notowania ze strony ZET i wklej poniżej; parser wyciągnie Top 20 lokalnie. Automatyczny crawler pozostaje wyłączony.")
+    st.caption("Skopiuj tekst notowania ze strony ZET i wklej poniżej; parser wyciągnie Top 20 lokalnie.")
     zet_text = st.text_area("Tekst strony/listy ZET", height=180, key="zet_paste")
     if st.button("Parsuj i zapisz ZET", use_container_width=True):
         try:
@@ -705,10 +781,13 @@ else:
 **Format Fit** ma większy nacisk na RMF i ZET (40/35), bo odpowiada raczej na pytanie „czy ten hit przypomina nasz format?” niż „czy jest popularny wszędzie?”.
 
 ### Bieżąca pozycja a historia
-Kolumny `*_pos` pokazują wyłącznie najnowsze zapisane notowanie danego źródła. Jeżeli utworu w nim nie ma, widzisz `—`. Starsze notowania pozostają w bazie i nadal są używane do obliczania tygodni, peaków, momentum i Familiarity.
+Kolumny `*_pos` pokazują wyłącznie najnowsze **poprawnie zapisane** notowanie danego źródła. Jeżeli utworu w nim nie ma, widzisz `—`. Dashboard osobno pokazuje, czy każde źródło zostało faktycznie sprawdzone dzisiaj; nieudane pobranie nie podmienia ostatnich dobrych danych. Starsze notowania pozostają w bazie i nadal są używane do obliczania tygodni, peaków, momentum i Familiarity.
+
+### Automatyczne pobieranie
+Worker sprawdza automatyczne źródła dwa razy dziennie, o 07:30 i 20:30 czasu Europe/Warsaw. Każda próba — także nieudana — jest zapisywana w stanie źródeł, więc widać czy dane były dzisiaj weryfikowane.
 
 ### Backfill
-RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboard Hot 100 mają tygodniowy backfill po stabilnych adresach archiwalnych. `weeks/peak` dla UK i Billboard bierzemy z oficjalnych bieżących notowań, a backfill buduje przede wszystkim historię pozycji do Momentum. OLiA/OLiS mają eksperymentalny backfill przez przycisk poprzedniego tygodnia i oficjalny eksport CSV; nieudane tygodnie są pomijane. ESKA nadal wymaga osobnego mechanizmu archiwum.
+RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboard Hot 100 mają tygodniowy backfill po stabilnych adresach archiwalnych. `weeks/peak` dla UK i Billboard bierzemy z oficjalnych bieżących notowań, a backfill buduje przede wszystkim historię pozycji do Momentum. OLiA/OLiS mają eksperymentalny backfill przez przycisk poprzedniego tygodnia i oficjalny eksport CSV; nieudane tygodnie są pomijane. ZET ma automatyczny bieżący collector oraz eksperymentalny backfill po publicznych adresach archiwalnych. ESKA nadal wymaga osobnego mechanizmu archiwum.
 
 ### Wydajność
 SQLite zostaje. Przy tej skali danych nie jest wąskim gardłem; dashboard cache'uje kosztowne agregacje do czasu zmiany bazy, a tabele nie używają już Pandas Styler.

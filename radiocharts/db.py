@@ -71,6 +71,17 @@ CREATE TABLE IF NOT EXISTS app_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS source_checks (
+    id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    chart_date TEXT,
+    issue_key TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_source_checks_source_time ON source_checks(source, checked_at DESC);
 """
 
 
@@ -193,10 +204,10 @@ def init_db() -> None:
         try:
             con0 = sqlite3.connect(DB_PATH, timeout=2)
             keys = {r[0] for r in con0.execute(
-                "SELECT key FROM app_meta WHERE key IN ('song_alias_merge_v1','billboard_metadata_reset_v1','billboard_metadata_reset_v2')"
+                "SELECT key FROM app_meta WHERE key IN ('song_alias_merge_v1','billboard_metadata_reset_v1','billboard_metadata_reset_v2','source_checks_v1')"
             ).fetchall()}
             con0.close()
-            if len(keys) == 3:
+            if len(keys) == 4:
                 return
         except Exception:
             pass
@@ -249,6 +260,10 @@ def init_db() -> None:
                    WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
             )
             con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v2','done')")
+
+        # Marker also forces pre-0.2.8 databases through SCHEMA once so the
+        # source_checks table/index is created before the fast init path returns.
+        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
 
     _INITIALIZED_DB_PATH = current_path
 
@@ -381,6 +396,36 @@ def db_revision() -> str:
         ).fetchone()
         return f"{row['charts']}|{row['notes']}|{row['entries']}|{row['songs']}"
 
+
+
+def record_source_check(source: str, success: bool, message: str = "", chart_date: str | None = None, issue_key: str | None = None) -> None:
+    """Record every collector attempt, including failures, for Dashboard freshness warnings."""
+    init_db()
+    with connect() as con:
+        con.execute(
+            "INSERT INTO source_checks(source,checked_at,success,message,chart_date,issue_key) VALUES(?,?,?,?,?,?)",
+            (source.upper(), _utcnow(), int(bool(success)), str(message or "")[:2000], chart_date, issue_key),
+        )
+        # Keep the table bounded; a few hundred checks per source is plenty for diagnostics.
+        con.execute(
+            """DELETE FROM source_checks WHERE id IN (
+                   SELECT id FROM source_checks WHERE source=? ORDER BY checked_at DESC LIMIT -1 OFFSET 400
+               )""",
+            (source.upper(),),
+        )
+
+
+def latest_source_checks() -> list[dict]:
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """SELECT c.source,c.checked_at,c.success,c.message,c.chart_date,c.issue_key
+               FROM source_checks c
+               JOIN (SELECT source, MAX(id) AS max_id FROM source_checks GROUP BY source) x
+                 ON x.source=c.source AND x.max_id=c.id
+               ORDER BY c.source"""
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 def list_issues(source: str | None = None, limit: int = 1000) -> list[dict]:
     """Return stored chart issues newest first for archive browsing."""

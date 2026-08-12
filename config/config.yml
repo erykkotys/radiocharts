@@ -1,6 +1,6 @@
 timezone: Europe/Warsaw
 schedule:
-  hour: 23
+  hours: [7, 20]
   minute: 30
 
 sources:
@@ -10,7 +10,7 @@ sources:
     chart_size: 20
   zet:
     enabled: true
-    mode: manual_import
+    mode: auto
   olia:
     enabled: true
     mode: auto

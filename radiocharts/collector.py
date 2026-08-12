@@ -9,12 +9,13 @@ from typing import Callable
 from filelock import FileLock, Timeout
 
 from radiocharts.config import load_config
-from radiocharts.db import init_db, upsert_issue
+from radiocharts.db import init_db, record_source_check, upsert_issue
 from radiocharts.sources.rmf import fetch_rmf
 from radiocharts.sources.olis import fetch_olis, iter_olis_history
 from radiocharts.sources.eska import fetch_eska
 from radiocharts.sources.uk import fetch_uk
 from radiocharts.sources.billboard import fetch_billboard
+from radiocharts.sources.zet import fetch_zet
 
 LOCK_PATH = Path("/app/data/collector.lock") if Path("/app").exists() else Path(__file__).resolve().parent.parent / "data" / "collector.lock"
 
@@ -33,6 +34,7 @@ def _enabled(cfg: dict, name: str, default: bool = False) -> bool:
 def _source_jobs(cfg: dict) -> list[tuple[str, Callable[[], dict]]]:
     jobs: list[tuple[str, Callable[[], dict]]] = []
     if _enabled(cfg, "rmf", True): jobs.append(("RMF", fetch_rmf))
+    if _enabled(cfg, "zet"): jobs.append(("ZET", fetch_zet))
     if _enabled(cfg, "olia"): jobs.append(("OLIA", lambda: fetch_olis("OLIA")))
     if _enabled(cfg, "olis"): jobs.append(("OLIS", lambda: fetch_olis("OLIS")))
     if _enabled(cfg, "eska"): jobs.append(("ESKA", fetch_eska))
@@ -44,20 +46,24 @@ def _source_jobs(cfg: dict) -> list[tuple[str, Callable[[], dict]]]:
 def _store_job(name: str, fn: Callable[[], dict]) -> str:
     data = fn()
     store(data)
-    return f"✅ {name}: {len(data['entries'])} pozycji, notowanie {data['issue_key']} ({data['chart_date']})"
+    msg = f"✅ {name}: {len(data['entries'])} pozycji, notowanie {data['issue_key']} ({data['chart_date']})"
+    record_source_check(name, True, msg, str(data.get("chart_date") or ""), str(data.get("issue_key") or ""))
+    return msg
 
 
 def collect_source(source: str) -> str:
     source = source.upper()
     cfg = load_config()
     jobs = dict(_source_jobs(cfg))
-    if source == "ZET":
-        return "ℹ️ ZET: tryb importu ręcznego"
     if source not in jobs:
         raise ValueError(f"Źródło {source} jest wyłączone albo nieznane")
     init_db()
     with FileLock(str(LOCK_PATH), timeout=1):
-        return _store_job(source, jobs[source])
+        try:
+            return _store_job(source, jobs[source])
+        except Exception as exc:
+            record_source_check(source, False, f"{type(exc).__name__}: {exc}")
+            raise
 
 
 def collect_current(progress_callback: Callable[[int, int, str], None] | None = None) -> list[str]:
@@ -73,13 +79,10 @@ def collect_current(progress_callback: Callable[[int, int, str], None] | None = 
                 msg = _store_job(name, fn)
             except Exception as exc:
                 msg = f"⚠️ {name}: {type(exc).__name__}: {exc}"
+                record_source_check(name, False, msg)
             messages.append(msg)
             if progress_callback:
                 progress_callback(idx, total, msg)
-
-        zet_cfg = cfg.get("sources", {}).get("zet", {})
-        if zet_cfg.get("enabled") and zet_cfg.get("mode") == "manual_import":
-            messages.append("ℹ️ ZET: tryb importu ręcznego")
     return messages
 
 
@@ -187,6 +190,82 @@ def backfill_olis_source(
                 progress_callback(done, total, msg)
     return messages
 
+
+
+_ZET_SEED_DATE = date(2026, 3, 20)
+_ZET_SEED_ID = 22801
+_ZET_ID_PER_DAY = 7.2832
+
+def _zet_predicted_archive_id(target: date) -> int:
+    return int(round(_ZET_SEED_ID + (target - _ZET_SEED_DATE).days * _ZET_ID_PER_DAY))
+
+def _zet_candidate_offsets(radius: int = 12):
+    yield 0
+    for n in range(1, radius + 1):
+        yield -n
+        yield n
+
+def backfill_zet(
+    count: int = 30,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    pause_seconds: float = 0.06,
+) -> list[str]:
+    """Best-effort ZET backfill using public archived issue URLs.
+
+    Radio ZET archive pages use numeric content IDs rather than dates. A few
+    stable public archive points give a very regular ID/day slope, so each target
+    day is searched only in a small neighborhood around the predicted ID.
+    Failed days are skipped and the job remains stoppable in the UI.
+    """
+    count = max(1, min(int(count), 180))
+    messages: list[str] = []
+    current = fetch_zet()
+    current_date = date.fromisoformat(current["chart_date"])
+    with FileLock(str(LOCK_PATH), timeout=1):
+        store(current)
+        msg = f"ZET {current_date.isoformat()}: OK (bieżące, 20 pozycji)"
+        messages.append(msg)
+        if progress_callback:
+            progress_callback(1, count, msg)
+        if count == 1:
+            return messages
+
+        last_found_id: int | None = None
+        done = 1
+        target = current_date - timedelta(days=1)
+        while done < count:
+            center = (last_found_id - 7) if last_found_id is not None else _zet_predicted_archive_id(target)
+            found = None
+            found_id = None
+            tried: set[int] = set()
+            for off in _zet_candidate_offsets(12):
+                archive_id = max(1, center + off)
+                if archive_id in tried:
+                    continue
+                tried.add(archive_id)
+                try:
+                    data = fetch_zet(archive_id=archive_id, timeout=5)
+                    d = date.fromisoformat(data["chart_date"])
+                    if d == target:
+                        found, found_id = data, archive_id
+                        break
+                except Exception:
+                    pass
+                if pause_seconds > 0:
+                    time.sleep(pause_seconds)
+            done += 1
+            if found is not None:
+                store(found)
+                last_found_id = found_id
+                msg = f"ZET {target.isoformat()}: OK (archive {found_id})"
+            else:
+                last_found_id = None
+                msg = f"ZET {target.isoformat()}: nie znaleziono publicznego archiwum w przewidywanym zakresie"
+            messages.append(msg)
+            if progress_callback:
+                progress_callback(done, count, msg)
+            target -= timedelta(days=1)
+    return messages
 
 def main():
     p = argparse.ArgumentParser()

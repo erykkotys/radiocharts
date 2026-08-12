@@ -12,7 +12,8 @@ log = logging.getLogger("radiocharts")
 
 def job():
     try:
-        for msg in collect_current(): log.info(msg)
+        for msg in collect_current():
+            log.info(msg)
     except Exception:
         log.exception("Błąd collectora")
 
@@ -22,9 +23,21 @@ def main():
     cfg = load_config()
     s = cfg.get("schedule", {})
     tz = cfg.get("timezone", "Europe/Warsaw")
+    hours = s.get("hours")
+    if not hours:
+        hours = [int(s.get("hour", 23))]
+    hours = sorted({int(h) for h in hours})
+    minute = int(s.get("minute", 30))
     scheduler = BlockingScheduler(timezone=tz)
-    scheduler.add_job(job, CronTrigger(hour=int(s.get("hour",23)), minute=int(s.get("minute",30)), timezone=tz), max_instances=1, coalesce=True)
-    log.info("Scheduler wystartował: codziennie %02d:%02d %s", int(s.get("hour",23)), int(s.get("minute",30)), tz)
+    scheduler.add_job(
+        job,
+        CronTrigger(hour=",".join(str(h) for h in hours), minute=minute, timezone=tz),
+        max_instances=1,
+        coalesce=True,
+    )
+    log.info("Scheduler wystartował: codziennie %s:%02d %s", ",".join(f"{h:02d}" for h in hours), minute, tz)
     scheduler.start()
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()

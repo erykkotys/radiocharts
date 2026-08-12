@@ -1,3 +1,7 @@
+## Wersja 0.2.7
+
+Aktualizacja: stabilniejsze OLiA/OLiS, live search i scalony panel backfilli/progresu.
+
 # RadioCharts Research 0.2.3
 
 ## Zmiany 0.2.1
@@ -35,9 +39,9 @@ Wynik jest normalizowany do źródeł, które są już obecne w bazie. Dashboard
 - Streamlit dashboard
 - worker APScheduler uruchamiany raz dziennie
 
-## Dlaczego ZET jest importem ręcznym
+## Radio ZET
 
-W stopce serwisu Eurozet znajduje się obecnie wyraźne zastrzeżenie przeciw automatycznej eksploracji tekstów i danych. Dlatego wersja 0.1 nie odpala automatycznego scrapera ZET. Dane można wczytać z przygotowanego CSV. Jeżeli uzyskasz zgodę / znajdziemy oficjalnie udostępniony feed, podmienimy adapter bez zmiany reszty aplikacji.
+Od 0.2.8 aplikacja potrafi automatycznie pobierać bieżące Top 20 ZET oraz ma eksperymentalny backfill publicznych stron archiwalnych. Ręczny import pozostaje jako fallback. Właściciel serwisu publikuje zastrzeżenie dotyczące eksploracji tekstów i danych; automatyzacja nie omija logowania, CAPTCHA ani innych technicznych zabezpieczeń.
 
 ## OLiA / OLiS
 
@@ -170,7 +174,7 @@ Potem podmień obraz w `compose.truenas.example.yml` i wklej YAML jako Custom Ap
 - backfill RMF jest dostępny z UI, domyślnie 130 notowań (~pół roku dni roboczych); wynik można kopiować;
 - `Pobierz dane teraz` próbuje automatycznie pobrać RMF, OLiA, OLiS Single w streamie i ESKĘ; błąd jednego źródła nie zatrzymuje pozostałych;
 - OLiA/OLiS/ESKA mają diagnostykę z przyciskiem kopiowania; parsery OLiA/OLiS są oznaczone jako eksperymentalne, bo serwis może zmieniać markup;
-- ZET pozostaje ręcznym importem.
+- ZET: automatyczny bieżący collector + eksperymentalny backfill; ręczny import pozostaje fallbackiem.
 
 ### Tagi obrazu w GHCR
 
@@ -209,3 +213,8 @@ Wydajność i obsługa procesów: szybki agregator metryk, osobna zakładka **Da
 - eksperymentalny backfill OLiA i OLiS po tygodniach, przez oficjalną nawigację archiwum i CSV; błędne tygodnie są pomijane,
 - wyszukiwarka w widoku „Utwór” jest zwykłym polem tekstowym i ignoruje polskie znaki (`e=ę`, `l=ł`, itd.),
 - szybki import bieżącej listy ZET jest dostępny bezpośrednio w zakładce Dane.
+
+## Zmiany 0.2.8
+Dashboard pokazuje stan świeżości każdego źródła. Pozycje zawsze pochodzą z najnowszego poprawnie zapisanego notowania; osobny status informuje, czy źródło zostało sprawdzone dzisiaj i czy ostatnia próba się udała. Worker sprawdza źródła o 07:30 i 20:30 Europe/Warsaw.
+
+ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill po publicznych adresach archiwalnych. OLiA/OLiS wróciły do dłuższego, sprawdzonego mechanizmu renderowania/kliknięcia pełnej listy z wersji 0.1.9; zadania nadal działają w osobnym, zatrzymywalnym procesie.

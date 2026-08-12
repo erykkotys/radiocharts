@@ -9,8 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-from radiocharts.collector import backfill_olis_source, backfill_rmf, backfill_weekly_source
-from radiocharts.db import DB_PATH
+from radiocharts.collector import backfill_olis_source, backfill_rmf, backfill_weekly_source, backfill_zet
+from radiocharts.db import DB_PATH, record_source_check
 
 JOB_DIR = DB_PATH.parent / "jobs"
 _CURRENT: dict = {}
@@ -19,13 +19,14 @@ _CHILD_PID: int | None = None
 
 SOURCE_TIMEOUTS = {
     "RMF": 15,
-    "OLIA": 24,
-    "OLIS": 24,
+    "ZET": 15,
+    "OLIA": 55,
+    "OLIS": 35,
     "ESKA": 15,
     "UK": 18,
     "BILLBOARD": 22,
 }
-AUTO_SOURCES = ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
+AUTO_SOURCES = ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
 
 
 def _write(**updates) -> None:
@@ -84,13 +85,18 @@ def _collect_source_guarded(source: str) -> str:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_child()
-        raise TimeoutError(f"{source}: przekroczono limit {timeout}s — spróbuj ponownie")
+        msg = f"{source}: przekroczono limit {timeout}s — spróbuj ponownie"
+        try: record_source_check(source, False, msg)
+        except Exception: pass
+        raise TimeoutError(msg)
     finally:
         if _CHILD_PID == proc.pid:
             _CHILD_PID = None
             _write(child_pid=None)
     if proc.returncode != 0:
         detail = (err or out or "collector zakończył się błędem").strip().splitlines()[-1]
+        try: record_source_check(source, False, detail)
+        except Exception: pass
         raise RuntimeError(detail)
     lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
     return lines[-1] if lines else f"✅ {source}: zakończono"
@@ -143,7 +149,6 @@ def main() -> int:
                 except Exception as exc:
                     msg = f"⚠️ {src}: {type(exc).__name__}: {exc}"
                 progress(idx, total, msg)
-            messages.append("ℹ️ ZET: import ręczny")
         elif args.kind == "collect-source":
             if not args.source:
                 raise ValueError("Brak źródła")
@@ -157,7 +162,8 @@ def main() -> int:
             bb_count = max(0, int(params.get("billboard_count", 0)))
             olia_count = max(0, int(params.get("olia_count", 0)))
             olis_count = max(0, int(params.get("olis_count", 0)))
-            total = rmf_count + uk_count + bb_count + olia_count + olis_count
+            zet_count = max(0, int(params.get("zet_count", 0)))
+            total = rmf_count + uk_count + bb_count + olia_count + olis_count + zet_count
             if total <= 0:
                 raise ValueError("Nie wybrano żadnego backfillu")
             _write(done=0, total=total, progress=0.0, message="Backfill: start…")
@@ -168,6 +174,7 @@ def main() -> int:
 
             jobs = [
                 ("RMF", rmf_count),
+                ("ZET", zet_count),
                 ("UK", uk_count),
                 ("BILLBOARD", bb_count),
                 ("OLIA", olia_count),
@@ -178,6 +185,8 @@ def main() -> int:
                     continue
                 if src == "RMF":
                     part = backfill_rmf(cnt, progress_callback=cb)
+                elif src == "ZET":
+                    part = backfill_zet(cnt, progress_callback=cb)
                 elif src in {"UK", "BILLBOARD"}:
                     part = backfill_weekly_source(src, cnt, progress_callback=cb)
                 else:
@@ -190,6 +199,8 @@ def main() -> int:
             _write(done=0, total=count, progress=0.0, message=f"{src}: backfill start…")
             if src == "RMF":
                 messages = backfill_rmf(count, progress_callback=progress)
+            elif src == "ZET":
+                messages = backfill_zet(count, progress_callback=progress)
             elif src in {"UK", "BILLBOARD"}:
                 messages = backfill_weekly_source(src, count, progress_callback=progress)
             elif src in {"OLIA", "OLIS"}:

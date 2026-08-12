@@ -325,11 +325,11 @@ def _parse_export_csv(content: bytes) -> list[dict]:
     return []
 
 
-def _try_official_export(source: str) -> tuple[list[dict], dict]:
+def _try_official_export(source: str, timeout_ms: int = 45000) -> tuple[list[dict], dict]:
     """Try the official CSV export exposed by OLiA/OLiS."""
     meta: dict = {"attempted": True}
     try:
-        exported = download_by_text(URLS[source.upper()], labels=("CSV",))
+        exported = download_by_text(URLS[source.upper()], labels=("CSV",), timeout_ms=timeout_ms)
         meta.update({
             "filename": exported.filename,
             "bytes": len(exported.content),
@@ -417,6 +417,38 @@ def probe_olis(source: str, timeout: int = 30) -> dict:
 
 
 
+def _expand_full_list_open_page(page, wait_ms: int = 2200) -> bool:
+    """Try the same full-list interaction that worked in the pre-0.2.6 collector."""
+    candidates = [
+        page.get_by_text("zobacz pełną listę", exact=False),
+        page.locator("button", has_text="zobacz pełną listę"),
+        page.locator("a", has_text="zobacz pełną listę"),
+    ]
+    for locator in candidates:
+        try:
+            count = locator.count()
+        except Exception:
+            count = 0
+        for idx in range(count):
+            el = locator.nth(idx)
+            try:
+                if not el.is_visible(timeout=400):
+                    continue
+                el.scroll_into_view_if_needed(timeout=900)
+                el.click(timeout=1800)
+                page.wait_for_timeout(wait_ms)
+                # Trigger any lazy rows after expansion.
+                for _ in range(8):
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(250)
+                page.evaluate("window.scrollTo(0, 0)")
+                page.wait_for_timeout(250)
+                return True
+            except Exception:
+                continue
+    return False
+
+
 def _download_csv_from_open_page(page, context, timeout_ms: int = 1800) -> tuple[list[dict], dict]:
     """Try the official CSV control using an already-open browser page.
 
@@ -490,9 +522,10 @@ def _wait_for_chart_ready(page, source: str, timeout_ms: int = 4500) -> int:
     return last_count
 
 
-def _extract_open_page(page, context, source: str, export_timeout_ms: int = 5200) -> dict:
+def _extract_open_page(page, context, source: str, export_timeout_ms: int = 10000) -> dict:
     """Read the currently selected OLiA/OLiS week from one open page."""
     _wait_for_chart_ready(page, source, timeout_ms=4200)
+    _expand_full_list_open_page(page)
     text = page.locator("body").inner_text(timeout=1800)
     html = page.content()
     preview_error = None
@@ -620,7 +653,7 @@ def iter_olis_history(source: str, count: int = 12):
                 text = page.locator("body").inner_text(timeout=1200)
                 start, end = _parse_date_range(text)
                 old_range = f"{start}_{end}"
-                data = _extract_open_page(page, context, source, export_timeout_ms=5200)
+                data = _extract_open_page(page, context, source, export_timeout_ms=10000)
                 yield idx + 1, count, data, None
             except Exception as exc:
                 yield idx + 1, count, None, f"{type(exc).__name__}: {exc}"
@@ -644,25 +677,30 @@ def iter_olis_history(source: str, count: int = 12):
         except Exception: pass
 
 
-def fetch_olis(source: str, timeout: int = 15) -> dict:
+def fetch_olis(source: str, timeout: int = 45) -> dict:
+    """Current OLiA/OLiS collector using the older, proven interaction path.
+
+    0.2.6/0.2.7 shortened Chromium settling too aggressively and switched to
+    same-session export, which produced the reproducible 12-row/CSV timeout.
+    This restores the 0.1.9 strategy: settle, click full list, auto-scroll; OLiA
+    additionally falls back to a separate official CSV export session.
+    """
     source = source.upper()
     if source not in URLS:
         raise ValueError(f"Nieznane źródło: {source}")
-
-    # One Chromium session, one short attempt. No second browser launch and no
-    # retries here; the user can rerun the source if ZPAV's export is not ready.
-    pw = browser = context = page = None
-    try:
-        pw, browser, context, page = _open_chart_browser(source, timeout_ms=min(9000, max(5000, int(timeout * 1000))))
-        return _extract_open_page(page, context, source, export_timeout_ms=5200)
-    finally:
-        if context is not None:
-            try: context.close()
-            except Exception: pass
-        if browser is not None:
-            try: browser.close()
-            except Exception: pass
-        if pw is not None:
-            try: pw.stop()
-            except Exception: pass
+    rendered = _render(source)
+    data = parse_olis_rendered(rendered.html, rendered.text, source)
+    if len(data["entries"]) < 50 and source == "OLIA":
+        export_entries, export_meta = _try_official_export(source, timeout_ms=30000)
+        if len(export_entries) >= 50:
+            data["entries"] = export_entries
+            data["parser_mode"] = "official_csv_export_legacy"
+            data["export_meta"] = export_meta
+    if len(data["entries"]) < 50:
+        raise ValueError(
+            f"Parser {source} odczytał tylko {len(data['entries'])} pozycji; "
+            "pełna lista nie została pobrana"
+        )
+    data["source_url"] = rendered.url
+    return data
 

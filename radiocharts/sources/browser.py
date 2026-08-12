@@ -16,8 +16,8 @@ class RenderedPage:
 
 def render_page(
     url: str,
-    timeout_ms: int = 12000,
-    settle_ms: int = 800,
+    timeout_ms: int = 45000,
+    settle_ms: int = 2500,
     click_texts: Iterable[str] | None = None,
     auto_scroll: bool = False,
 ) -> RenderedPage:
@@ -54,9 +54,9 @@ def render_page(
             for label in click_texts or []:
                 try:
                     locator = page.get_by_text(label, exact=False).first
-                    locator.wait_for(state="visible", timeout=2500)
-                    locator.click(timeout=2500)
-                    page.wait_for_timeout(700)
+                    locator.wait_for(state="visible", timeout=7000)
+                    locator.click(timeout=7000)
+                    page.wait_for_timeout(1800)
                 except Exception:
                     # Diagnostics/parser will reveal if a site's control changed.
                     pass
@@ -64,10 +64,10 @@ def render_page(
             if auto_scroll:
                 last_height = 0
                 stable = 0
-                for _ in range(8):
+                for _ in range(16):
                     height = int(page.evaluate("document.body.scrollHeight"))
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(120)
+                    page.wait_for_timeout(500)
                     new_height = int(page.evaluate("document.body.scrollHeight"))
                     if new_height <= max(last_height, height):
                         stable += 1
@@ -77,7 +77,7 @@ def render_page(
                     if stable >= 2:
                         break
                 page.evaluate("window.scrollTo(0, 0)")
-                page.wait_for_timeout(120)
+                page.wait_for_timeout(250)
 
             html = page.content()
             text = page.locator("body").inner_text(timeout=10000)
@@ -104,8 +104,8 @@ class DownloadedFile:
 def download_by_text(
     url: str,
     labels: Iterable[str] = ("CSV",),
-    timeout_ms: int = 12000,
-    settle_ms: int = 800,
+    timeout_ms: int = 45000,
+    settle_ms: int = 2500,
 ) -> DownloadedFile:
     """Download a public export exposed by a text link/button.
 
@@ -166,8 +166,8 @@ def download_by_text(
                             errors.append(f"{label}/href: {type(exc).__name__}")
                         # Otherwise handle JavaScript-triggered browser download.
                         try:
-                            with page.expect_download(timeout=3500) as info:
-                                el.click(timeout=3000)
+                            with page.expect_download(timeout=6000) as info:
+                                el.click(timeout=5000)
                             dl = info.value
                             path = dl.path()
                             if path:
