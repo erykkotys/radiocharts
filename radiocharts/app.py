@@ -11,8 +11,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from radiocharts.build_info import BUILD_DATE, display_version
-from radiocharts.collector import backfill_rmf, backfill_weekly_source, collect_current
 from radiocharts.db import DB_PATH, chart_revision, init_db, issue_entries, latest_issues, list_issues, load_notes, update_note, upsert_issue
+from radiocharts.job_manager import active_job, latest_job, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.eska import probe_eska
 from radiocharts.sources.uk import probe_uk
@@ -106,14 +106,30 @@ def score_columns() -> dict:
 
 
 def position_display(value) -> str:
-    """Lexically sortable display: 001..100; missing uses an invisible high-codepoint prefix + dash."""
     try:
         if value is None or pd.isna(value):
-            # U+2063 is invisible but sorts after ASCII digits in the client grid.
-            return "⁣-"
-        return f"{int(value):03d}"
+            return "-"
+        return str(int(value))
     except Exception:
-        return "⁣-"
+        return "-"
+
+
+def position_sort_value(value) -> int:
+    """Numeric value for the grid: missing=999 so native ascending sort puts it last."""
+    try:
+        if value is None or pd.isna(value):
+            return 999
+        return int(value)
+    except Exception:
+        return 999
+
+
+def position_styler(value) -> str:
+    try:
+        v = int(value)
+        return "-" if v >= 999 else f"{v:02d}"
+    except Exception:
+        return "-"
 
 
 def song_link(song_id: int, title: str | None = None) -> str:
@@ -137,6 +153,7 @@ def render_nav_tabs(current: str) -> None:
         ("dashboard", "Dashboard"),
         ("song", "Utwór"),
         ("archive", "Archiwum"),
+        ("data", "Dane"),
         ("import", "Import"),
         ("methodology", "Metodologia"),
     ]
@@ -158,116 +175,11 @@ with st.sidebar:
     st.caption(f"Build: **{display_version()}**")
     if BUILD_DATE != "unknown":
         st.caption(f"Zbudowano: {BUILD_DATE}")
-
-    st.subheader("Dane")
     st.caption(f"DB: {DB_PATH}")
-
-    with st.expander("Aktualizacja danych", expanded=False):
-        if st.button("↻ Pobierz dane teraz", use_container_width=True):
-            try:
-                with st.spinner("Pobieram RMF/ESKĘ/UK/Billboard i renderuję OLiA/OLiS w Chromium (to może potrwać kilkadziesiąt sekund)..."):
-                    st.session_state["collect_result"] = collect_current()
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Błąd collectora: {exc}")
-
-        if "collect_result" in st.session_state:
-            for msg in st.session_state["collect_result"]:
-                if msg.startswith("✅"):
-                    st.success(msg)
-                elif msg.startswith("⚠️"):
-                    st.warning(msg)
-                else:
-                    st.info(msg)
-
-    with st.expander("Backfill RMF"):
-        st.caption("Pobiera historyczne notowania przez formularz archiwum RMF. Najpierw przetestuj 5; jeśli przejdzie, uruchom 130.")
-        backfill_count = st.number_input("Liczba notowań", min_value=5, max_value=750, value=130, step=5)
-        if st.button("Pobierz historię RMF", use_container_width=True):
-            bar = st.progress(0.0, text="Startuję backfill...")
-            last = st.empty()
-
-            def _progress(done: int, total: int, message: str):
-                bar.progress(done / total, text=f"RMF {done}/{total}")
-                last.caption(message)
-
-            try:
-                msgs = backfill_rmf(int(backfill_count), progress_callback=_progress)
-                st.session_state["backfill_result"] = {
-                    "requested": int(backfill_count),
-                    "ok": sum(": OK" in x for x in msgs),
-                    "errors": [x for x in msgs if ": OK" not in x],
-                    "last_messages": msgs[-20:],
-                }
-                st.success("Backfill zakończony.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Backfill RMF: {type(exc).__name__}: {exc}")
-        if "backfill_result" in st.session_state:
-            copyable_json(st.session_state["backfill_result"], "backfill")
-
-    with st.expander("Backfill UK / Billboard"):
-        st.caption("UK i Billboard zapisują oficjalne weeks/peak z bieżących notowań; backfill jest potrzebny głównie do pełnej historii pozycji i Momentum.")
-        weekly_sources = st.multiselect("Źródła", ["UK", "BILLBOARD"], default=["UK", "BILLBOARD"], key="weekly_backfill_sources")
-        weekly_count = st.number_input("Liczba tygodni", min_value=2, max_value=104, value=26, step=1, key="weekly_backfill_count")
-        if st.button("Pobierz historię UK/Billboard", use_container_width=True):
-            results = {}
-            for src in weekly_sources:
-                bar = st.progress(0.0, text=f"{src}: start...")
-                last = st.empty()
-                def _weekly_progress(done: int, total: int, message: str, _src=src):
-                    bar.progress(done / total, text=f"{_src} {done}/{total}")
-                    last.caption(message)
-                try:
-                    msgs = backfill_weekly_source(src, int(weekly_count), progress_callback=_weekly_progress)
-                    results[src] = {
-                        "requested": int(weekly_count),
-                        "ok": sum(": OK" in x for x in msgs),
-                        "errors": [x for x in msgs if ": OK" not in x],
-                        "last_messages": msgs[-12:],
-                    }
-                except Exception as exc:
-                    results[src] = {"error": f"{type(exc).__name__}: {exc}"}
-            st.session_state["weekly_backfill_result"] = results
-            st.rerun()
-        if "weekly_backfill_result" in st.session_state:
-            copyable_json(st.session_state["weekly_backfill_result"], "weekly-backfill")
-
-    with st.expander("Diagnostyka źródeł"):
-        diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
-        if st.button("Sprawdź odpowiedź", use_container_width=True):
-            try:
-                with st.spinner(f"Sprawdzam {diag_source}..."):
-                    if diag_source == "RMF":
-                        diag = probe_rmf()
-                    elif diag_source in ("OLIA", "OLIS"):
-                        diag = probe_olis(diag_source)
-                    elif diag_source == "ESKA":
-                        diag = probe_eska()
-                    elif diag_source == "UK":
-                        diag = probe_uk()
-                    else:
-                        diag = probe_billboard()
-                    st.session_state["source_diag"] = diag
-            except Exception as exc:
-                st.session_state["source_diag"] = {
-                    "source": diag_source,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-        if "source_diag" in st.session_state:
-            copyable_json(st.session_state["source_diag"], "source")
-
-    with st.expander("Ostatnie zapisane notowania"):
-        issues = latest_issues()
-        if not issues:
-            st.caption("Brak danych.")
-        else:
-            for item in issues:
-                st.caption(f"**{item['source']}** · {item['chart_date']} · {item['entries']} pozycji")
-
     st.divider()
     st.markdown("**Wagi Familiarity**")
     st.text("OLiA 30%\nRMF 25%\nZET 20%\nOLiS 15%\nESKA 10%")
+    st.caption("Pobieranie, backfille i diagnostyka są w zakładce **Dane**.")
 
 
 
@@ -294,7 +206,7 @@ def spotify_search_url(artist: str, title: str) -> str:
 
 
 view_key = str(st.query_params.get("view", "dashboard"))
-if view_key not in {"dashboard", "song", "archive", "import", "methodology"}:
+if view_key not in {"dashboard", "song", "archive", "data", "import", "methodology"}:
     view_key = "dashboard"
 render_nav_tabs(view_key)
 
@@ -303,13 +215,6 @@ if view_key == "dashboard":
     if df.empty:
         st.info("Baza jest pusta. Kliknij po lewej „Pobierz dane teraz”.")
     else:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Utwory", len(df))
-        c2.metric("Current Familiar ≥70%", int((df.familiarity >= 70).sum()))
-        c3.metric("Rising ≥65%", int((df.momentum >= 65).sum()))
-        c4.metric("Pokrycie źródeł", f"{df.coverage.max():.0f}%")
-        st.caption("Pozycja źródła pokazuje tylko najnowsze notowanie. Historia nadal liczy tygodnie, peak, momentum i familiarity.")
-
         scope = st.radio(
             "Zakres Dashboardu",
             ["Polskie aktywne", "Wszystkie aktywne", "Cała historia"],
@@ -333,6 +238,14 @@ if view_key == "dashboard":
         if only_unheard:
             view = view[~view.heard]
         view = view.reset_index(drop=True)
+
+        # Stan po filtrach / stan ogólny.
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Utwory (filtr / ogółem)", f"{len(view)} / {len(df)}")
+        c2.metric("Current Familiar ≥70%", f"{int((view.familiarity >= 70).sum())} / {int((df.familiarity >= 70).sum())}")
+        c3.metric("Rising ≥65%", f"{int((view.momentum >= 65).sum())} / {int((df.momentum >= 65).sum())}")
+        c4.metric("Pokrycie źródeł", f"{df.coverage.max():.0f}%")
+        st.caption("Pierwsza liczba uwzględnia aktualny zakres i filtry; druga pokazuje stan całej bazy.")
         view["spotify"] = [spotify_search_url(a, t) for a, t in zip(view.artist, view.title)]
         view["details"] = [song_link(sid) for sid in view.song_id]
         view["heard"] = view["heard"].fillna(False).astype(bool)
@@ -348,7 +261,10 @@ if view_key == "dashboard":
         show = view[[c for c in cols if c in view.columns]].copy()
         pos_cols = [c for c in show.columns if c.endswith("_pos")]
         for col in pos_cols:
-            show[col] = show[col].map(position_display)
+            show[col] = show[col].map(position_sort_value).astype(int)
+        rename_pos = {c: c.replace("_pos", "") for c in pos_cols}
+        show = show.rename(columns=rename_pos)
+        pos_display_cols = list(rename_pos.values())
 
         column_cfg = score_columns()
         column_cfg.update({
@@ -361,14 +277,14 @@ if view_key == "dashboard":
             "status": st.column_config.SelectboxColumn("Status", options=STATUSES, required=True, width="medium"),
             "recommendation": st.column_config.TextColumn("Rekomendacja", width="medium"),
         })
-        for col in pos_cols:
-            column_cfg[col] = st.column_config.TextColumn(col.replace("_pos", ""), width="small")
-
         editable = {"heard", "status"}
         disabled_cols = [c for c in show.columns if c not in editable]
         original = show[["song_id", "heard", "status"]].copy().set_index("song_id")
+        # Pandas Styler formats only disabled position columns. Underlying value 999
+        # stays numeric, so native ascending sort puts missing positions after 20/100.
+        styled_show = show.style.format({c: position_styler for c in pos_display_cols})
         edited = st.data_editor(
-            show,
+            styled_show,
             hide_index=True,
             use_container_width=True,
             disabled=disabled_cols,
@@ -513,26 +429,106 @@ elif view_key == "archive":
             entries["details"] = [song_link(sid) for sid in entries.song_id]
             for c in ["position", "previous_position", "reported_peak"]:
                 if c in entries:
-                    entries[c] = entries[c].map(position_display)
+                    entries[c] = entries[c].map(position_sort_value).astype(int)
             archive_cols = ["position", "artist", "title", "details", "spotify", "previous_position", "reported_weeks", "reported_peak"]
             archive_show = entries[archive_cols]
+            archive_styled = archive_show.style.format({
+                c: position_styler for c in ["position", "previous_position", "reported_peak"] if c in archive_show.columns
+            })
             st.dataframe(
-                archive_show,
+                archive_styled,
                 hide_index=True,
                 use_container_width=True,
-                height=775,
+                height=770,
+                row_height=36,
                 column_config={
-                    "position": st.column_config.TextColumn("Pozycja", width="small"),
+                    "position": "Pozycja",
                     "title": st.column_config.TextColumn("Tytuł", width="large"),
                     "details": st.column_config.LinkColumn("Szczegóły", display_text="Otwórz", width="small"),
                     "spotify": st.column_config.LinkColumn("Spotify", display_text="▶", width="small"),
-                    "previous_position": st.column_config.TextColumn("Poprzednio", width="small"),
+                    "previous_position": "Poprzednio",
                     "reported_weeks": st.column_config.NumberColumn("Tygodnie"),
-                    "reported_peak": st.column_config.TextColumn("Peak", width="small"),
+                    "reported_peak": "Peak",
                 },
             )
             if src == "BILLBOARD":
                 st.caption("Starsze wpisy Billboard sprzed 0.2.1 mogą mieć puste LW/Weeks/Peak do czasu ponownego pobrania danego tygodnia; błędne wartości zostały celowo wyczyszczone.")
+
+
+elif view_key == "data":
+    st.subheader("⬇️ Dane i procesy")
+    st.caption("Pobieranie działa w osobnym procesie, więc strona nie powinna się blokować. W danej chwili uruchamiamy jeden collector/backfill, aby nie walczyć o SQLite i strony źródłowe.")
+
+    job = latest_job()
+    running = bool(job and job.get("state") in {"running", "starting", "stopping"})
+    if job:
+        state = str(job.get("state", ""))
+        icon = {"done":"✅", "failed":"⚠️", "cancelled":"⏹️", "running":"⏳", "starting":"⏳", "stopping":"⏹️"}.get(state, "ℹ️")
+        st.markdown(f"**{icon} Ostatni proces:** {job.get('kind')} {job.get('source') or ''} — `{state}`")
+        total = int(job.get("total") or 0)
+        done = int(job.get("done") or 0)
+        if running and total:
+            st.progress(min(1.0, max(0.0, done / total)), text=f"{done}/{total} · {job.get('message','')}")
+        else:
+            st.caption(job.get("message") or "")
+        if job.get("messages"):
+            st.code("\n".join(job["messages"][-12:]), language=None)
+        a, b = st.columns(2)
+        if running and a.button("⏹ Zatrzymaj proces", use_container_width=True):
+            stop_job(str(job["job_id"]))
+            st.rerun()
+        if b.button("↻ Odśwież status", use_container_width=True):
+            st.rerun()
+
+    st.divider()
+    st.markdown("### Bieżące notowania")
+    st.caption("OLiA/OLiS mają krótki timeout i tylko jedną próbę eksportu. Jeśli serwis akurat nie poda pełnej listy, collector kończy błędem zamiast wisieć przez kilka minut.")
+    if st.button("Pobierz wszystkie automatyczne źródła", disabled=running, type="primary", use_container_width=True):
+        start_job("collect-all")
+        st.rerun()
+
+    auto_sources = ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
+    cols = st.columns(3)
+    for idx, src in enumerate(auto_sources):
+        if cols[idx % 3].button(f"Pobierz {src}", disabled=running, use_container_width=True, key=f"fetch_{src}"):
+            start_job("collect-source", source=src)
+            st.rerun()
+
+    st.info("Radio ZET pozostaje szybkim importem ręcznym. Strona publikuje bieżące Top 20 w czytelnym tekście, ale jej właściciel jawnie zastrzega brak zgody na automatyczną eksplorację tekstów i danych; dlatego nie uruchamiam automatycznego scrapera ZET.")
+    st.link_button("Otwórz bieżącą Listę Radia ZET", "https://player.radiozet.pl/Lista-przebojow", use_container_width=True)
+
+    st.divider()
+    st.markdown("### Backfill")
+    b1, b2, b3 = st.columns(3)
+    rmf_count = b1.number_input("RMF · liczba notowań", min_value=5, max_value=750, value=130, step=5)
+    if b1.button("Backfill RMF", disabled=running, use_container_width=True):
+        start_job("backfill", source="RMF", count=int(rmf_count)); st.rerun()
+    uk_count = b2.number_input("UK · liczba tygodni", min_value=2, max_value=260, value=26, step=1)
+    if b2.button("Backfill UK", disabled=running, use_container_width=True):
+        start_job("backfill", source="UK", count=int(uk_count)); st.rerun()
+    bb_count = b3.number_input("Billboard · liczba tygodni", min_value=2, max_value=260, value=26, step=1)
+    if b3.button("Backfill Billboard", disabled=running, use_container_width=True):
+        start_job("backfill", source="BILLBOARD", count=int(bb_count)); st.rerun()
+
+    with st.expander("Diagnostyka źródeł", expanded=False):
+        diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
+        if st.button("Sprawdź odpowiedź", use_container_width=True):
+            try:
+                with st.spinner(f"Sprawdzam {diag_source}…"):
+                    if diag_source == "RMF": diag = probe_rmf()
+                    elif diag_source in ("OLIA", "OLIS"): diag = probe_olis(diag_source)
+                    elif diag_source == "ESKA": diag = probe_eska()
+                    elif diag_source == "UK": diag = probe_uk()
+                    else: diag = probe_billboard()
+                st.session_state["source_diag"] = diag
+            except Exception as exc:
+                st.session_state["source_diag"] = {"source": diag_source, "error": f"{type(exc).__name__}: {exc}"}
+        if "source_diag" in st.session_state:
+            copyable_json(st.session_state["source_diag"], "source")
+
+    with st.expander("Ostatnie zapisane notowania", expanded=False):
+        for item in latest_issues():
+            st.caption(f"**{item['source']}** · {item['chart_date']} · {item['entries']} pozycji")
 
 
 elif view_key == "import":

@@ -13,6 +13,9 @@ DB_PATH = Path(os.getenv("RADIOCHARTS_DB", "/app/data/radiocharts.db"))
 if str(DB_PATH).startswith("/app/") and not Path("/app").exists():
     DB_PATH = Path(os.getenv("RADIOCHARTS_DB", str(Path(__file__).resolve().parent.parent / "data" / "radiocharts.db")))
 
+
+_INITIALIZED_DB_PATH: str | None = None
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -182,6 +185,21 @@ def connect():
 
 
 def init_db() -> None:
+    global _INITIALIZED_DB_PATH
+    current_path = str(DB_PATH)
+    if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
+        # Very cheap fast path. If a migration marker was deliberately removed
+        # (tests/maintenance), fall through and run migrations again.
+        try:
+            con0 = sqlite3.connect(DB_PATH, timeout=2)
+            keys = {r[0] for r in con0.execute(
+                "SELECT key FROM app_meta WHERE key IN ('song_alias_merge_v1','billboard_metadata_reset_v1','billboard_metadata_reset_v2')"
+            ).fetchall()}
+            con0.close()
+            if len(keys) == 3:
+                return
+        except Exception:
+            pass
     with connect() as con:
         con.executescript(SCHEMA)
         # Lightweight migrations for existing MVP databases.
@@ -231,6 +249,8 @@ def init_db() -> None:
                    WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
             )
             con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v2','done')")
+
+    _INITIALIZED_DB_PATH = current_path
 
 
 def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release_date: str | None = None) -> int:

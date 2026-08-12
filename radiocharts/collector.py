@@ -30,35 +30,52 @@ def _enabled(cfg: dict, name: str, default: bool = False) -> bool:
     return bool(cfg.get("sources", {}).get(name, {}).get("enabled", default))
 
 
-def collect_current() -> list[str]:
+def _source_jobs(cfg: dict) -> list[tuple[str, Callable[[], dict]]]:
+    jobs: list[tuple[str, Callable[[], dict]]] = []
+    if _enabled(cfg, "rmf", True): jobs.append(("RMF", fetch_rmf))
+    if _enabled(cfg, "olia"): jobs.append(("OLIA", lambda: fetch_olis("OLIA")))
+    if _enabled(cfg, "olis"): jobs.append(("OLIS", lambda: fetch_olis("OLIS")))
+    if _enabled(cfg, "eska"): jobs.append(("ESKA", fetch_eska))
+    if _enabled(cfg, "uk"): jobs.append(("UK", fetch_uk))
+    if _enabled(cfg, "billboard"): jobs.append(("BILLBOARD", fetch_billboard))
+    return jobs
+
+
+def _store_job(name: str, fn: Callable[[], dict]) -> str:
+    data = fn()
+    store(data)
+    return f"✅ {name}: {len(data['entries'])} pozycji, notowanie {data['issue_key']} ({data['chart_date']})"
+
+
+def collect_source(source: str) -> str:
+    source = source.upper()
+    cfg = load_config()
+    jobs = dict(_source_jobs(cfg))
+    if source == "ZET":
+        return "ℹ️ ZET: tryb importu ręcznego"
+    if source not in jobs:
+        raise ValueError(f"Źródło {source} jest wyłączone albo nieznane")
+    init_db()
+    with FileLock(str(LOCK_PATH), timeout=1):
+        return _store_job(source, jobs[source])
+
+
+def collect_current(progress_callback: Callable[[int, int, str], None] | None = None) -> list[str]:
     """Collect every enabled automatic source, without one failure blocking the rest."""
     cfg = load_config()
     messages: list[str] = []
     init_db()
     with FileLock(str(LOCK_PATH), timeout=1):
-        jobs = []
-        if _enabled(cfg, "rmf", True):
-            jobs.append(("RMF", fetch_rmf))
-        if _enabled(cfg, "olia"):
-            jobs.append(("OLIA", lambda: fetch_olis("OLIA")))
-        if _enabled(cfg, "olis"):
-            jobs.append(("OLIS", lambda: fetch_olis("OLIS")))
-        if _enabled(cfg, "eska"):
-            jobs.append(("ESKA", fetch_eska))
-        if _enabled(cfg, "uk"):
-            jobs.append(("UK", fetch_uk))
-        if _enabled(cfg, "billboard"):
-            jobs.append(("BILLBOARD", fetch_billboard))
-
-        for name, fn in jobs:
+        jobs = _source_jobs(cfg)
+        total = len(jobs)
+        for idx, (name, fn) in enumerate(jobs, start=1):
             try:
-                data = fn()
-                store(data)
-                messages.append(
-                    f"✅ {name}: {len(data['entries'])} pozycji, notowanie {data['issue_key']} ({data['chart_date']})"
-                )
+                msg = _store_job(name, fn)
             except Exception as exc:
-                messages.append(f"⚠️ {name}: {type(exc).__name__}: {exc}")
+                msg = f"⚠️ {name}: {type(exc).__name__}: {exc}"
+            messages.append(msg)
+            if progress_callback:
+                progress_callback(idx, total, msg)
 
         zet_cfg = cfg.get("sources", {}).get("zet", {})
         if zet_cfg.get("enabled") and zet_cfg.get("mode") == "manual_import":
