@@ -5,6 +5,7 @@ import re
 import time
 from datetime import datetime
 from io import BytesIO, StringIO
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -415,30 +416,214 @@ def probe_olis(source: str, timeout: int = 30) -> dict:
     }
 
 
+
+def _download_csv_from_open_page(page, context, timeout_ms: int = 1800) -> tuple[list[dict], dict]:
+    """Try the official CSV control using an already-open browser page.
+
+    This intentionally has a very short timeout. Current collection should fail
+    fast rather than launch a second Chromium instance and wait for minutes.
+    """
+    meta: dict = {"attempted": True}
+    locator = page.get_by_text("CSV", exact=True)
+    try:
+        count = locator.count()
+    except Exception:
+        count = 0
+    errors: list[str] = []
+    for idx in range(count - 1, -1, -1):
+        el = locator.nth(idx)
+        try:
+            if not el.is_visible(timeout=250):
+                continue
+        except Exception:
+            continue
+        try:
+            el.scroll_into_view_if_needed(timeout=500)
+        except Exception:
+            pass
+        try:
+            href = el.evaluate("el => el.href || el.closest('a')?.href || ''")
+            if href and not str(href).lower().startswith(("javascript:", "#")):
+                resp = context.request.get(str(href), timeout=timeout_ms)
+                if resp.ok:
+                    content = resp.body()
+                    entries = _parse_export_csv(content)
+                    meta.update({"via": "href", "url": str(href), "bytes": len(content), "parsed_entries": len(entries)})
+                    return entries, meta
+        except Exception as exc:
+            errors.append(f"href:{type(exc).__name__}")
+        try:
+            with page.expect_download(timeout=timeout_ms) as info:
+                el.click(timeout=min(timeout_ms, 1200))
+            dl = info.value
+            path = dl.path()
+            if path:
+                content = Path(path).read_bytes()
+                entries = _parse_export_csv(content)
+                meta.update({"via": "download", "filename": dl.suggested_filename, "bytes": len(content), "parsed_entries": len(entries)})
+                return entries, meta
+        except Exception as exc:
+            errors.append(f"download:{type(exc).__name__}")
+    meta["error"] = "; ".join(errors[-5:]) or "Nie znaleziono aktywnego eksportu CSV"
+    return [], meta
+
+
+def _extract_open_page(page, context, source: str, export_timeout_ms: int = 1800) -> dict:
+    """Read the currently selected OLiA/OLiS week from one open page."""
+    text = page.locator("body").inner_text(timeout=1500)
+    html = page.content()
+    data = parse_olis_rendered(html, text, source)
+    if len(data["entries"]) >= 50:
+        data["source_url"] = page.url
+        data["parser_mode"] = data.get("parser_mode") or "rendered"
+        return data
+
+    export_entries, meta = _download_csv_from_open_page(page, context, timeout_ms=export_timeout_ms)
+    if len(export_entries) >= 50:
+        data["entries"] = export_entries
+        data["parser_mode"] = "official_csv_same_session"
+        data["export_meta"] = meta
+        data["source_url"] = page.url
+        return data
+    detail = meta.get("error") or f"CSV: {len(export_entries)} pozycji"
+    raise ValueError(
+        f"Parser {source} odczytał tylko {len(data['entries'])} pozycji; "
+        f"pełny eksport nie był gotowy ({detail}). Spróbuj ponownie."
+    )
+
+
+def _open_chart_browser(source: str, timeout_ms: int = 6500):
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("Brak Playwright/Chromium w obrazie") from exc
+
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+    context = browser.new_context(
+        locale="pl-PL",
+        accept_downloads=True,
+        viewport={"width": 1440, "height": 1000},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+    )
+    page = context.new_page()
+    page.set_default_timeout(1500)
+    try:
+        page.goto(URLS[source.upper()], wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(300)
+    except Exception:
+        context.close(); browser.close(); pw.stop()
+        raise
+    return pw, browser, context, page
+
+
+def _go_previous_week(page, old_range: str, timeout_ms: int = 2200) -> bool:
+    """Click the chart's left-arrow control and wait briefly for a date change."""
+    candidates = [
+        page.get_by_text("<", exact=True),
+        page.locator("button", has_text="<"),
+        page.locator("a", has_text="<"),
+    ]
+    clicked = False
+    for locator in candidates:
+        try:
+            count = locator.count()
+        except Exception:
+            count = 0
+        for i in range(count):
+            el = locator.nth(i)
+            try:
+                if not el.is_visible(timeout=150):
+                    continue
+                el.click(timeout=700)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if clicked:
+            break
+    if not clicked:
+        return False
+
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(120)
+        try:
+            text = page.locator("body").inner_text(timeout=600)
+            start, end = _parse_date_range(text)
+            now = f"{start}_{end}"
+            if now != old_range:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def iter_olis_history(source: str, count: int = 12):
+    """Yield historical OLiA/OLiS weeks using one Chromium session.
+
+    The official site keeps archive navigation on one URL, so the browser must
+    click the previous-week control. Each week is fail-fast: a failed CSV export
+    is yielded as an error and the walker continues when the date control works.
+    """
+    source = source.upper()
+    if source not in URLS:
+        raise ValueError(f"Nieznane źródło: {source}")
+    count = max(1, min(int(count), 104))
+    pw, browser, context, page = _open_chart_browser(source, timeout_ms=6500)
+    try:
+        for idx in range(count):
+            old_range = ""
+            try:
+                text = page.locator("body").inner_text(timeout=1200)
+                start, end = _parse_date_range(text)
+                old_range = f"{start}_{end}"
+                data = _extract_open_page(page, context, source, export_timeout_ms=1600)
+                yield idx + 1, count, data, None
+            except Exception as exc:
+                yield idx + 1, count, None, f"{type(exc).__name__}: {exc}"
+            if idx + 1 >= count:
+                break
+            if not old_range:
+                try:
+                    text = page.locator("body").inner_text(timeout=700)
+                    start, end = _parse_date_range(text)
+                    old_range = f"{start}_{end}"
+                except Exception:
+                    break
+            if not _go_previous_week(page, old_range):
+                break
+    finally:
+        try: context.close()
+        except Exception: pass
+        try: browser.close()
+        except Exception: pass
+        try: pw.stop()
+        except Exception: pass
+
+
 def fetch_olis(source: str, timeout: int = 15) -> dict:
     source = source.upper()
     if source not in URLS:
         raise ValueError(f"Nieznane źródło: {source}")
 
-    # Fail-fast strategy: render once. If the site exposes only its 12-row
-    # preview, try the official CSV exactly once. No multi-minute retries.
-    rendered = _render(source)
-    data = parse_olis_rendered(rendered.html, rendered.text, source)
-    if len(data["entries"]) >= 50:
-        data["source_url"] = rendered.url
-        return data
-
-    export_entries, export_meta = _try_official_export(source)
-    if len(export_entries) >= 50:
-        data["entries"] = export_entries
-        data["parser_mode"] = "official_csv_export_single_try"
-        data["export_meta"] = export_meta
-        data["source_url"] = rendered.url
-        return data
-
-    detail = export_meta.get("error") or f"CSV: {len(export_entries)} pozycji"
-    raise ValueError(
-        f"Parser {source} odczytał tylko {len(data['entries'])} pozycji; "
-        f"pełny eksport nie był gotowy ({detail}). Spróbuj ponownie za chwilę."
-    )
+    # One Chromium session, one short attempt. No second browser launch and no
+    # retries here; the user can rerun the source if ZPAV's export is not ready.
+    pw = browser = context = page = None
+    try:
+        pw, browser, context, page = _open_chart_browser(source, timeout_ms=min(7000, max(3500, int(timeout * 1000))))
+        return _extract_open_page(page, context, source, export_timeout_ms=1800)
+    finally:
+        if context is not None:
+            try: context.close()
+            except Exception: pass
+        if browser is not None:
+            try: browser.close()
+            except Exception: pass
+        if pw is not None:
+            try: pw.stop()
+            except Exception: pass
 

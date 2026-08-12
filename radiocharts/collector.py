@@ -11,7 +11,7 @@ from filelock import FileLock, Timeout
 from radiocharts.config import load_config
 from radiocharts.db import init_db, upsert_issue
 from radiocharts.sources.rmf import fetch_rmf
-from radiocharts.sources.olis import fetch_olis
+from radiocharts.sources.olis import fetch_olis, iter_olis_history
 from radiocharts.sources.eska import fetch_eska
 from radiocharts.sources.uk import fetch_uk
 from radiocharts.sources.billboard import fetch_billboard
@@ -153,6 +153,38 @@ def backfill_weekly_source(
                 progress_callback(idx + 1, count, msg)
             if idx + 1 < count and pause_seconds > 0:
                 time.sleep(pause_seconds)
+    return messages
+
+
+def backfill_olis_source(
+    source: str,
+    count: int = 12,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[str]:
+    """Experimental archive walker for OLiA/OLiS.
+
+    The official site keeps historical weeks behind an in-page previous-week
+    control, so one browser session walks backwards and tries the official CSV
+    for each selected week. Failed weeks are skipped instead of stalling the job.
+    """
+    source = source.upper()
+    if source not in {"OLIA", "OLIS"}:
+        raise ValueError("Backfill OLiA/OLiS obsługuje tylko OLIA i OLIS")
+    count = max(1, min(int(count), 104))
+    messages: list[str] = []
+    with FileLock(str(LOCK_PATH), timeout=1):
+        for done, total, data, error in iter_olis_history(source, count):
+            if data is not None:
+                try:
+                    store(data)
+                    msg = f"{source} {data['issue_key']}: OK ({len(data['entries'])} pozycji)"
+                except Exception as exc:
+                    msg = f"{source}: {type(exc).__name__}: {exc}"
+            else:
+                msg = f"{source}: {error or 'nie udało się odczytać tygodnia'}"
+            messages.append(msg)
+            if progress_callback:
+                progress_callback(done, total, msg)
     return messages
 
 

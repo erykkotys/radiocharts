@@ -62,7 +62,7 @@ def active_job() -> dict | None:
     return None
 
 
-def start_job(kind: str, source: str | None = None, count: int | None = None) -> dict:
+def start_job(kind: str, source: str | None = None, count: int | None = None, params: dict | None = None) -> dict:
     current = active_job()
     if current:
         raise RuntimeError(f"Inny proces już działa: {current.get('label') or current.get('job_id')}")
@@ -73,6 +73,8 @@ def start_job(kind: str, source: str | None = None, count: int | None = None) ->
         cmd += ["--source", source.upper()]
     if count is not None:
         cmd += ["--count", str(int(count))]
+    if params:
+        cmd += ["--params-json", json.dumps(params, separators=(",", ":"))]
 
     data = {
         "job_id": job_id,
@@ -86,6 +88,7 @@ def start_job(kind: str, source: str | None = None, count: int | None = None) ->
         "done": 0,
         "total": 0,
         "messages": [],
+        "params": params or {},
     }
     path = _path(job_id)
     _write(path, data)
@@ -111,6 +114,13 @@ def stop_job(job_id: str) -> dict:
     data["state"] = "stopping"
     data["message"] = "Zatrzymuję proces…"
     _write(path, data)
+    child_pid = data.get("child_pid")
+    if child_pid:
+        try:
+            os.killpg(int(child_pid), signal.SIGTERM)
+        except Exception:
+            try: os.kill(int(child_pid), signal.SIGTERM)
+            except Exception: pass
     if pid:
         try:
             os.killpg(int(pid), signal.SIGTERM)

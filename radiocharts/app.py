@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import json
+import re
+import unicodedata
 from datetime import date
 from urllib.parse import quote
 
@@ -30,6 +32,7 @@ st.markdown(
     <style>
       html { font-size: 20px; }
       [data-testid="stAppViewContainer"] { background: #1b2028; }
+      .block-container, [data-testid="stMainBlockContainer"] { padding-top: 0.65rem !important; }
       [data-testid="stHeader"] { background: rgba(27, 32, 40, 0.94); }
       [data-testid="stSidebar"] { background: #222832; font-size: 1.02rem; }
       [data-testid="stMetricValue"] { font-size: 2.05rem; }
@@ -205,6 +208,45 @@ def spotify_search_url(artist: str, title: str) -> str:
     return f"https://open.spotify.com/search/{query}"
 
 
+def search_key(value: object) -> str:
+    """Accent-insensitive Polish search key: ę=e, ł=l, ó=o, etc."""
+    text = str(value or "").casefold().replace("ł", "l")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+@st.fragment(run_every=1.0)
+def render_job_status_fragment() -> None:
+    """Poll background jobs without rerunning the whole application."""
+    job = latest_job()
+    if not job:
+        st.caption("Brak uruchomionych procesów.")
+        return
+    state = str(job.get("state", ""))
+    running_now = state in {"running", "starting", "stopping"}
+    icon = {"done":"✅", "failed":"⚠️", "cancelled":"⏹️", "running":"⏳", "starting":"⏳", "stopping":"⏹️"}.get(state, "ℹ️")
+    st.markdown(f"**{icon} Proces:** {job.get('kind')} {job.get('source') or ''} — `{state}`")
+    total = int(job.get("total") or 0)
+    done = int(job.get("done") or 0)
+    fraction = min(1.0, max(0.0, done / total)) if total else 0.0
+    if running_now:
+        st.progress(fraction, text=(f"{done}/{total} · " if total else "") + str(job.get("message") or "Pracuję…"))
+    else:
+        st.caption(job.get("message") or "")
+    if job.get("messages"):
+        st.code("\n".join(job["messages"][-10:]), language=None)
+    if running_now and st.button("⏹ Zatrzymaj proces", use_container_width=True, key=f"stop_{job.get('job_id')}"):
+        stop_job(str(job["job_id"]))
+        st.rerun()
+
+    previous = st.session_state.get("_rc_job_state")
+    st.session_state["_rc_job_state"] = state
+    if previous in {"running", "starting", "stopping"} and not running_now:
+        st.rerun()
+
+
 view_key = str(st.query_params.get("view", "dashboard"))
 if view_key not in {"dashboard", "song", "archive", "data", "import", "methodology"}:
     view_key = "dashboard"
@@ -333,19 +375,45 @@ elif view_key == "song":
         st.info("Najpierw dodaj dane.")
     else:
         ordered = df.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
-        labels = [f"{r.artist} — {r.title}" for r in ordered.itertuples()]
         ids = [int(r.song_id) for r in ordered.itertuples()]
         requested = st.query_params.get("song")
         try:
             selected_id = int(requested) if requested is not None else ids[0]
         except (TypeError, ValueError):
             selected_id = ids[0]
-        index = ids.index(selected_id) if selected_id in ids else 0
-        label = st.selectbox("Utwór", labels, index=index, key="song_picker")
-        song_id = ids[labels.index(label)]
-        if str(st.query_params.get("song", "")) != str(song_id):
-            st.query_params["view"] = "song"
-            st.query_params["song"] = str(song_id)
+        if selected_id not in ids:
+            selected_id = ids[0]
+
+        search = st.text_input(
+            "Szukaj utworu",
+            value="",
+            key="song_search_text",
+            placeholder="Wykonawca lub tytuł — polskie znaki nie są wymagane",
+            help="Wyszukiwanie ignoruje polskie znaki: e=ę, a=ą, l=ł itd. To zwykłe pole tekstowe, więc Ctrl+A/Backspace działa normalnie.",
+        )
+        if search.strip():
+            tokens = search_key(search).split()
+            hay = [search_key(f"{r.artist} {r.title}") for r in ordered.itertuples()]
+            mask = [all(token in value for token in tokens) for value in hay]
+            matches = ordered[pd.Series(mask, index=ordered.index)].head(20).copy()
+            if matches.empty:
+                st.caption("Brak wyników.")
+            else:
+                matches["details"] = [song_link(sid) for sid in matches.song_id]
+                matches["spotify"] = [spotify_search_url(a, t) for a, t in zip(matches.artist, matches.title)]
+                st.dataframe(
+                    matches[["artist", "title", "details", "spotify"]],
+                    hide_index=True, use_container_width=True, height=min(500, 75 + 36 * len(matches)),
+                    column_config={
+                        "artist": "Wykonawca",
+                        "title": st.column_config.TextColumn("Tytuł", width="large"),
+                        "details": st.column_config.LinkColumn("Szczegóły", display_text="Otwórz ↗", width="small"),
+                        "spotify": st.column_config.LinkColumn("Spotify", display_text="▶", width="small"),
+                    },
+                )
+                st.caption("Szczegóły utworu otwierają się w nowej karcie; wpisywanie w wyszukiwarce nie zmienia losowo wybranego utworu.")
+
+        song_id = selected_id
         row = df[df.song_id == song_id].iloc[0]
 
         head1, head2 = st.columns([4, 1])
@@ -457,32 +525,13 @@ elif view_key == "archive":
 
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
-    st.caption("Pobieranie działa w osobnym procesie, więc strona nie powinna się blokować. W danej chwili uruchamiamy jeden collector/backfill, aby nie walczyć o SQLite i strony źródłowe.")
+    st.caption("Collectory działają poza procesem Streamlita. OLiA/OLiS mają twardy limit czasu — jeśli ZPAV nie poda pełnej listy szybko, dostaniesz błąd zamiast wielominutowego czekania.")
 
-    job = latest_job()
-    running = bool(job and job.get("state") in {"running", "starting", "stopping"})
-    if job:
-        state = str(job.get("state", ""))
-        icon = {"done":"✅", "failed":"⚠️", "cancelled":"⏹️", "running":"⏳", "starting":"⏳", "stopping":"⏹️"}.get(state, "ℹ️")
-        st.markdown(f"**{icon} Ostatni proces:** {job.get('kind')} {job.get('source') or ''} — `{state}`")
-        total = int(job.get("total") or 0)
-        done = int(job.get("done") or 0)
-        if running and total:
-            st.progress(min(1.0, max(0.0, done / total)), text=f"{done}/{total} · {job.get('message','')}")
-        else:
-            st.caption(job.get("message") or "")
-        if job.get("messages"):
-            st.code("\n".join(job["messages"][-12:]), language=None)
-        a, b = st.columns(2)
-        if running and a.button("⏹ Zatrzymaj proces", use_container_width=True):
-            stop_job(str(job["job_id"]))
-            st.rerun()
-        if b.button("↻ Odśwież status", use_container_width=True):
-            st.rerun()
+    render_job_status_fragment()
+    running = active_job() is not None
 
     st.divider()
     st.markdown("### Bieżące notowania")
-    st.caption("OLiA/OLiS mają krótki timeout i tylko jedną próbę eksportu. Jeśli serwis akurat nie poda pełnej listy, collector kończy błędem zamiast wisieć przez kilka minut.")
     if st.button("Pobierz wszystkie automatyczne źródła", disabled=running, type="primary", use_container_width=True):
         start_job("collect-all")
         st.rerun()
@@ -494,11 +543,21 @@ elif view_key == "data":
             start_job("collect-source", source=src)
             st.rerun()
 
-    st.info("Radio ZET pozostaje szybkim importem ręcznym. Strona publikuje bieżące Top 20 w czytelnym tekście, ale jej właściciel jawnie zastrzega brak zgody na automatyczną eksplorację tekstów i danych; dlatego nie uruchamiam automatycznego scrapera ZET.")
-    st.link_button("Otwórz bieżącą Listę Radia ZET", "https://player.radiozet.pl/Lista-przebojow", use_container_width=True)
+    with st.expander("Radio ZET — szybki import bieżącego notowania", expanded=False):
+        st.caption("Bieżąca lista ZET jest publiczna, ale Eurozet zastrzega brak zgody na automatyczną eksplorację tekstów i danych. Dlatego zostawiam pobranie półręczne: otwierasz stronę, kopiujesz tekst i zapisujesz go tutaj.")
+        st.link_button("Otwórz bieżącą Listę Radia ZET", "https://player.radiozet.pl/Lista-przebojow", use_container_width=True)
+        zet_quick = st.text_area("Wklej tekst bieżącej listy ZET", height=150, key="zet_quick_paste")
+        if st.button("Zapisz bieżący ZET", disabled=running, use_container_width=True, key="zet_quick_save"):
+            try:
+                issue = parse_zet_text(zet_quick, fallback_date=date.today())
+                upsert_issue(issue["source"], issue["chart_date"], issue["issue_key"], issue["chart_size"], issue["entries"], issue.get("source_url"))
+                st.success(f"Zaimportowano ZET: {len(issue['entries'])} pozycji z {issue['chart_date']}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"ZET: {type(exc).__name__}: {exc}")
 
     st.divider()
-    st.markdown("### Backfill")
+    st.markdown("### Backfill RMF / UK / Billboard")
     b1, b2, b3 = st.columns(3)
     rmf_count = b1.number_input("RMF · liczba notowań", min_value=5, max_value=750, value=130, step=5)
     if b1.button("Backfill RMF", disabled=running, use_container_width=True):
@@ -509,6 +568,20 @@ elif view_key == "data":
     bb_count = b3.number_input("Billboard · liczba tygodni", min_value=2, max_value=260, value=26, step=1)
     if b3.button("Backfill Billboard", disabled=running, use_container_width=True):
         start_job("backfill", source="BILLBOARD", count=int(bb_count)); st.rerun()
+    if st.button("Backfill wszystkie 3", disabled=running, type="primary", use_container_width=True):
+        start_job("backfill-all", params={"rmf_count": int(rmf_count), "uk_count": int(uk_count), "billboard_count": int(bb_count)})
+        st.rerun()
+
+    st.divider()
+    st.markdown("### Backfill OLiA / OLiS — eksperymentalny")
+    st.caption("Serwis ZPAV nie ma osobnych URL-i dla tygodni: archiwum zmienia się przyciskiem poprzedniego tygodnia na tej samej stronie. Backfill idzie jednym Chromium, tydzień po tygodniu; nieudany eksport jest pomijany zamiast blokować cały proces.")
+    o1, o2 = st.columns(2)
+    olia_count = o1.number_input("OLiA · liczba tygodni", min_value=2, max_value=104, value=12, step=1)
+    if o1.button("Backfill OLiA", disabled=running, use_container_width=True):
+        start_job("backfill", source="OLIA", count=int(olia_count)); st.rerun()
+    olis_count = o2.number_input("OLiS · liczba tygodni", min_value=2, max_value=104, value=12, step=1)
+    if o2.button("Backfill OLiS", disabled=running, use_container_width=True):
+        start_job("backfill", source="OLIS", count=int(olis_count)); st.rerun()
 
     with st.expander("Diagnostyka źródeł", expanded=False):
         diag_source = st.selectbox("Źródło", ["RMF", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"], key="diag_source")
@@ -529,7 +602,6 @@ elif view_key == "data":
     with st.expander("Ostatnie zapisane notowania", expanded=False):
         for item in latest_issues():
             st.caption(f"**{item['source']}** · {item['chart_date']} · {item['entries']} pozycji")
-
 
 elif view_key == "import":
     st.subheader("Import notowania")
@@ -587,7 +659,7 @@ else:
 Kolumny `*_pos` pokazują wyłącznie najnowsze zapisane notowanie danego źródła. Jeżeli utworu w nim nie ma, widzisz `—`. Starsze notowania pozostają w bazie i nadal są używane do obliczania tygodni, peaków, momentum i Familiarity.
 
 ### Backfill
-RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboard Hot 100 mają tygodniowy backfill po stabilnych adresach archiwalnych. `weeks/peak` dla UK i Billboard bierzemy z oficjalnych bieżących notowań, a backfill buduje przede wszystkim historię pozycji do Momentum. OLiA/OLiS oraz ESKA wymagają osobnego mechanizmu nawigacji po ich archiwach.
+RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboard Hot 100 mają tygodniowy backfill po stabilnych adresach archiwalnych. `weeks/peak` dla UK i Billboard bierzemy z oficjalnych bieżących notowań, a backfill buduje przede wszystkim historię pozycji do Momentum. OLiA/OLiS mają eksperymentalny backfill przez przycisk poprzedniego tygodnia i oficjalny eksport CSV; nieudane tygodnie są pomijane. ESKA nadal wymaga osobnego mechanizmu archiwum.
 
 ### Wydajność
 SQLite zostaje. Przy tej skali danych nie jest wąskim gardłem; dashboard cache'uje kosztowne agregacje do czasu zmiany bazy, a tabele nie używają już Pandas Styler.

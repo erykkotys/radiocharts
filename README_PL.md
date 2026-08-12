@@ -198,3 +198,14 @@ Workflow publikuje ten sam build pod trzema nazwami:
 ## 0.2.5
 
 Wydajność i obsługa procesów: szybki agregator metryk, osobna zakładka **Dane**, collectory/backfille działające w procesie potomnym z możliwością zatrzymania, osobne pobieranie każdego źródła, fail-fast OLiA/OLiS, liczniki `filtr / ogółem` oraz numeryczne sortowanie pozycji z brakiem wyświetlanym jako `-`.
+
+## 0.2.6
+
+- mniejszy górny margines nad tytułem aplikacji,
+- automatyczny pasek postępu procesów przez `st.fragment(run_every=1)` — bez ręcznego „Odśwież status”,
+- każdy bieżący collector ma twardy limit czasu; OLiA/OLiS kończą próbę szybko zamiast blokować UI,
+- OLiA/OLiS używają jednej sesji Chromium do widoku + oficjalnego CSV, bez uruchamiania drugiej przeglądarki,
+- przycisk „Backfill wszystkie 3” dla RMF + UK + Billboard,
+- eksperymentalny backfill OLiA i OLiS po tygodniach, przez oficjalną nawigację archiwum i CSV; błędne tygodnie są pomijane,
+- wyszukiwarka w widoku „Utwór” jest zwykłym polem tekstowym i ignoruje polskie znaki (`e=ę`, `l=ł`, itd.),
+- szybki import bieżącej listy ZET jest dostępny bezpośrednio w zakładce Dane.
