@@ -66,20 +66,42 @@ def collect_source(source: str) -> str:
             raise
 
 
-def collect_current(progress_callback: Callable[[int, int, str], None] | None = None) -> list[str]:
-    """Collect every enabled automatic source, without one failure blocking the rest."""
+def collect_current(
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    attempts_per_source: int = 1,
+    retry_delay: float = 0.0,
+) -> list[str]:
+    """Collect every enabled source; optionally retry transient failures.
+
+    Scheduled runs use multiple attempts. Manual runs keep one attempt so the UI
+    remains quick and the user can decide whether to try again. Each attempt is
+    recorded in ``source_checks``; Dashboard freshness is based on *any* success
+    during the local day, not merely the last attempt.
+    """
     cfg = load_config()
     messages: list[str] = []
+    attempts_per_source = max(1, min(int(attempts_per_source), 5))
+    retry_delay = max(0.0, float(retry_delay))
     init_db()
     with FileLock(str(LOCK_PATH), timeout=1):
         jobs = _source_jobs(cfg)
         total = len(jobs)
         for idx, (name, fn) in enumerate(jobs, start=1):
-            try:
-                msg = _store_job(name, fn)
-            except Exception as exc:
-                msg = f"⚠️ {name}: {type(exc).__name__}: {exc}"
-                record_source_check(name, False, msg)
+            msg = ""
+            for attempt in range(1, attempts_per_source + 1):
+                try:
+                    msg = _store_job(name, fn)
+                    if attempt > 1:
+                        msg += f" · sukces za {attempt}. próbą"
+                    break
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}: {exc}"
+                    record_source_check(name, False, detail)
+                    if attempt >= attempts_per_source:
+                        msg = f"⚠️ {name}: {detail}"
+                        break
+                    if retry_delay > 0:
+                        time.sleep(retry_delay)
             messages.append(msg)
             if progress_callback:
                 progress_callback(idx, total, msg)
@@ -212,10 +234,10 @@ def backfill_zet(
 ) -> list[str]:
     """Best-effort ZET backfill using public archived issue URLs.
 
-    Radio ZET archive pages use numeric content IDs rather than dates. A few
-    stable public archive points give a very regular ID/day slope, so each target
-    day is searched only in a small neighborhood around the predicted ID.
-    Failed days are skipped and the job remains stoppable in the UI.
+    The current archive pattern is weekday-only: Saturday/Sunday dates have no
+    corresponding archived issue while Friday and Monday do. ``count`` therefore
+    means number of chart issues, not calendar days; weekends are skipped without
+    being reported as errors.
     """
     count = max(1, min(int(count), 180))
     messages: list[str] = []
@@ -225,15 +247,22 @@ def backfill_zet(
         store(current)
         msg = f"ZET {current_date.isoformat()}: OK (bieżące, 20 pozycji)"
         messages.append(msg)
+        done = 1
         if progress_callback:
-            progress_callback(1, count, msg)
+            progress_callback(done, count, msg)
         if count == 1:
             return messages
 
         last_found_id: int | None = None
-        done = 1
         target = current_date - timedelta(days=1)
         while done < count:
+            # Public archive observations in 2026 consistently skip weekends.
+            # Move straight to Friday/Monday instead of spending dozens of HTTP
+            # requests on dates for which no archive issue exists.
+            if target.weekday() >= 5:
+                target -= timedelta(days=1)
+                continue
+
             center = (last_found_id - 7) if last_found_id is not None else _zet_predicted_archive_id(target)
             found = None
             found_id = None
@@ -253,6 +282,7 @@ def backfill_zet(
                     pass
                 if pause_seconds > 0:
                     time.sleep(pause_seconds)
+
             done += 1
             if found is not None:
                 store(found)
@@ -266,6 +296,7 @@ def backfill_zet(
                 progress_callback(done, count, msg)
             target -= timedelta(days=1)
     return messages
+
 
 def main():
     p = argparse.ArgumentParser()

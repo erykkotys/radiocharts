@@ -14,7 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from radiocharts.build_info import BUILD_DATE, display_version
-from radiocharts.db import DB_PATH, chart_revision, init_db, issue_entries, latest_issues, latest_source_checks, list_issues, load_notes, update_note, upsert_issue
+from radiocharts.db import DB_PATH, chart_revision, init_db, issue_entries, latest_issues, latest_source_checks, source_check_day_summary, list_issues, load_notes, update_note, upsert_issue
 from radiocharts.job_manager import active_job, latest_job, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.eska import probe_eska
@@ -153,52 +153,66 @@ def clear_score_cache() -> None:
 
 
 def source_health_frame() -> tuple[pd.DataFrame, list[str]]:
-    """Show whether every source has actually been checked today.
+    """Day-level freshness: any successful fetch today is enough.
 
-    Positions always come from the latest *successful* issue. A failed current
-    fetch therefore cannot silently replace good data; this panel makes the
-    stale/missing source explicit.
+    A later failed scheduled/manual retry is useful diagnostic information, but
+    it must not turn a source red after today's issue has already been stored.
     """
     sources = ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
     issues = {str(x["source"]): x for x in latest_issues()}
-    checks = {str(x["source"]): x for x in latest_source_checks()}
-    now = datetime.now(ZoneInfo("Europe/Warsaw"))
-    today = now.date()
+    latest = {str(x["source"]): x for x in latest_source_checks()}
+    daily = {str(x["source"]): x for x in source_check_day_summary()}
+    tz = ZoneInfo("Europe/Warsaw")
     rows = []
     problems: list[str] = []
+
+    def fmt_local(value) -> str:
+        if not value:
+            return "—"
+        try:
+            return datetime.fromisoformat(str(value)).astimezone(tz).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "—"
+
     for src in sources:
         issue = issues.get(src)
-        check = checks.get(src)
-        checked_local = None
-        checked_today = False
-        success = False
-        message = ""
-        if check:
-            try:
-                checked_local = datetime.fromisoformat(str(check["checked_at"])).astimezone(ZoneInfo("Europe/Warsaw"))
-                checked_today = checked_local.date() == today
-            except Exception:
-                pass
-            success = bool(check.get("success"))
-            message = str(check.get("message") or "")
+        last = latest.get(src)
+        day = daily.get(src)
+        success_today = bool(day and day.get("success_today"))
+        attempted_today = bool(day and day.get("attempted_today"))
+
         if issue is None:
             status = "❌ brak danych"
             problems.append(src)
-        elif checked_today and success:
-            status = "✅ sprawdzone dziś"
-        elif checked_today and not success:
-            status = "❌ dzisiejsze pobranie nieudane"
+        elif success_today:
+            status = "✅ pobrano dziś"
+        elif attempted_today:
+            status = "❌ dziś bez udanego pobrania"
             problems.append(src)
         else:
             status = "⚠️ nie sprawdzono dziś"
             problems.append(src)
+
+        # When today's data was obtained successfully, show that successful
+        # attempt instead of a later transient failure.
+        if success_today:
+            shown_at = day.get("latest_success_at")
+            shown_message = str(day.get("latest_success_message") or "")
+            attempts = int(day.get("attempts_today") or 0)
+            successes = int(day.get("successes_today") or 0)
+            if attempts > successes:
+                shown_message = (shown_message + f" · dziś: {successes}/{attempts} prób udanych").strip(" ·")
+        else:
+            shown_at = last.get("checked_at") if last else None
+            shown_message = str(last.get("message") or "") if last else ""
+
         rows.append({
             "Źródło": src,
             "Status": status,
             "Najnowsze notowanie": str(issue.get("chart_date")) if issue else "—",
             "Pozycji": int(issue.get("entries") or 0) if issue else 0,
-            "Ostatnia próba": checked_local.strftime("%Y-%m-%d %H:%M") if checked_local else "—",
-            "Komunikat": message[-180:] if message else "",
+            "Ostatni sukces / próba": fmt_local(shown_at),
+            "Komunikat": shown_message[-180:] if shown_message else "",
         })
     return pd.DataFrame(rows), problems
 
@@ -385,7 +399,7 @@ if view_key == "dashboard":
             st.success("Wszystkie źródła zostały sprawdzone dzisiaj.")
         with st.expander("Stan źródeł / świeżość danych", expanded=bool(health_problems)):
             st.dataframe(health_df, hide_index=True, use_container_width=True, height=285)
-            st.caption("'Sprawdzone dziś' oznacza, że collector wykonał dziś udaną próbę. Data notowania może być inna dla list tygodniowych albo publikowanych wieczorem.")
+            st.caption("'Pobrano dziś' oznacza, że co najmniej jedna próba tego źródła zakończyła się dziś sukcesem. Późniejszy błąd nie unieważnia już pobranych danych. Data notowania może być inna dla list tygodniowych albo publikowanych wieczorem.")
 
         scope = st.radio(
             "Zakres Dashboardu",

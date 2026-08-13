@@ -12,7 +12,7 @@ log = logging.getLogger("radiocharts")
 
 def job():
     try:
-        for msg in collect_current():
+        for msg in collect_current(attempts_per_source=3, retry_delay=6.0):
             log.info(msg)
     except Exception:
         log.exception("Błąd collectora")

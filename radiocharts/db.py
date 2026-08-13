@@ -5,9 +5,10 @@ import re
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 DB_PATH = Path(os.getenv("RADIOCHARTS_DB", "/app/data/radiocharts.db"))
 if str(DB_PATH).startswith("/app/") and not Path("/app").exists():
@@ -426,6 +427,57 @@ def latest_source_checks() -> list[dict]:
                ORDER BY c.source"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+
+def source_check_day_summary(day: date | None = None, tz_name: str = "Europe/Warsaw") -> list[dict]:
+    """Summarize all collector attempts for one local calendar day.
+
+    Freshness is a *day-level* property: once a source has been downloaded
+    successfully today, a later failed retry must not make the Dashboard claim
+    that today's data is missing. The latest attempt is still returned for
+    diagnostics, but ``success_today`` stays true if any attempt succeeded.
+    """
+    init_db()
+    tz = ZoneInfo(tz_name)
+    local_day = day or datetime.now(tz).date()
+    start_local = datetime.combine(local_day, dt_time.min, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    end_utc = end_local.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    with connect() as con:
+        rows = con.execute(
+            """SELECT source,checked_at,success,message,chart_date,issue_key
+               FROM source_checks
+               WHERE checked_at>=? AND checked_at<?
+               ORDER BY source, checked_at ASC, id ASC""",
+            (start_utc, end_utc),
+        ).fetchall()
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["source"]), []).append(dict(row))
+
+    out: list[dict] = []
+    for source, items in sorted(grouped.items()):
+        successes = [x for x in items if bool(x.get("success"))]
+        latest = items[-1]
+        latest_success = successes[-1] if successes else None
+        out.append({
+            "source": source,
+            "attempted_today": True,
+            "success_today": bool(successes),
+            "attempts_today": len(items),
+            "successes_today": len(successes),
+            "latest_checked_at": latest.get("checked_at"),
+            "latest_success_at": latest_success.get("checked_at") if latest_success else None,
+            "latest_success_message": latest_success.get("message") if latest_success else "",
+            "latest_success_chart_date": latest_success.get("chart_date") if latest_success else None,
+            "latest_success_issue_key": latest_success.get("issue_key") if latest_success else None,
+            "latest_attempt_success": bool(latest.get("success")),
+            "latest_attempt_message": latest.get("message") or "",
+        })
+    return out
 
 def list_issues(source: str | None = None, limit: int = 1000) -> list[dict]:
     """Return stored chart issues newest first for archive browsing."""
