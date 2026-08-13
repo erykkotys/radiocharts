@@ -681,7 +681,7 @@ elif view_key == "data":
 
     b1, b2, b3, b4 = st.columns(4)
     rmf_count = b1.number_input("RMF · notowania", min_value=5, max_value=750, value=130, step=5)
-    zet_count = b2.number_input("ZET · dni", min_value=2, max_value=180, value=30, step=1)
+    zet_count = b2.number_input("ZET · notowania", min_value=2, max_value=180, value=30, step=1)
     uk_count = b3.number_input("UK · tygodnie", min_value=2, max_value=260, value=26, step=1)
     bb_count = b4.number_input("Billboard · tygodnie", min_value=2, max_value=260, value=26, step=1)
     if b1.button("Backfill RMF", disabled=running, use_container_width=True):

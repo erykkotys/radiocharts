@@ -218,31 +218,96 @@ _ZET_SEED_DATE = date(2026, 3, 20)
 _ZET_SEED_ID = 22801
 _ZET_ID_PER_DAY = 7.2832
 
+
 def _zet_predicted_archive_id(target: date) -> int:
+    """Approximate only the *starting* archive ID.
+
+    Radio ZET archive IDs are not chart numbers and their increments are not
+    constant.  The estimate is therefore used only to find a recent anchor;
+    after that the backfill walks real archive IDs backwards and trusts the date
+    printed on each page.
+    """
     return int(round(_ZET_SEED_ID + (target - _ZET_SEED_DATE).days * _ZET_ID_PER_DAY))
 
-def _zet_candidate_offsets(radius: int = 12):
+
+def _zet_anchor_offsets(radius: int = 45):
+    """IDs around the estimate, nearest first."""
     yield 0
     for n in range(1, radius + 1):
         yield -n
         yield n
 
+
+def _zet_find_recent_archive(current_date: date, timeout: int = 3) -> tuple[dict, int]:
+    """Find a real archived issue close to the current chart.
+
+    We deliberately do not require ``current_date - 1``: publication gaps are
+    possible and the archive itself is the source of truth.
+    """
+    center = _zet_predicted_archive_id(current_date)
+    best: tuple[dict, int] | None = None
+    for off in _zet_anchor_offsets(45):
+        archive_id = max(1, center + off)
+        try:
+            data = fetch_zet(archive_id=archive_id, timeout=timeout)
+            d = date.fromisoformat(data["chart_date"])
+        except Exception:
+            continue
+        if d >= current_date:
+            continue
+        if best is None or d > date.fromisoformat(best[0]["chart_date"]):
+            best = (data, archive_id)
+            # A one-day gap is the best possible anchor; no reason to scan more.
+            if (current_date - d).days == 1:
+                return best
+    if best is None:
+        raise ValueError("ZET: nie znaleziono najnowszego publicznego archiwum w pobliżu bieżącego ID")
+    return best
+
+
+def _zet_find_previous_archive(
+    before_id: int,
+    before_date: date,
+    timeout: int = 3,
+    max_gap: int = 90,
+) -> tuple[dict, int] | None:
+    """Return the closest lower archive ID with an earlier chart date.
+
+    IDs belong to the website's content system, not directly to the chart, so
+    gaps of 5/10/etc. are normal.  Sequential ID walking is slower than a date
+    formula but much more reliable and makes no weekday/weekend assumption.
+    """
+    for delta in range(1, max_gap + 1):
+        archive_id = before_id - delta
+        if archive_id <= 0:
+            break
+        try:
+            data = fetch_zet(archive_id=archive_id, timeout=timeout)
+            d = date.fromisoformat(data["chart_date"])
+        except Exception:
+            continue
+        if d < before_date:
+            return data, archive_id
+    return None
+
+
 def backfill_zet(
     count: int = 30,
     progress_callback: Callable[[int, int, str], None] | None = None,
-    pause_seconds: float = 0.06,
+    pause_seconds: float = 0.03,
 ) -> list[str]:
-    """Best-effort ZET backfill using public archived issue URLs.
+    """Backfill real Radio ZET archive issues by walking archive IDs.
 
-    The current archive pattern is weekday-only: Saturday/Sunday dates have no
-    corresponding archived issue while Friday and Monday do. ``count`` therefore
-    means number of chart issues, not calendar days; weekends are skipped without
-    being reported as errors.
+    ``count`` means the number of chart issues including the current issue.  No
+    dates are manufactured and no weekdays/weekends are skipped.  After finding
+    one recent archive anchor, every next issue is discovered by scanning lower
+    public archive IDs until the page itself reports an earlier chart date.
     """
     count = max(1, min(int(count), 180))
     messages: list[str] = []
     current = fetch_zet()
     current_date = date.fromisoformat(current["chart_date"])
+
     with FileLock(str(LOCK_PATH), timeout=1):
         store(current)
         msg = f"ZET {current_date.isoformat()}: OK (bieżące, 20 pozycji)"
@@ -253,48 +318,52 @@ def backfill_zet(
         if count == 1:
             return messages
 
-        last_found_id: int | None = None
-        target = current_date - timedelta(days=1)
-        while done < count:
-            # Public archive observations in 2026 consistently skip weekends.
-            # Move straight to Friday/Monday instead of spending dozens of HTTP
-            # requests on dates for which no archive issue exists.
-            if target.weekday() >= 5:
-                target -= timedelta(days=1)
-                continue
-
-            center = (last_found_id - 7) if last_found_id is not None else _zet_predicted_archive_id(target)
-            found = None
-            found_id = None
-            tried: set[int] = set()
-            for off in _zet_candidate_offsets(12):
-                archive_id = max(1, center + off)
-                if archive_id in tried:
-                    continue
-                tried.add(archive_id)
-                try:
-                    data = fetch_zet(archive_id=archive_id, timeout=5)
-                    d = date.fromisoformat(data["chart_date"])
-                    if d == target:
-                        found, found_id = data, archive_id
-                        break
-                except Exception:
-                    pass
-                if pause_seconds > 0:
-                    time.sleep(pause_seconds)
-
-            done += 1
-            if found is not None:
-                store(found)
-                last_found_id = found_id
-                msg = f"ZET {target.isoformat()}: OK (archive {found_id})"
-            else:
-                last_found_id = None
-                msg = f"ZET {target.isoformat()}: nie znaleziono publicznego archiwum w przewidywanym zakresie"
+        try:
+            data, archive_id = _zet_find_recent_archive(current_date)
+        except Exception as exc:
+            msg = f"ZET: {type(exc).__name__}: {exc}"
             messages.append(msg)
             if progress_callback:
                 progress_callback(done, count, msg)
-            target -= timedelta(days=1)
+            return messages
+
+        d = date.fromisoformat(data["chart_date"])
+        store(data)
+        done += 1
+        msg = f"ZET {d.isoformat()}: OK (archive {archive_id})"
+        messages.append(msg)
+        if progress_callback:
+            progress_callback(done, count, msg)
+
+        last_id = archive_id
+        last_date = d
+        while done < count:
+            found = _zet_find_previous_archive(last_id, last_date)
+            if found is None:
+                msg = (
+                    f"ZET: przerwano po {done}/{count} notowaniach — "
+                    f"nie znaleziono wcześniejszego archiwum w {90} ID poniżej {last_id}"
+                )
+                messages.append(msg)
+                if progress_callback:
+                    progress_callback(done, count, msg)
+                break
+
+            data, archive_id = found
+            d = date.fromisoformat(data["chart_date"])
+            store(data)
+            done += 1
+            gap = (last_date - d).days
+            gap_note = f", odstęp {gap} dni" if gap > 1 else ""
+            msg = f"ZET {d.isoformat()}: OK (archive {archive_id}{gap_note})"
+            messages.append(msg)
+            if progress_callback:
+                progress_callback(done, count, msg)
+            last_id = archive_id
+            last_date = d
+            if pause_seconds > 0:
+                time.sleep(pause_seconds)
+
     return messages
 
 
