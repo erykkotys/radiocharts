@@ -118,7 +118,7 @@ def backfill_rmf(
     RMF is normally published on weekdays, so ~30 issues is roughly six weeks.
     A small pause avoids hammering the public site during historical backfill.
     """
-    count = max(1, min(int(count), 750))
+    count = max(1, min(int(count), 1300))
     current = fetch_rmf()
     start = int(current["issue_key"])
     messages: list[str] = []
@@ -195,7 +195,7 @@ def backfill_olis_source(
     source = source.upper()
     if source not in {"OLIA", "OLIS"}:
         raise ValueError("Backfill OLiA/OLiS obsługuje tylko OLIA i OLIS")
-    count = max(1, min(int(count), 104))
+    count = max(1, min(int(count), 260))
     messages: list[str] = []
     with FileLock(str(LOCK_PATH), timeout=1):
         for done, total, data, error in iter_olis_history(source, count):
@@ -303,7 +303,7 @@ def backfill_zet(
     one recent archive anchor, every next issue is discovered by scanning lower
     public archive IDs until the page itself reports an earlier chart date.
     """
-    count = max(1, min(int(count), 180))
+    count = max(1, min(int(count), 1825))
     messages: list[str] = []
     current = fetch_zet()
     current_date = date.fromisoformat(current["chart_date"])

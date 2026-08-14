@@ -218,3 +218,10 @@ Wydajność i obsługa procesów: szybki agregator metryk, osobna zakładka **Da
 Dashboard pokazuje stan świeżości każdego źródła. Pozycje zawsze pochodzą z najnowszego poprawnie zapisanego notowania; osobny status informuje, czy źródło zostało sprawdzone dzisiaj i czy ostatnia próba się udała. Worker sprawdza źródła o 07:30 i 20:30 Europe/Warsaw.
 
 ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill po publicznych adresach archiwalnych. OLiA/OLiS wróciły do dłuższego, sprawdzonego mechanizmu renderowania/kliknięcia pełnej listy z wersji 0.1.9; zadania nadal działają w osobnym, zatrzymywalnym procesie.
+
+## 0.3.1 — interaktywny research
+- Kliknięcie w tabeli zaznacza cały wiersz; status i odsłuch pozostają dostępne bez opuszczania Dashboardu.
+- Odsłuch 30 s bezpośrednio z tabeli (preview pobierane na żądanie) + link Spotify.
+- `Archiwum` zmienione na `Notowania`, z najnowszymi i historycznymi listami oraz metrykami utworu.
+- Wskaźniki można przeliczać dla wybranego horyzontu czasu.
+- Backfill do ok. 5 lat i wyższy/nieliniowy wykres historii pozycji.

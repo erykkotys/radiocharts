@@ -25,24 +25,47 @@ def _week_key(d: date) -> str:
     return monday.isoformat()
 
 
-def _load_rows() -> list[dict]:
+def _resolve_as_of(as_of: str | date | datetime | None = None) -> date:
+    if isinstance(as_of, datetime):
+        return as_of.date()
+    if isinstance(as_of, date):
+        return as_of
+    if as_of:
+        return date.fromisoformat(str(as_of)[:10])
     init_db()
     with connect() as con:
-        rows = con.execute(
-            """
-            SELECT s.id AS song_id,s.artist,s.title,s.release_date,
-                   i.source,i.chart_date,i.chart_size,e.position,
-                   e.reported_weeks,e.reported_peak
-            FROM chart_entries e
-            JOIN chart_issues i ON i.id=e.issue_id
-            JOIN songs s ON s.id=e.song_id
-            ORDER BY i.chart_date,e.position
-            """
-        ).fetchall()
+        row = con.execute("SELECT MAX(chart_date) AS d FROM chart_issues").fetchone()
+    if row and row["d"]:
+        return date.fromisoformat(str(row["d"])[:10])
+    return date.today()
+
+
+def _load_rows(as_of: str | date | datetime | None = None, lookback_days: int | None = None) -> list[dict]:
+    init_db()
+    end = _resolve_as_of(as_of)
+    cutoff = None
+    if lookback_days:
+        cutoff = end - timedelta(days=max(1, int(lookback_days)) - 1)
+    sql = """
+        SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+               i.source,i.chart_date,i.chart_size,e.position,
+               e.reported_weeks,e.reported_peak
+        FROM chart_entries e
+        JOIN chart_issues i ON i.id=e.issue_id
+        JOIN songs s ON s.id=e.song_id
+        WHERE i.chart_date <= ?
+    """
+    params: list[object] = [end.isoformat()]
+    if cutoff is not None:
+        sql += " AND i.chart_date >= ?"
+        params.append(cutoff.isoformat())
+    sql += " ORDER BY i.chart_date,e.position"
+    with connect() as con:
+        rows = con.execute(sql, tuple(params)).fetchall()
         return [dict(r) for r in rows]
 
 
-def _source_stats(rows: list[dict], latest_date: str) -> dict:
+def _source_stats(rows: list[dict], latest_date: str, use_reported_history: bool = True) -> dict:
     weekly: dict[str, dict] = {}
     latest_seen = date.min
     latest_position = None
@@ -69,12 +92,12 @@ def _source_stats(rows: list[dict], latest_date: str) -> dict:
         if str(r["chart_date"]) == str(latest_date):
             latest_position = pos
         local_peak = min(local_peak, pos)
-        if r.get("reported_peak") is not None:
+        if use_reported_history and r.get("reported_peak") is not None:
             try:
                 reported_peak = min(reported_peak, int(r["reported_peak"]))
             except Exception:
                 pass
-        if r.get("reported_weeks") is not None:
+        if use_reported_history and r.get("reported_weeks") is not None:
             try:
                 reported_weeks = max(reported_weeks, int(r["reported_weeks"]))
             except Exception:
@@ -96,7 +119,7 @@ def _source_stats(rows: list[dict], latest_date: str) -> dict:
     peak_pos = min(local_peak, reported_peak) if reported_peak < 10**9 else local_peak
     chart_size = max(int(r["chart_size"]) for r in rows)
     peak_strength = rank_score(peak_pos, chart_size)
-    weeks = max(len(weekly), reported_weeks)
+    weeks = max(len(weekly), reported_weeks) if use_reported_history else len(weekly)
     weeks_top10 = len(top10_weeks)
     longevity = min(100.0, weeks / 10.0 * 100.0)
     persistence = min(100.0, weeks_top10 / 6.0 * 100.0)
@@ -128,14 +151,25 @@ def _source_stats(rows: list[dict], latest_date: str) -> dict:
     }
 
 
-
 def _weekly_source_stats(g: pd.DataFrame, latest_date: str, source: str = "") -> dict:
-    """Backward-compatible test/helper wrapper around the faster pure-Python aggregator."""
+    """Backward-compatible test/helper wrapper around the pure-Python aggregator."""
     rows = g.to_dict("records")
     return _source_stats(rows, latest_date)
 
-def compute_scores() -> pd.DataFrame:
-    rows = _load_rows()
+
+def compute_scores(
+    as_of: str | date | datetime | None = None,
+    lookback_days: int | None = None,
+) -> pd.DataFrame:
+    """Compute all three scores.
+
+    ``as_of`` makes the calculation historical (used by Notowania).  When
+    ``lookback_days`` is set, only observations in that recent window are used
+    and lifetime ``reported_weeks/reported_peak`` metadata is intentionally
+    ignored, so 1/2/4-week and 2/4/6-month views genuinely describe that period.
+    """
+    end_date = _resolve_as_of(as_of)
+    rows = _load_rows(end_date, lookback_days)
     if not rows:
         return pd.DataFrame()
 
@@ -143,6 +177,7 @@ def compute_scores() -> pd.DataFrame:
     weights = {k.upper(): float(v) for k, v in cfg.get("weights", {}).items()}
     fit_weights = {k.upper(): float(v) for k, v in cfg.get("format_fit_weights", {}).items()}
     external_sources = ["UK", "BILLBOARD"]
+    use_reported_history = not bool(lookback_days)
 
     latest: dict[str, str] = {}
     grouped: dict[int, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
@@ -163,11 +198,13 @@ def compute_scores() -> pd.DataFrame:
     fit_den = max(1.0, sum(fit_weights[s] for s in fit_available))
 
     out: list[dict] = []
-    today = date.today()
     thresholds = cfg.get("thresholds", {})
 
     for sid, per_source_rows in grouped.items():
-        per = {src: _source_stats(src_rows, latest[src]) for src, src_rows in per_source_rows.items()}
+        per = {
+            src: _source_stats(src_rows, latest[src], use_reported_history=use_reported_history)
+            for src, src_rows in per_source_rows.items()
+        }
 
         fam_num = sum(weights[src] * (per.get(src, {}).get("familiarity", 0.0)) for src in available)
         mom_num = sum(weights[src] * (per.get(src, {}).get("momentum", 0.0)) for src in available)
@@ -180,7 +217,7 @@ def compute_scores() -> pd.DataFrame:
         age_weeks = None
         if rel:
             try:
-                age_weeks = max(0, (today - date.fromisoformat(str(rel)[:10])).days // 7)
+                age_weeks = max(0, (end_date - date.fromisoformat(str(rel)[:10])).days // 7)
             except Exception:
                 pass
         all_weeks = max((x["weeks"] for x in per.values()), default=0)
@@ -203,6 +240,8 @@ def compute_scores() -> pd.DataFrame:
             "format_fit": round(fit, 1),
             "coverage": round(coverage, 1),
             "recommendation": recommendation,
+            "score_as_of": end_date.isoformat(),
+            "lookback_days": int(lookback_days or 0),
         }
         for src in list(weights) + external_sources:
             stt = per.get(src)

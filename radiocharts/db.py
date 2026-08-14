@@ -482,7 +482,7 @@ def source_check_day_summary(day: date | None = None, tz_name: str = "Europe/War
 def list_issues(source: str | None = None, limit: int = 1000) -> list[dict]:
     """Return stored chart issues newest first for archive browsing."""
     init_db()
-    limit = max(1, min(int(limit), 5000))
+    limit = max(1, min(int(limit), 20000))
     with connect() as con:
         if source and source.upper() != "ALL":
             rows = con.execute(
@@ -517,6 +517,86 @@ def issue_entries(issue_id: int) -> list[dict]:
             (int(issue_id),),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def issue_entries_enriched(issue_id: int) -> list[dict]:
+    """Return one issue with useful historical metadata filled locally.
+
+    Some sources do not publish LW/weeks/peak.  For those fields we derive:
+    - previous_position from the immediately previous stored issue of the source,
+    - weeks from distinct calendar weeks seen up to this issue,
+    - peak from the best stored position up to this issue.
+    Reported source metadata wins when it is richer.
+    """
+    init_db()
+    with connect() as con:
+        issue = con.execute(
+            "SELECT id,source,chart_date FROM chart_issues WHERE id=?", (int(issue_id),)
+        ).fetchone()
+        if not issue:
+            return []
+        src = str(issue["source"])
+        chart_date = str(issue["chart_date"])
+
+        prev_issue = con.execute(
+            """SELECT id FROM chart_issues
+               WHERE source=? AND (chart_date < ? OR (chart_date=? AND id < ?))
+               ORDER BY chart_date DESC,id DESC LIMIT 1""",
+            (src, chart_date, chart_date, int(issue_id)),
+        ).fetchone()
+        prev_map: dict[int, int] = {}
+        if prev_issue:
+            prev_rows = con.execute(
+                "SELECT song_id,position FROM chart_entries WHERE issue_id=?",
+                (int(prev_issue["id"]),),
+            ).fetchall()
+            prev_map = {int(r["song_id"]): int(r["position"]) for r in prev_rows}
+
+        stats = con.execute(
+            """SELECT e.song_id, MIN(e.position) AS local_peak,
+                      COUNT(DISTINCT strftime('%Y-%W', i.chart_date)) AS local_weeks
+               FROM chart_entries e JOIN chart_issues i ON i.id=e.issue_id
+               WHERE i.source=? AND i.chart_date<=?
+               GROUP BY e.song_id""",
+            (src, chart_date),
+        ).fetchall()
+        stat_map = {int(r["song_id"]): dict(r) for r in stats}
+
+        rows = con.execute(
+            """SELECT e.position,s.artist,s.title,e.previous_position,e.reported_weeks,e.reported_peak,
+                      s.id AS song_id,
+                      COALESCE(n.heard,0) AS heard,
+                      COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.note,'') AS note
+               FROM chart_entries e
+               JOIN songs s ON s.id=e.song_id
+               LEFT JOIN song_notes n ON n.song_id=s.id
+               WHERE e.issue_id=? ORDER BY e.position""",
+            (int(issue_id),),
+        ).fetchall()
+
+        out: list[dict] = []
+        for raw in rows:
+            r = dict(raw)
+            sid = int(r["song_id"])
+            st = stat_map.get(sid, {})
+            previous = r.get("previous_position")
+            if previous is None:
+                previous = prev_map.get(sid)
+            local_weeks = int(st.get("local_weeks") or 0)
+            reported_weeks = int(r["reported_weeks"]) if r.get("reported_weeks") is not None else 0
+            weeks = max(local_weeks, reported_weeks)
+            local_peak = int(st.get("local_peak") or r["position"])
+            if r.get("reported_peak") is not None:
+                peak = min(local_peak, int(r["reported_peak"]))
+            else:
+                peak = local_peak
+            r["previous_position"] = previous
+            r["reported_weeks"] = weeks
+            r["reported_peak"] = peak
+            r["heard"] = bool(r.get("heard"))
+            out.append(r)
+        return out
 
 
 def latest_issues() -> list[dict]:
