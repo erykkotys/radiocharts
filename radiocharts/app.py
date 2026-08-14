@@ -355,107 +355,106 @@ def render_live_song_search(frame: pd.DataFrame) -> None:
 
 
 
-DETAIL_RENDERER = JsCode("""
+DETAIL_LABEL_FORMATTER = JsCode("""
 function(params) {
-  const a = document.createElement('a');
-  a.href = params.value;
-  a.target = '_blank';
-  a.rel = 'noopener';
-  a.textContent = 'Otwórz ↗';
-  a.style.color = '#cfe4ff';
-  a.style.textDecoration = 'none';
-  a.addEventListener('click', e => e.stopPropagation());
-  return a;
+  return 'Otwórz ↗';
 }
 """)
 
-SPOTIFY_RENDERER = JsCode("""
+SPOTIFY_LABEL_FORMATTER = JsCode("""
 function(params) {
-  const a = document.createElement('a');
-  a.href = params.value;
-  a.target = '_blank';
-  a.rel = 'noopener';
-  a.textContent = 'Spotify ↗';
-  a.style.color = '#d7f9df';
-  a.style.textDecoration = 'none';
-  a.addEventListener('click', e => e.stopPropagation());
-  return a;
+  return 'Spotify ↗';
 }
 """)
 
-PREVIEW_RENDERER = JsCode("""
+PREVIEW_LABEL_FORMATTER = JsCode("""
 function(params) {
-  const btn = document.createElement('button');
-  btn.textContent = '▶ 30s';
-  btn.title = '30-sekundowy podgląd z katalogu iTunes/Apple. Kliknij ponownie, aby zatrzymać.';
-  btn.style.cssText = 'cursor:pointer;border:1px solid #667085;border-radius:6px;background:#252c36;color:#eef2f6;padding:2px 7px;font-size:12px;';
+  return '▶ / ■ 30s';
+}
+""")
 
-  const resetButton = (b) => { if (b) b.textContent = '▶ 30s'; };
+GRID_CLICK_HANDLER = JsCode("""
+function(params) {
+  const field = params && params.colDef ? params.colDef.field : null;
+  const row = params && params.data ? params.data : {};
+
+  if (field === 'details' && row.details) {
+    window.open(String(row.details), '_blank', 'noopener');
+    return;
+  }
+  if (field === 'spotify' && row.spotify) {
+    window.open(String(row.spotify), '_blank', 'noopener');
+    return;
+  }
+  if (field !== 'preview') return;
+
+  const songId = String(row.song_id || (row.artist || '') + '|' + (row.title || ''));
   const stopCurrent = () => {
     if (window.__rcPreviewAudio) {
-      try { window.__rcPreviewAudio.pause(); window.__rcPreviewAudio.currentTime = 0; } catch(e) {}
-      window.__rcPreviewAudio = null;
-    }
-    resetButton(window.__rcPreviewButton);
-    window.__rcPreviewButton = null;
-  };
-  const norm = (x) => String(x || '').toLowerCase().replace(/ł/g,'l').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
-
-  btn.addEventListener('click', function(ev) {
-    ev.stopPropagation();
-    if (window.__rcPreviewButton === btn && window.__rcPreviewAudio && !window.__rcPreviewAudio.paused) {
-      stopCurrent();
-      return;
-    }
-    stopCurrent();
-    btn.textContent = '…';
-
-    const artist = String(params.data.artist || '');
-    const title = String(params.data.title || '');
-    const cb = '__rcPreviewCB_' + Date.now() + '_' + Math.floor(Math.random()*1000000);
-    const script = document.createElement('script');
-    const cleanup = () => {
-      try { delete window[cb]; } catch(e) {}
-      try { script.remove(); } catch(e) {}
-    };
-    window[cb] = function(payload) {
       try {
-        const results = (payload && payload.results ? payload.results : []).filter(x => x.previewUrl);
-        const nt = norm(title), na = norm(artist);
-        let best = null, bestScore = -1;
-        for (const r of results) {
-          const rt = norm(r.trackName), ra = norm(r.artistName);
-          let score = 0;
-          if (rt === nt) score += 10;
-          if (rt.includes(nt) || nt.includes(rt)) score += 4;
-          const artistTokens = na.split(' ').filter(x => x.length > 2);
-          score += artistTokens.filter(t => ra.includes(t)).length;
-          if (score > bestScore) { best = r; bestScore = score; }
-        }
-        if (!best) {
-          btn.textContent = 'brak';
-          setTimeout(() => resetButton(btn), 1600);
-          cleanup();
-          return;
-        }
-        const audio = new Audio(best.previewUrl);
-        window.__rcPreviewAudio = audio;
-        window.__rcPreviewButton = btn;
-        btn.textContent = '■ stop';
-        audio.onended = stopCurrent;
-        audio.onerror = () => { stopCurrent(); btn.textContent='błąd'; setTimeout(() => resetButton(btn), 1600); };
-        const p = audio.play();
-        if (p && p.catch) p.catch(() => { stopCurrent(); btn.textContent='błąd'; setTimeout(() => resetButton(btn), 1600); });
-      } finally {
-        cleanup();
+        window.__rcPreviewAudio.pause();
+        window.__rcPreviewAudio.currentTime = 0;
+      } catch(e) {}
+    }
+    window.__rcPreviewAudio = null;
+    window.__rcPreviewSongId = null;
+  };
+
+  if (window.__rcPreviewAudio && window.__rcPreviewSongId === songId && !window.__rcPreviewAudio.paused) {
+    stopCurrent();
+    return;
+  }
+  stopCurrent();
+
+  const norm = (x) => String(x || '')
+    .toLowerCase()
+    .replace(/ł/g,'l')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,' ')
+    .trim();
+
+  const artist = String(row.artist || '');
+  const title = String(row.title || '');
+  if (!artist && !title) return;
+
+  const cb = '__rcPreviewCB_' + Date.now() + '_' + Math.floor(Math.random()*1000000);
+  const script = document.createElement('script');
+  const cleanup = () => {
+    try { delete window[cb]; } catch(e) {}
+    try { script.remove(); } catch(e) {}
+  };
+
+  window[cb] = function(payload) {
+    try {
+      const results = (payload && payload.results ? payload.results : []).filter(x => x.previewUrl);
+      const nt = norm(title), na = norm(artist);
+      let best = null, bestScore = -1;
+      for (const r of results) {
+        const rt = norm(r.trackName), ra = norm(r.artistName);
+        let score = 0;
+        if (rt === nt) score += 10;
+        if (rt.includes(nt) || nt.includes(rt)) score += 4;
+        const artistTokens = na.split(' ').filter(x => x.length > 2);
+        score += artistTokens.filter(t => ra.includes(t)).length;
+        if (score > bestScore) { best = r; bestScore = score; }
       }
-    };
-    script.onerror = function() { cleanup(); btn.textContent='błąd'; setTimeout(() => resetButton(btn), 1600); };
-    const term = encodeURIComponent(artist + ' ' + title);
-    script.src = 'https://itunes.apple.com/search?term=' + term + '&country=PL&media=music&entity=song&limit=5&callback=' + cb;
-    document.body.appendChild(script);
-  });
-  return btn;
+      if (!best) return;
+      const audio = new Audio(best.previewUrl);
+      window.__rcPreviewAudio = audio;
+      window.__rcPreviewSongId = songId;
+      audio.onended = stopCurrent;
+      audio.onerror = stopCurrent;
+      const promise = audio.play();
+      if (promise && promise.catch) promise.catch(stopCurrent);
+    } finally {
+      cleanup();
+    }
+  };
+  script.onerror = function() { cleanup(); };
+  const term = encodeURIComponent(artist + ' ' + title);
+  script.src = 'https://itunes.apple.com/search?term=' + term + '&country=PL&media=music&entity=song&limit=5&callback=' + cb;
+  document.body.appendChild(script);
 }
 """)
 
@@ -493,7 +492,7 @@ def render_song_grid(
     gb = GridOptionsBuilder.from_dataframe(show)
     gb.configure_default_column(resizable=True, sortable=True, filter=True, editable=False)
     gb.configure_selection(selection_mode="single", use_checkbox=False, suppressRowClickSelection=False)
-    gb.configure_grid_options(rowHeight=36, animateRows=False)
+    gb.configure_grid_options(rowHeight=36, animateRows=False, onCellClicked=GRID_CLICK_HANDLER)
 
     if "song_id" in show.columns:
         gb.configure_column("song_id", hide=True)
@@ -502,11 +501,11 @@ def render_song_grid(
     if "title" in show.columns:
         gb.configure_column("title", "Tytuł", minWidth=210, width=260)
     if "details" in show.columns:
-        gb.configure_column("details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False, cellRenderer=DETAIL_RENDERER)
+        gb.configure_column("details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False, valueFormatter=DETAIL_LABEL_FORMATTER, cellStyle={"cursor": "pointer", "color": "#cfe4ff"})
     if "spotify" in show.columns:
-        gb.configure_column("spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False, cellRenderer=SPOTIFY_RENDERER)
+        gb.configure_column("spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False, valueFormatter=SPOTIFY_LABEL_FORMATTER, cellStyle={"cursor": "pointer", "color": "#d7f9df"})
     if "preview" in show.columns:
-        gb.configure_column("preview", "Odsłuch", minWidth=80, width=88, sortable=False, filter=False, cellRenderer=PREVIEW_RENDERER)
+        gb.configure_column("preview", "Odsłuch", minWidth=90, width=98, sortable=False, filter=False, valueFormatter=PREVIEW_LABEL_FORMATTER, cellStyle={"cursor": "pointer"})
     if "heard" in show.columns:
         gb.configure_column(
             "heard", "✓", width=65, minWidth=58,

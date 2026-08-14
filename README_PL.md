@@ -1,3 +1,9 @@
+## 0.3.2 — hotfix AG Grid / React
+
+- usunięte renderery zwracające surowe elementy DOM (`HTMLAnchorElement` / `HTMLButtonElement`), które powodowały React error #31 w `streamlit-aggrid`;
+- Szczegóły, Spotify i odsłuch 30 s są obsługiwane przez bezpieczny `onCellClicked`;
+- zachowane zaznaczanie całego wiersza i edycja statusu/przesłuchania.
+
 ## Wersja 0.2.7
 
 Aktualizacja: stabilniejsze OLiA/OLiS, live search i scalony panel backfilli/progresu.
