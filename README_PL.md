@@ -231,3 +231,9 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 - `Archiwum` zmienione na `Notowania`, z najnowszymi i historycznymi listami oraz metrykami utworu.
 - Wskaźniki można przeliczać dla wybranego horyzontu czasu.
 - Backfill do ok. 5 lat i wyższy/nieliniowy wykres historii pozycji.
+
+## 0.3.4 — responsywny Dashboard i player
+- Dashboard: `Auto / Pełny / Kompaktowy`; Auto składa tygodnie do kolumn źródeł na węższym ekranie (`#7  5t`), a na szerokim zachowuje osobne kolumny.
+- W trybie Auto/Kompaktowym wykonawca i tytuł są przypięte z lewej.
+- Wyszukiwarka utworów otwiera szczegóły w tym samym oknie.
+- Kliknięcie `▶ 30s` pokazuje pływający player z przewijaniem 30-sekundowego podglądu i szybkim linkiem do Spotify.

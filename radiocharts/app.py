@@ -254,7 +254,10 @@ with st.sidebar:
 
 
 
-STATUSES = ["Nie słuchałem", "Ignore", "Watch", "Candidate", "Current", "Current Familiar", "Recurrent"]
+STATUSES = [
+    "Nie słuchałem", "Ignore", "Watch", "Candidate", "Current", "Current Familiar", "Recurrent",
+    "Poza formatem", "Baza CF1", "Baza CF2", "Baza R1", "Baza R2", "Poza bazą", "Słabe",
+]
 
 
 def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
@@ -322,7 +325,7 @@ def render_live_song_search(frame: pd.DataFrame) -> None:
           .empty {{ color:#aeb7c5; padding:10px 4px; }}
         </style>
         <input id="q" type="text" autocomplete="off" placeholder="Wykonawca lub tytuł — polskie znaki nie są wymagane">
-        <div id="hint">Wyniki pojawiają się podczas pisania. Ctrl+A / Delete działają normalnie. Kliknięcie utworu otwiera szczegóły w nowej karcie.</div>
+        <div id="hint">Wyniki pojawiają się podczas pisania. Ctrl+A / Delete działają normalnie. Kliknięcie utworu przechodzi do szczegółów w tym samym oknie.</div>
         <div id="results"></div>
         <script>
           const songs = {payload};
@@ -342,7 +345,7 @@ def render_live_song_search(frame: pd.DataFrame) -> None:
             const tokens = query.split(/\\s+/).filter(Boolean);
             const found = songs.filter(s => tokens.every(t => s.key.includes(t))).slice(0, 20);
             if (!found.length) {{ results.innerHTML = '<div class="empty">Brak wyników.</div>'; return; }}
-            results.innerHTML = found.map(s => `<div class="row"><a class="song" target="_blank" rel="noopener" href="${{detailUrl(s.id)}}"><div>${{esc(s.title)}}</div><div class="artist">${{esc(s.artist)}}</div></a><a class="spot" target="_blank" rel="noopener" href="${{esc(s.spotify)}}">▶</a></div>`).join('');
+            results.innerHTML = found.map(s => `<div class="row"><a class="song" target="_top" href="${{detailUrl(s.id)}}"><div>${{esc(s.title)}}</div><div class="artist">${{esc(s.artist)}}</div></a><a class="spot" target="_blank" rel="noopener" href="${{esc(s.spotify)}}">▶</a></div>`).join('');
           }}
           q.addEventListener('input', render);
           q.focus();
@@ -355,21 +358,57 @@ def render_live_song_search(frame: pd.DataFrame) -> None:
 
 
 
-DETAIL_LABEL_FORMATTER = JsCode("""
+DETAIL_LINK_RENDERER = JsCode("""
 function(params) {
-  return 'Otwórz ↗';
+  const url = String(params.value || '');
+  if (!url) return '';
+  const safe = url
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return '<a href="' + safe + '" target="_blank" rel="noopener noreferrer" style="color:#cfe4ff;text-decoration:none;font-weight:600">Otwórz ↗</a>';
 }
 """)
 
-SPOTIFY_LABEL_FORMATTER = JsCode("""
+SPOTIFY_LINK_RENDERER = JsCode("""
 function(params) {
-  return 'Spotify ↗';
+  const url = String(params.value || '');
+  if (!url) return '';
+  const safe = url
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return '<a href="' + safe + '" target="_blank" rel="noopener noreferrer" style="color:#d7f9df;text-decoration:none;font-weight:600">Spotify ↗</a>';
 }
 """)
 
 PREVIEW_LABEL_FORMATTER = JsCode("""
 function(params) {
-  return '▶ / ■ 30s';
+  return '▶ 30s';
+}
+""")
+
+SOURCE_POSITION_RENDERER = JsCode("""
+function(params) {
+  const field = String((params.colDef && params.colDef.field) || '');
+  const v = Number(params.value);
+  if (!isFinite(v) || v >= 999) return '-';
+
+  const weekField = field + '_weeks';
+  let weekColumn = null;
+  try {
+    if (params.api && params.api.getColumn) weekColumn = params.api.getColumn(weekField);
+    else if (params.columnApi && params.columnApi.getColumn) weekColumn = params.columnApi.getColumn(weekField);
+  } catch(e) {}
+  const compact = !!(weekColumn && weekColumn.isVisible && !weekColumn.isVisible());
+  if (!compact) return String(Math.round(v));
+
+  const weeks = Number((params.data || {})[weekField] || 0);
+  const weekLabel = weeks > 0 ? (Math.round(weeks) + 't') : '–';
+  return '<span style="white-space:nowrap"><strong style="font-weight:750">#' + Math.round(v) + '</strong>' +
+         '<span style="opacity:.62;font-size:11px;margin-left:5px">' + weekLabel + '</span></span>';
 }
 """)
 
@@ -378,33 +417,15 @@ function(params) {
   const field = params && params.colDef ? params.colDef.field : null;
   const row = params && params.data ? params.data : {};
 
-  if (field === 'details' && row.details) {
-    window.open(String(row.details), '_blank', 'noopener');
-    return;
-  }
-  if (field === 'spotify' && row.spotify) {
-    window.open(String(row.spotify), '_blank', 'noopener');
-    return;
-  }
+  // Link columns render real <a> elements.
+  if (field === 'details' || field === 'spotify') return;
   if (field !== 'preview') return;
 
   const songId = String(row.song_id || (row.artist || '') + '|' + (row.title || ''));
-  const stopCurrent = () => {
-    if (window.__rcPreviewAudio) {
-      try {
-        window.__rcPreviewAudio.pause();
-        window.__rcPreviewAudio.currentTime = 0;
-      } catch(e) {}
-    }
-    window.__rcPreviewAudio = null;
-    window.__rcPreviewSongId = null;
-  };
-
-  if (window.__rcPreviewAudio && window.__rcPreviewSongId === songId && !window.__rcPreviewAudio.paused) {
-    stopCurrent();
-    return;
-  }
-  stopCurrent();
+  const artist = String(row.artist || '');
+  const title = String(row.title || '');
+  const spotify = String(row.spotify || '');
+  if (!artist && !title) return;
 
   const norm = (x) => String(x || '')
     .toLowerCase()
@@ -414,9 +435,68 @@ function(params) {
     .replace(/[^a-z0-9]+/g,' ')
     .trim();
 
-  const artist = String(row.artist || '');
-  const title = String(row.title || '');
-  if (!artist && !title) return;
+  const ensurePlayer = () => {
+    let wrap = document.getElementById('__rcFloatingPlayer');
+    if (wrap) return wrap;
+    wrap = document.createElement('div');
+    wrap.id = '__rcFloatingPlayer';
+    wrap.style.cssText = [
+      'position:fixed','left:50%','bottom:16px','transform:translateX(-50%)',
+      'z-index:2147483000','width:min(720px,calc(100% - 36px))','box-sizing:border-box',
+      'background:rgba(24,29,37,.97)','border:1px solid rgba(160,175,195,.35)',
+      'border-radius:12px','box-shadow:0 12px 40px rgba(0,0,0,.45)','padding:10px 12px',
+      'font-family:system-ui,-apple-system,Segoe UI,sans-serif','color:#f4f6f8'
+    ].join(';');
+    wrap.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:7px">
+        <div style="min-width:0;flex:1">
+          <div id="__rcPlayerTitle" style="font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Podgląd</div>
+          <div id="__rcPlayerArtist" style="font-size:12px;opacity:.68;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+        </div>
+        <a id="__rcPlayerSpotify" href="#" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:#d7f9df;text-decoration:none;white-space:nowrap">Spotify ↗</a>
+        <button id="__rcPlayerClose" type="button" aria-label="Zamknij" style="border:0;background:transparent;color:#fff;font-size:20px;cursor:pointer;line-height:1">×</button>
+      </div>
+      <audio id="__rcPlayerAudio" controls preload="metadata" style="display:block;width:100%;height:34px"></audio>
+      <div id="__rcPlayerStatus" style="font-size:10px;opacity:.55;margin-top:4px">30-sekundowy podgląd Apple/iTunes · suwak pozwala przewijać fragment</div>`;
+    document.body.appendChild(wrap);
+    const audio = wrap.querySelector('#__rcPlayerAudio');
+    const close = wrap.querySelector('#__rcPlayerClose');
+    close.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      try { audio.pause(); audio.currentTime = 0; } catch(e) {}
+      wrap.style.display = 'none';
+      window.__rcPreviewSongId = null;
+    });
+    wrap.addEventListener('click', function(ev) { ev.stopPropagation(); });
+    window.__rcPreviewAudio = audio;
+    return wrap;
+  };
+
+  const player = ensurePlayer();
+  const audio = player.querySelector('#__rcPlayerAudio');
+  player.style.display = 'block';
+
+  // Same row: play/pause without losing the current position, so the user can seek.
+  if (window.__rcPreviewSongId === songId && audio.src) {
+    if (audio.paused) {
+      const pr = audio.play();
+      if (pr && pr.catch) pr.catch(() => {});
+    } else {
+      audio.pause();
+    }
+    return;
+  }
+
+  try { audio.pause(); } catch(e) {}
+  audio.removeAttribute('src');
+  audio.load();
+  window.__rcPreviewSongId = songId;
+  player.querySelector('#__rcPlayerTitle').textContent = title || 'Podgląd';
+  player.querySelector('#__rcPlayerArtist').textContent = artist;
+  const spot = player.querySelector('#__rcPlayerSpotify');
+  if (spotify) { spot.href = spotify; spot.style.display = ''; }
+  else { spot.style.display = 'none'; }
+  player.querySelector('#__rcPlayerStatus').textContent = 'Szukam podglądu…';
 
   const cb = '__rcPreviewCB_' + Date.now() + '_' + Math.floor(Math.random()*1000000);
   const script = document.createElement('script');
@@ -427,6 +507,7 @@ function(params) {
 
   window[cb] = function(payload) {
     try {
+      if (window.__rcPreviewSongId !== songId) return;
       const results = (payload && payload.results ? payload.results : []).filter(x => x.previewUrl);
       const nt = norm(title), na = norm(artist);
       let best = null, bestScore = -1;
@@ -434,24 +515,28 @@ function(params) {
         const rt = norm(r.trackName), ra = norm(r.artistName);
         let score = 0;
         if (rt === nt) score += 10;
-        if (rt.includes(nt) || nt.includes(rt)) score += 4;
+        if (nt && (rt.includes(nt) || nt.includes(rt))) score += 4;
         const artistTokens = na.split(' ').filter(x => x.length > 2);
         score += artistTokens.filter(t => ra.includes(t)).length;
         if (score > bestScore) { best = r; bestScore = score; }
       }
-      if (!best) return;
-      const audio = new Audio(best.previewUrl);
-      window.__rcPreviewAudio = audio;
-      window.__rcPreviewSongId = songId;
-      audio.onended = stopCurrent;
-      audio.onerror = stopCurrent;
+      if (!best) {
+        player.querySelector('#__rcPlayerStatus').textContent = 'Brak podglądu dla tego utworu.';
+        return;
+      }
+      audio.src = best.previewUrl;
+      audio.load();
+      player.querySelector('#__rcPlayerStatus').textContent = '30-sekundowy podgląd Apple/iTunes · możesz przewijać suwakiem';
       const promise = audio.play();
-      if (promise && promise.catch) promise.catch(stopCurrent);
+      if (promise && promise.catch) promise.catch(() => {});
     } finally {
       cleanup();
     }
   };
-  script.onerror = function() { cleanup(); };
+  script.onerror = function() {
+    if (window.__rcPreviewSongId === songId) player.querySelector('#__rcPlayerStatus').textContent = 'Nie udało się pobrać podglądu.';
+    cleanup();
+  };
   const term = encodeURIComponent(artist + ' ' + title);
   script.src = 'https://itunes.apple.com/search?term=' + term + '&country=PL&media=music&entity=song&limit=5&callback=' + cb;
   document.body.appendChild(script);
@@ -480,8 +565,9 @@ def render_song_grid(
     key: str,
     height: int = 640,
     editable_state: bool = True,
+    source_layout: str = "full",
 ) -> pd.DataFrame:
-    """AG Grid table: whole-row highlight, status editing and inline 30s preview."""
+    """AG Grid table: row highlight, editing, responsive source columns and preview player."""
     show = frame.copy()
     if show.empty:
         st.info("Brak utworów do pokazania.")
@@ -496,14 +582,15 @@ def render_song_grid(
 
     if "song_id" in show.columns:
         gb.configure_column("song_id", hide=True)
+    pin_identity = source_layout in {"auto", "compact"}
     if "artist" in show.columns:
-        gb.configure_column("artist", "Wykonawca", minWidth=190, width=220)
+        gb.configure_column("artist", "Wykonawca", minWidth=170 if pin_identity else 190, width=205 if pin_identity else 220, pinned="left" if pin_identity else None)
     if "title" in show.columns:
-        gb.configure_column("title", "Tytuł", minWidth=210, width=260)
+        gb.configure_column("title", "Tytuł", minWidth=185 if pin_identity else 210, width=235 if pin_identity else 260, pinned="left" if pin_identity else None)
     if "details" in show.columns:
-        gb.configure_column("details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False, valueFormatter=DETAIL_LABEL_FORMATTER, cellStyle={"cursor": "pointer", "color": "#cfe4ff"})
+        gb.configure_column("details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False, cellRenderer=DETAIL_LINK_RENDERER, cellStyle={"cursor": "pointer"})
     if "spotify" in show.columns:
-        gb.configure_column("spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False, valueFormatter=SPOTIFY_LABEL_FORMATTER, cellStyle={"cursor": "pointer", "color": "#d7f9df"})
+        gb.configure_column("spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False, cellRenderer=SPOTIFY_LINK_RENDERER, cellStyle={"cursor": "pointer"})
     if "preview" in show.columns:
         gb.configure_column("preview", "Odsłuch", minWidth=90, width=98, sortable=False, filter=False, valueFormatter=PREVIEW_LABEL_FORMATTER, cellStyle={"cursor": "pointer"})
     if "heard" in show.columns:
@@ -524,7 +611,39 @@ def render_song_grid(
     if "recommendation" in show.columns:
         gb.configure_column("recommendation", "Rekomendacja", minWidth=190, width=220)
 
-    for col in [c for c in show.columns if c in {"RMF","ZET","OLIA","OLIS","ESKA","UK","BILLBOARD","position","previous_position","reported_peak"}]:
+    source_names = [c for c in ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"] if c in show.columns]
+    week_names = [f"{c}_weeks" for c in source_names if f"{c}_weeks" in show.columns]
+    compact_initial = source_layout == "compact"
+    for col in source_names:
+        gb.configure_column(
+            col, valueFormatter=POSITION_FORMATTER, cellRenderer=SOURCE_POSITION_RENDERER,
+            width=96 if source_layout in {"auto", "compact"} else 88, minWidth=82,
+        )
+    for col in week_names:
+        src = col[:-6]
+        gb.configure_column(col, f"{src} tyg.", width=76, minWidth=68, hide=compact_initial)
+
+    # In Auto mode the grid itself decides: normal laptop widths collapse each
+    # source to one cell (#position + muted weeks), ultrawide keeps two columns.
+    if source_layout == "auto" and week_names:
+        week_js = json.dumps(week_names)
+        source_js = json.dumps(source_names)
+        responsive_js = JsCode(f"""
+        function(params) {{
+          const weekCols = {week_js};
+          const sourceCols = {source_js};
+          const width = Number((params && params.clientWidth) || document.documentElement.clientWidth || window.innerWidth || 0);
+          const compact = width > 0 && width < 2050;
+          try {{
+            if (params.api && params.api.setColumnsVisible) params.api.setColumnsVisible(weekCols, !compact);
+            else if (params.columnApi && params.columnApi.setColumnsVisible) params.columnApi.setColumnsVisible(weekCols, !compact);
+            if (params.api && params.api.refreshCells) params.api.refreshCells({{columns: sourceCols, force:true}});
+          }} catch(e) {{}}
+        }}
+        """)
+        gb.configure_grid_options(onGridSizeChanged=responsive_js, onFirstDataRendered=responsive_js)
+
+    for col in [c for c in show.columns if c in {"position","previous_position","reported_peak"}]:
         gb.configure_column(col, valueFormatter=POSITION_FORMATTER, width=88, minWidth=78)
     if "position" in show.columns:
         gb.configure_column("position", "Pozycja", pinned="left", width=82, minWidth=76, valueFormatter=POSITION_FORMATTER)
@@ -682,6 +801,15 @@ if view_key == "dashboard":
             elif scope == "Wszystkie aktywne" and all_pos:
                 base = base[base[all_pos].notna().any(axis=1)]
 
+            table_layout_label = st.radio(
+                "Układ tabeli",
+                ["Auto", "Pełny", "Kompaktowy"],
+                horizontal=True,
+                index=0,
+                help="Auto: poniżej ok. 2050 px tygodnie są składane do kolumny źródła; na szerokim ekranie wracają jako osobne kolumny.",
+            )
+            source_layout = {"Auto": "auto", "Pełny": "full", "Kompaktowy": "compact"}[table_layout_label]
+
             colf1, colf2, colf3 = st.columns(3)
             min_fam = colf1.slider("Min. Familiarity", 0, 100, 0, format="%d%%")
             min_mom = colf2.slider("Min. Momentum", 0, 100, 0, format="%d%%")
@@ -716,8 +844,8 @@ if view_key == "dashboard":
             for col in pos_cols:
                 show[col] = show[col].map(position_sort_value).astype(int)
             show = show.rename(columns={c: c.replace("_pos", "") for c in pos_cols})
-            render_song_grid(show, key=f"dashboard_grid_{lookback}_{scope}", height=660, editable_state=True)
-            st.caption("Kliknięcie zwykłej komórki zaznacza cały wiersz. Szczegóły otwierają nową kartę. Odsłuch = 30-sekundowy podgląd Apple/iTunes; Spotify pozostaje pełnym linkiem do wyszukania utworu.")
+            render_song_grid(show, key=f"dashboard_grid_{lookback}_{scope}_{source_layout}", height=660, editable_state=True, source_layout=source_layout)
+            st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7  5t; pozycja jest pogrubiona, tygodnie mniejsze. ▶ 30s otwiera pływający player z suwakiem. Spotify pozostaje linkiem do pełnego utworu.")
 
 elif view_key == "song":
     if df.empty:
@@ -1036,7 +1164,7 @@ RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboa
 SQLite zostaje. Przy tej skali danych nie jest wąskim gardłem; dashboard cache'uje kosztowne agregacje do czasu zmiany bazy, a tabele nie używają już Pandas Styler.
 
 ### Spotify
-MVP tworzy link do wyszukiwania `wykonawca + tytuł` w Spotify. Nie wymaga to konta deweloperskiego ani klucza API. Później możemy opcjonalnie dodać Spotify Web API i zapisywać bezpośredni `track_id`/ISRC.
+Aplikacja tworzy link do wyszukiwania `wykonawca + tytuł` w Spotify. Podgląd w tabeli korzysta z 30-sekundowego preview Apple/iTunes i ma własny pasek z przewijaniem. Pełne odtwarzanie wewnątrz aplikacji wymagałoby osobnej integracji streamingowej (np. Spotify Web Playback SDK + autoryzacja).
 
 ### Ważne
 Progi są celowo konfigurowalne. Po zebraniu historii skalibrujemy je na utworach, które sam oznaczysz jako Current / Current Familiar / Recurrent.
