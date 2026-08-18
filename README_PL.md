@@ -237,3 +237,14 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 - W trybie Auto/Kompaktowym wykonawca i tytuł są przypięte z lewej.
 - Wyszukiwarka utworów otwiera szczegóły w tym samym oknie.
 - Kliknięcie `▶ 30s` pokazuje pływający player z przewijaniem 30-sekundowego podglądu i szybkim linkiem do Spotify.
+
+## 0.3.5 — stabilne tabele i Emisje
+
+- Dashboard/Notowania/Emisje używają prawidłowych rendererów AG Grid zamiast HTML zwracanego jako tekst. `Otwórz`, Spotify i kompaktowe pozycje są interaktywnymi komórkami; kliknięcie zwykłej komórki nadal zaznacza cały wiersz.
+- W trybie kompaktowym źródło ma format `#7  5t`: pozycja jest pogrubiona, tygodnie mniejsze i przygaszone. `Auto` przełącza układ zależnie od szerokości tabeli.
+- `Otwórz` nie próbuje już nawigować z iframe AG Grid. Renderer zapisuje ukryte żądanie, które wraca do Pythona i ustawia `view=song&song=...`, więc szczegóły ładują się w tej samej karcie.
+- Wyszukiwarka `Utwór` korzysta z `streamlit-searchbox`: wyniki pojawiają się podczas pisania, a wybrany rekord wraca do Streamlit jako `song_id`.
+- `▶ 30s` wysyła wybór do Pythona. Player jest renderowany przez `st.bottom` w głównym obszarze aplikacji, więc pozostaje na dole całej strony; `st.audio` daje play/pause, seek i głośność.
+- Nowa zakładka **Emisje**: katalog stacji odSluchane, wybór stacji checkboxami, zakres dat, minimalna liczba emisji/stacji, tabela zbiorcza z `Emisje`, `Stacje`, `Ostatnio`, statusem, odsłuchem, Spotify i szczegółami.
+- Collector Emisji automatycznie odświeża wszystkie wykryte stacje co 2 godziny. Ręczny backfill może obejmować wybrane albo wszystkie stacje i maksymalnie 5 lat; pobrane okna są checkpointowane i przy ponownym uruchomieniu pomijane.
+- SQLite pozostaje bazą. Dokładne spiny są w `airplay_plays`, a szybkie analizy używają indeksowanej tabeli `airplay_daily`, więc wieloletnia tabela zbiorcza nie musi skanować każdego pojedynczego spinu.
