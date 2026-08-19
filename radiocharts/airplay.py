@@ -183,39 +183,104 @@ def completed_window(now: datetime | None = None, tz_name: str = "Europe/Warsaw"
     return start.date(), int(start.hour)
 
 
+def completed_windows_in_range(
+    start_date: date,
+    end_date: date,
+    *,
+    now: datetime | None = None,
+    tz_name: str = "Europe/Warsaw",
+) -> list[tuple[date, int]]:
+    """Return every *finished* public 2-hour block in an inclusive date range.
+
+    odSluchane exposes a day as 12 blocks: 00-02, 02-04, …, 22-24.
+    Never include the current/future block: older builds could save those empty
+    responses as successful and then incorrectly skip them later.
+    """
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+    tz = ZoneInfo(tz_name)
+    local_now = now.astimezone(tz) if now and now.tzinfo else (now.replace(tzinfo=tz) if now else datetime.now(tz))
+    out: list[tuple[date, int]] = []
+    days = (end_date - start_date).days + 1
+    for day_idx in range(days):
+        d = start_date + timedelta(days=day_idx)
+        for start_hour in range(0, 24, 2):
+            end_local = datetime(d.year, d.month, d.day, start_hour, 0, tzinfo=tz) + timedelta(hours=2)
+            if end_local <= local_now:
+                out.append((d, start_hour))
+    return out
+
+
+def recent_completed_windows(
+    hours: int = 24,
+    *,
+    now: datetime | None = None,
+    tz_name: str = "Europe/Warsaw",
+) -> list[tuple[date, int]]:
+    """Return the last N hours as finished 2-hour blocks, newest last."""
+    block_count = max(1, (max(1, int(hours)) + 1) // 2)
+    latest_date, latest_hour = completed_window(now, tz_name)
+    tz = ZoneInfo(tz_name)
+    cursor = datetime(latest_date.year, latest_date.month, latest_date.day, latest_hour, tzinfo=tz)
+    rows = []
+    for offset in range(block_count - 1, -1, -1):
+        dt = cursor - timedelta(hours=2 * offset)
+        rows.append((dt.date(), int(dt.hour)))
+    return rows
+
+
 def collect_latest_window(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     pause_seconds: float = 0.08,
     now: datetime | None = None,
+    catch_up_hours: int = 24,
 ) -> dict:
-    """Fetch the last completed 2-hour block for every discovered station."""
+    """Fill missing completed 2-hour blocks from the recent catch-up horizon.
+
+    Historically this function fetched only one block.  That was fragile on a
+    frequently redeployed single-container installation: one manual run could
+    leave a whole day represented by only ~20-30 songs.  We now inspect the
+    last 24h by default and only download blocks that are missing or were
+    fetched prematurely.
+    """
     stations = _stations_or_discover()
-    play_date, start_hour = completed_window(now)
-    total = len(stations)
-    ok = errors = plays_total = 0
+    windows = recent_completed_windows(catch_up_hours, now=now)
+    total = len(stations) * len(windows)
+    ok = errors = skipped = plays_total = done = 0
     messages: list[str] = []
     with FileLock(str(LOCK_PATH), timeout=1):
-        for idx, station in enumerate(stations, start=1):
-            name = str(station.get("name") or station.get("station_id"))
-            try:
-                plays, url = fetch_window(station, play_date, start_hour)
-                stored = store_airplay_window(
-                    int(station["station_id"]), name, play_date, start_hour, plays, url,
-                    success=True,
-                )
-                ok += 1
-                plays_total += stored
-                msg = f"{name}: OK · {stored} emisji ({play_date} {start_hour:02d}-{(start_hour+2)%24:02d})"
-            except Exception as exc:
-                errors += 1
-                msg = f"{name}: {type(exc).__name__}: {exc}"
-            messages.append(msg)
-            if progress_callback:
-                progress_callback(idx, total, msg)
-            if idx < total and pause_seconds > 0:
-                time.sleep(pause_seconds)
-    return {"ok": ok, "errors": errors, "plays": plays_total, "total": total, "messages": messages}
+        for play_date, start_hour in windows:
+            for station in stations:
+                done += 1
+                station_id = int(station["station_id"])
+                name = str(station.get("name") or station_id)
+                if airplay_window_exists(
+                    station_id, play_date, start_hour, require_completed_capture=True
+                ):
+                    skipped += 1
+                    msg = f"{name} {play_date} {start_hour:02d}-{(start_hour+2)%24:02d}: już jest"
+                else:
+                    try:
+                        plays, url = fetch_window(station, play_date, start_hour)
+                        stored = store_airplay_window(
+                            station_id, name, play_date, start_hour, plays, url, success=True,
+                        )
+                        ok += 1
+                        plays_total += stored
+                        msg = f"{name} {play_date} {start_hour:02d}-{(start_hour+2)%24:02d}: OK ({stored})"
+                    except Exception as exc:
+                        errors += 1
+                        msg = f"{name} {play_date} {start_hour:02d}-{(start_hour+2)%24:02d}: {type(exc).__name__}: {exc}"
+                messages.append(msg)
+                if progress_callback:
+                    progress_callback(done, total, msg)
+                if done < total and pause_seconds > 0 and "już jest" not in msg:
+                    time.sleep(pause_seconds)
+    return {
+        "ok": ok, "errors": errors, "skipped": skipped, "plays": plays_total,
+        "total": total, "messages": messages, "windows_per_station": len(windows),
+    }
 
 
 def backfill_airplay(
@@ -226,24 +291,29 @@ def backfill_airplay(
     progress_callback: Callable[[int, int, str], None] | None = None,
     pause_seconds: float = 0.10,
     max_windows: int = 100_000,
+    now: datetime | None = None,
 ) -> dict:
-    """Exact, resumable backfill over public 2-hour windows.
+    """Exact, resumable backfill over all finished public 2-hour windows.
 
-    Already-successful windows are skipped, so a stopped job can be restarted
-    with the same range without downloading completed work again.
+    A full historical day means exactly 12 requests per station.  Current and
+    future blocks are never requested before they finish.  Existing rows are
+    skipped only if they were themselves fetched after the end of the block,
+    which repairs premature empty rows created by older builds.
     """
     ids = sorted({int(x) for x in station_ids})
     if not ids:
         raise ValueError("Nie wybrano stacji")
     if end_date < start_date:
         start_date, end_date = end_date, start_date
-    days = (end_date - start_date).days + 1
-    total = days * 12 * len(ids)
+    windows = completed_windows_in_range(start_date, end_date, now=now)
+    total = len(windows) * len(ids)
     if total > int(max_windows):
         raise ValueError(
-            f"Zakres to {total:,} okien 2h; limit jednego procesu to {int(max_windows):,}. "
+            f"Zakres to {total:,} zakończonych okien 2h; limit jednego procesu to {int(max_windows):,}. "
             "Podziel backfill na mniejsze zakresy dat lub mniej stacji."
         )
+    if total == 0:
+        return {"ok": 0, "errors": 0, "skipped": 0, "plays": 0, "total": 0, "messages": []}
     stations_by_id = {int(s["station_id"]): s for s in _stations_or_discover()}
     missing = [x for x in ids if x not in stations_by_id]
     if missing:
@@ -252,38 +322,35 @@ def backfill_airplay(
     ok = errors = skipped = plays_total = done = 0
     messages: list[str] = []
     with FileLock(str(LOCK_PATH), timeout=1):
-        for day_idx in range(days):
-            d = start_date + timedelta(days=day_idx)
-            for start_hour in range(0, 24, 2):
-                for station_id in ids:
-                    done += 1
-                    station = stations_by_id[station_id]
-                    name = str(station.get("name") or station_id)
-                    if airplay_window_exists(station_id, d, start_hour):
-                        skipped += 1
-                        msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: już jest"
-                    else:
-                        try:
-                            plays, url = fetch_window(station, d, start_hour)
-                            stored = store_airplay_window(
-                                station_id, name, d, start_hour, plays, url, success=True,
-                            )
-                            ok += 1
-                            plays_total += stored
-                            msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: OK ({stored})"
-                        except Exception as exc:
-                            errors += 1
-                            msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: {type(exc).__name__}: {exc}"
-                    messages.append(msg)
-                    if progress_callback:
-                        progress_callback(done, total, msg)
-                    if done < total and pause_seconds > 0 and "już jest" not in msg:
-                        time.sleep(pause_seconds)
+        for d, start_hour in windows:
+            for station_id in ids:
+                done += 1
+                station = stations_by_id[station_id]
+                name = str(station.get("name") or station_id)
+                if airplay_window_exists(
+                    station_id, d, start_hour, require_completed_capture=True
+                ):
+                    skipped += 1
+                    msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: już jest"
+                else:
+                    try:
+                        plays, url = fetch_window(station, d, start_hour)
+                        stored = store_airplay_window(
+                            station_id, name, d, start_hour, plays, url, success=True,
+                        )
+                        ok += 1
+                        plays_total += stored
+                        msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: OK ({stored})"
+                    except Exception as exc:
+                        errors += 1
+                        msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: {type(exc).__name__}: {exc}"
+                messages.append(msg)
+                if progress_callback:
+                    progress_callback(done, total, msg)
+                if done < total and pause_seconds > 0 and "już jest" not in msg:
+                    time.sleep(pause_seconds)
     return {
-        "ok": ok,
-        "errors": errors,
-        "skipped": skipped,
-        "plays": plays_total,
-        "total": total,
-        "messages": messages,
+        "ok": ok, "errors": errors, "skipped": skipped, "plays": plays_total,
+        "total": total, "messages": messages,
     }
+

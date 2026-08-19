@@ -23,8 +23,8 @@ def airplay_job():
     try:
         result = collect_latest_window()
         log.info(
-            "Emisje odSluchane: stacje OK %s/%s, błędy %s, zapisano %s emisji",
-            result.get("ok", 0), result.get("total", 0), result.get("errors", 0), result.get("plays", 0),
+            "Emisje odSluchane 24h catch-up: pobrano %s brakujących okien, pominięto %s, błędy %s, zapisano %s emisji",
+            result.get("ok", 0), result.get("skipped", 0), result.get("errors", 0), result.get("plays", 0),
         )
     except Exception:
         log.exception("Błąd collectora emisji")
@@ -54,7 +54,7 @@ def main():
         coalesce=True,
     )
     log.info("Scheduler wystartował: codziennie %s:%02d %s", ",".join(f"{h:02d}" for h in hours), minute, tz)
-    log.info("Scheduler emisji: co 2h o :12, pobierany jest poprzedni zakończony blok 2h ze wszystkich odkrytych stacji")
+    log.info("Scheduler emisji: co 2h o :12 uzupełnia brakujące zakończone bloki 2h z ostatnich 24h")
     scheduler.start()
 
 

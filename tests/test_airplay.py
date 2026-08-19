@@ -111,3 +111,36 @@ def test_airplay_only_song_does_not_change_chart_revision_or_scores(tmp_path, mo
     assert chart_ids.isdisjoint(airplay_ids)
     assert len(chart_ids) == 1
     assert len(airplay_ids) == 1
+
+
+def test_full_historical_day_has_twelve_two_hour_windows():
+    from datetime import datetime
+    from radiocharts.airplay import completed_windows_in_range
+
+    rows = completed_windows_in_range(
+        date(2026, 8, 18), date(2026, 8, 18),
+        now=datetime(2026, 8, 19, 16, 36),
+    )
+    assert len(rows) == 12
+    assert [hour for _, hour in rows] == list(range(0, 24, 2))
+
+
+def test_current_day_never_includes_unfinished_or_future_blocks():
+    from datetime import datetime
+    from radiocharts.airplay import completed_windows_in_range
+
+    rows = completed_windows_in_range(
+        date(2026, 8, 19), date(2026, 8, 19),
+        now=datetime(2026, 8, 19, 16, 36),
+    )
+    assert [hour for _, hour in rows] == [0, 2, 4, 6, 8, 10, 12, 14]
+
+
+def test_recent_24h_is_twelve_two_hour_windows():
+    from datetime import datetime
+    from radiocharts.airplay import recent_completed_windows
+
+    rows = recent_completed_windows(24, now=datetime(2026, 8, 19, 16, 36))
+    assert len(rows) == 12
+    assert rows[-1] == (date(2026, 8, 19), 14)
+    assert rows[0] == (date(2026, 8, 18), 16)

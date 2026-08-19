@@ -15,6 +15,7 @@ import streamlit.components.v1 as components
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 from radiocharts.build_info import BUILD_DATE, display_version
+from radiocharts.airplay import completed_windows_in_range
 from radiocharts.db import (
     DB_PATH, airplay_coverage, airplay_summary, airplay_track_detail, chart_revision, init_db,
     issue_entries, issue_entries_enriched, latest_issues, latest_source_checks,
@@ -1273,6 +1274,11 @@ elif view_key == "airplay":
         if range_end < range_start:
             range_start, range_end = range_end, range_start
 
+        expected_windows = len(completed_windows_in_range(range_start, range_end)) * len(selected_ids) if selected_ids else 0
+        range_coverage = airplay_coverage(selected_ids, range_start, range_end) if selected_ids else {}
+        ok_windows = int(range_coverage.get("ok_windows") or 0)
+        coverage_pct = (100.0 * ok_windows / expected_windows) if expected_windows else 0.0
+
         if not selected_ids:
             st.info("Wybierz przynajmniej jedną stację.")
             summary_rows = []
@@ -1286,7 +1292,14 @@ elif view_key == "airplay":
         m1.metric("Emisje w okresie", f"{total_spins:,}".replace(",", " "))
         m2.metric("Różne utwory", len(air))
         m3.metric("Stacje w filtrze", len(selected_ids))
-        m4.metric("Zakres", f"{range_start} → {range_end}")
+        m4.metric("Pokrycie bloków 2h", f"{ok_windows}/{expected_windows}" if expected_windows else "—")
+        st.caption(f"Zakres: {range_start} → {range_end}. Pełna zakończona doba = **12 bloków po 2h na każdą stację**.")
+        if expected_windows and ok_windows < expected_windows:
+            st.warning(
+                f"Dane w tym zakresie są niepełne: zapisano {ok_windows} z {expected_windows} zakończonych bloków 2h "
+                f"({coverage_pct:.0f}%). Ranking liczy tylko zapisane emisje. Około 20–30 utworów na stację/dzień "
+                "zwykle oznacza, że mamy tylko jeden blok 2h, a nie całą dobę. Użyj uzupełnienia 24h albo backfillu poniżej."
+            )
 
         if air.empty:
             st.info("Brak zapisanych emisji dla wybranych stacji i dat. Pobieranie bieżące i backfill są w sekcji technicznej na dole.")
@@ -1446,7 +1459,7 @@ elif view_key == "airplay":
             if top1.button("↻ Odkryj / odśwież wszystkie stacje", disabled=running, use_container_width=True, key="airplay_refresh_stations"):
                 start_job("airplay-discover")
                 st.rerun()
-            if top2.button("⬇ Pobierz ostatnie zakończone 2h", disabled=running, use_container_width=True, key="airplay_fetch_latest"):
+            if top2.button("⬇ Uzupełnij ostatnie 24h", disabled=running, use_container_width=True, key="airplay_fetch_latest"):
                 start_job("airplay-latest")
                 st.rerun()
             render_job_status_fragment("airplay", "airplay_top_v2")
@@ -1466,7 +1479,8 @@ elif view_key == "airplay":
             if bf_end < bf_start:
                 bf_start, bf_end = bf_end, bf_start
             bf_days = (bf_end - bf_start).days + 1
-            estimated_windows = max(0, len(selected_ids) * bf_days * 12)
+            completed_bf_windows = completed_windows_in_range(bf_start, bf_end)
+            estimated_windows = max(0, len(selected_ids) * len(completed_bf_windows))
             bf2.metric("Do pobrania / sprawdzenia", f"{estimated_windows:,} okien".replace(",", " "))
             can_backfill = bool(selected_ids) and estimated_windows <= 100_000 and not running
             if estimated_windows > 100_000:
@@ -1481,7 +1495,11 @@ elif view_key == "airplay":
                     },
                 )
                 st.rerun()
-            st.caption("Automatyczny worker pobiera poprzedni zakończony blok 2h wszystkich odkrytych stacji co dwie godziny o :12.")
+            st.caption(
+                "odSluchane udostępnia dobę jako 12 bloków po 2h. Uzupełnienie 24h sprawdza wszystkie 12 ostatnich "
+                "zakończonych bloków na każdej stacji i pobiera tylko brakujące. Backfill robi to samo dla wybranego zakresu; "
+                "nie zapisuje już bloków bieżących ani przyszłych."
+            )
             render_job_status_fragment("airplay", "airplay_backfill_v2")
 
 elif view_key == "data":

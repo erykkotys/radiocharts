@@ -255,3 +255,7 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 - Widok Utwór obsługuje także utwory znane tylko z emisji; wtedy metryki z notowań są pokazane jako brak danych, a nie jako `0%`.
 - Wyszukiwarka Utworu ponownie ignoruje polskie znaki (`meskie` → `Męskie`) przez normalizowany filtr przed natywnym wyborem Streamlita.
 - Kliknięcie `Otwórz` w tabeli przechodzi na kartę utworu i wymusza pozycję na górze strony zamiast zachowywać scroll z Dashboardu.
+
+## 0.3.10 — kompletność emisji w blokach 2h
+
+odSluchane.eu udostępnia dobę w 12 blokach po 2 godziny. RadioCharts pokazuje teraz pokrycie tych bloków dla wybranego zakresu. Bieżące uzupełnienie sprawdza ostatnie 24h i pobiera brakujące bloki, a backfill nie zapisuje bloków, które jeszcze się nie zakończyły.

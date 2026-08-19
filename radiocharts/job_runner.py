@@ -163,8 +163,9 @@ def main() -> int:
             _write(
                 state=state, progress=1.0,
                 message=(
-                    f"Emisje: stacje OK {result.get('ok', 0)}/{result.get('total', 0)}, "
-                    f"błędy {result.get('errors', 0)}, zapisano {result.get('plays', 0)} emisji."
+                    f"Emisje 24h: pobrano {result.get('ok', 0)} brakujących okien 2h, "
+                    f"pominięto {result.get('skipped', 0)} już zapisanych, błędy {result.get('errors', 0)}, "
+                    f"zapisano {result.get('plays', 0)} emisji."
                 ),
                 messages=list(result.get("messages") or messages)[-50:], finished_at=time.time(),
             )

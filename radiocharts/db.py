@@ -1152,15 +1152,46 @@ def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | No
     return None
 
 
-def airplay_window_exists(station_id: int, play_date: date | str, start_hour: int) -> bool:
+def airplay_window_exists(
+    station_id: int,
+    play_date: date | str,
+    start_hour: int,
+    *,
+    require_completed_capture: bool = False,
+    tz_name: str = "Europe/Warsaw",
+) -> bool:
+    """Return True when a successful 2h window is already stored.
+
+    With ``require_completed_capture`` we also verify that the row was fetched
+    *after* the end of that public 2-hour block.  Older builds allowed a
+    backfill of the current day to request future blocks; those empty rows were
+    then marked successful and would be skipped forever.  A completed-capture
+    check makes such prematurely stored rows self-healing on the next catch-up.
+    """
     init_db()
-    d = play_date.isoformat() if isinstance(play_date, date) else str(play_date)
+    d_obj = date.fromisoformat(play_date) if isinstance(play_date, str) else play_date
+    d = d_obj.isoformat()
     with connect() as con:
         row = con.execute(
-            "SELECT success FROM airplay_windows WHERE station_id=? AND play_date=? AND start_hour=?",
+            "SELECT success,fetched_at FROM airplay_windows WHERE station_id=? AND play_date=? AND start_hour=?",
             (int(station_id), d, int(start_hour)),
         ).fetchone()
-        return bool(row and row["success"])
+    if not row or not bool(row["success"]):
+        return False
+    if not require_completed_capture:
+        return True
+    fetched_raw = str(row["fetched_at"] or "").strip()
+    if not fetched_raw:
+        return False
+    try:
+        fetched_at = datetime.fromisoformat(fetched_raw.replace("Z", "+00:00"))
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        tz = ZoneInfo(tz_name)
+        end_local = datetime.combine(d_obj, dt_time(int(start_hour) % 24, 0), tzinfo=tz) + timedelta(hours=2)
+        return fetched_at.astimezone(timezone.utc) >= end_local.astimezone(timezone.utc)
+    except Exception:
+        return False
 
 
 def store_airplay_window(
@@ -1371,27 +1402,61 @@ def airplay_track_detail(
     }
 
 
-def airplay_coverage(station_ids: Iterable[int] | None = None) -> dict:
+def airplay_coverage(
+    station_ids: Iterable[int] | None = None,
+    start_date: date | str | None = None,
+    end_date: date | str | None = None,
+) -> dict:
+    """Return stored airplay coverage, optionally limited to an inclusive date range."""
     init_db()
     ids = sorted({int(x) for x in station_ids or []})
-    where = ""
-    params: tuple = ()
+    clauses: list[str] = []
+    params_list: list = []
     if ids:
         placeholders = ",".join("?" for _ in ids)
-        where = f" WHERE station_id IN ({placeholders})"
-        params = tuple(ids)
+        clauses.append(f"station_id IN ({placeholders})")
+        params_list.extend(ids)
+    start = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    if start and end and end < start:
+        start, end = end, start
+    if start:
+        clauses.append("play_date>=?")
+        params_list.append(start.isoformat())
+    if end:
+        clauses.append("play_date<=?")
+        params_list.append(end.isoformat())
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    params = tuple(params_list)
+
+    # airplay_plays has no play_date column; use timestamp bounds there.
+    play_clauses: list[str] = []
+    play_params: list = []
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        play_clauses.append(f"station_id IN ({placeholders})")
+        play_params.extend(ids)
+    if start:
+        play_clauses.append("played_at>=?")
+        play_params.append(datetime.combine(start, dt_time.min).isoformat(timespec="minutes"))
+    if end:
+        play_clauses.append("played_at<?")
+        play_params.append(datetime.combine(end + timedelta(days=1), dt_time.min).isoformat(timespec="minutes"))
+    play_where = (" WHERE " + " AND ".join(play_clauses)) if play_clauses else ""
+
     with connect() as con:
         row = con.execute(
             f"""SELECT COUNT(*) AS windows,
                        SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) AS ok_windows,
+                       SUM(CASE WHEN success=1 AND play_count=0 THEN 1 ELSE 0 END) AS zero_windows,
                        MIN(play_date) AS first_date,MAX(play_date) AS last_date,
                        COUNT(DISTINCT station_id) AS stations
                 FROM airplay_windows{where}""",
             params,
         ).fetchone()
         plays_row = con.execute(
-            f"SELECT COUNT(*) AS plays FROM airplay_plays{where}",
-            params,
+            f"SELECT COUNT(*) AS plays FROM airplay_plays{play_where}",
+            tuple(play_params),
         ).fetchone()
         out = dict(row) if row else {}
         out["plays"] = int(plays_row["plays"] or 0) if plays_row else 0
