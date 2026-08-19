@@ -238,13 +238,11 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 - Wyszukiwarka utworów otwiera szczegóły w tym samym oknie.
 - Kliknięcie `▶ 30s` pokazuje pływający player z przewijaniem 30-sekundowego podglądu i szybkim linkiem do Spotify.
 
-## 0.3.5 — stabilne tabele i Emisje
-
-- Dashboard/Notowania/Emisje używają prawidłowych rendererów AG Grid zamiast HTML zwracanego jako tekst. `Otwórz`, Spotify i kompaktowe pozycje są interaktywnymi komórkami; kliknięcie zwykłej komórki nadal zaznacza cały wiersz.
-- W trybie kompaktowym źródło ma format `#7  5t`: pozycja jest pogrubiona, tygodnie mniejsze i przygaszone. `Auto` przełącza układ zależnie od szerokości tabeli.
-- `Otwórz` nie próbuje już nawigować z iframe AG Grid. Renderer zapisuje ukryte żądanie, które wraca do Pythona i ustawia `view=song&song=...`, więc szczegóły ładują się w tej samej karcie.
-- Wyszukiwarka `Utwór` korzysta z `streamlit-searchbox`: wyniki pojawiają się podczas pisania, a wybrany rekord wraca do Streamlit jako `song_id`.
-- `▶ 30s` wysyła wybór do Pythona. Player jest renderowany przez `st.bottom` w głównym obszarze aplikacji, więc pozostaje na dole całej strony; `st.audio` daje play/pause, seek i głośność.
-- Nowa zakładka **Emisje**: katalog stacji odSluchane, wybór stacji checkboxami, zakres dat, minimalna liczba emisji/stacji, tabela zbiorcza z `Emisje`, `Stacje`, `Ostatnio`, statusem, odsłuchem, Spotify i szczegółami.
-- Collector Emisji automatycznie odświeża wszystkie wykryte stacje co 2 godziny. Ręczny backfill może obejmować wybrane albo wszystkie stacje i maksymalnie 5 lat; pobrane okna są checkpointowane i przy ponownym uruchomieniu pomijane.
-- SQLite pozostaje bazą. Dokładne spiny są w `airplay_plays`, a szybkie analizy używają indeksowanej tabeli `airplay_daily`, więc wieloletnia tabela zbiorcza nie musi skanować każdego pojedynczego spinu.
+## 0.3.6 — stabilna nawigacja, player globalny i Emisje
+- Kompaktowy Dashboard używa bezpiecznego tekstowego formatu pozycji `#7 · 5w`, bez surowego HTML w komórkach.
+- `Otwórz` i `Spotify` w AG Grid są obsługiwane przez kliknięcie komórki; wyszukiwarka Utwór przechodzi do szczegółów w tej samej karcie.
+- Browser Back/Forward wymusza odświeżenie widoku, jeśli Streamlit nie zareaguje sam na zmianę query string.
+- Jeden wspólny player preview 30 s jest przyklejony do dołu całego viewportu, można go przewijać i zamknąć; przycisk odsłuchu jest również w widoku Utwór.
+- Nowa zakładka **Emisje**: automatyczne odkrywanie stacji z publicznego katalogu odSluchane.eu, zapis konkretnych emisji z bloków 2h, filtrowanie stacji checkboxami i agregacja dla dowolnego zapisanego zakresu dat.
+- Emisje pokazują: łączną liczbę spinów, liczbę stacji, średnią/stację, maksimum na jednej stacji, najmocniejszą stację, ostatnią emisję, status, odsłuch, Spotify i szczegóły dopasowanego utworu.
+- Worker emisji pobiera poprzedni zakończony blok 2h co dwie godziny o `:12`. Backfill jest resumable/idempotentny i ma limit 100 000 okien 2h na jeden proces.

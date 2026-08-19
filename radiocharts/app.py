@@ -11,14 +11,17 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
-from streamlit_searchbox import st_searchbox
 
 from radiocharts.build_info import BUILD_DATE, display_version
-from radiocharts.db import DB_PATH, airplay_db_stats, airplay_station_breakdown, airplay_summary, chart_revision, init_db, issue_entries, issue_entries_enriched, latest_issues, latest_source_checks, source_check_day_summary, list_airplay_stations, list_all_songs, list_issues, load_notes, update_note, upsert_issue
+from radiocharts.db import (
+    DB_PATH, airplay_coverage, airplay_summary, chart_revision, init_db,
+    issue_entries, issue_entries_enriched, latest_issues, latest_source_checks,
+    source_check_day_summary, list_airplay_stations, list_issues, load_notes,
+    update_note, upsert_issue,
+)
 from radiocharts.job_manager import active_job, latest_job, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.eska import probe_eska
@@ -237,7 +240,10 @@ def render_nav_tabs(current: str) -> None:
         extra = ""
         if key == "song" and st.query_params.get("song"):
             extra = f"&song={st.query_params.get('song')}"
-        links.append(f'<a class="{cls}" href="?view={key}{extra}" target="_self">{label}</a>')
+        links.append(
+            f'<a class="{cls}" href="?view={key}{extra}" target="_self" '
+            f'onclick="window.location.assign(this.href); return false;">{label}</a>'
+        )
     st.markdown('<div class="rc-tabs">' + ''.join(links) + '</div>', unsafe_allow_html=True)
 
 
@@ -300,64 +306,8 @@ def search_key(value: object) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def lookup_preview_url(artist: str, title: str) -> str | None:
-    """Resolve the best matching Apple/iTunes 30-second preview URL."""
-    try:
-        resp = requests.get(
-            "https://itunes.apple.com/search",
-            params={"term": f"{artist} {title}", "country": "PL", "media": "music", "entity": "song", "limit": 8},
-            timeout=7,
-        )
-        resp.raise_for_status()
-        candidates = [x for x in resp.json().get("results", []) if x.get("previewUrl")]
-    except Exception:
-        return None
-    nt, na = search_key(title), search_key(artist)
-    best = None
-    best_score = -1
-    for item in candidates:
-        rt, ra = search_key(item.get("trackName")), search_key(item.get("artistName"))
-        score = 0
-        if rt == nt:
-            score += 10
-        if nt and (nt in rt or rt in nt):
-            score += 4
-        score += sum(1 for tok in na.split() if len(tok) > 2 and tok in ra)
-        if score > best_score:
-            best, best_score = item, score
-    return str(best.get("previewUrl")) if best else None
-
-
-def render_global_player() -> None:
-    """Player pinned to the bottom of the *main Streamlit app*, not AG Grid."""
-    track = st.session_state.get("rc_preview_track")
-    if not track:
-        return
-    artist = str(track.get("artist") or "")
-    title = str(track.get("title") or "")
-    preview_url = lookup_preview_url(artist, title)
-    host = st.bottom if hasattr(st, "bottom") else st.container(key="rc_global_player_fallback")
-    with host:
-        c1, c2, c3 = st.columns([6, 1.2, 0.55], vertical_alignment="center")
-        c1.markdown(f"**{html.escape(title)}**  ·  {html.escape(artist)}")
-        c2.link_button("Spotify ↗", str(track.get("spotify") or spotify_search_url(artist, title)), use_container_width=True)
-        if c3.button("✕", key="rc_close_player", help="Zamknij player", use_container_width=True):
-            st.session_state.pop("rc_preview_track", None)
-            st.rerun()
-        if preview_url:
-            st.audio(preview_url, format="audio/mpeg", autoplay=True, width="stretch")
-            st.caption("30-sekundowy podgląd · możesz przewijać, pauzować i zmieniać głośność.")
-        else:
-            st.warning("Nie znalazłem 30-sekundowego podglądu dla tego utworu.")
-
-
-def render_live_song_search(frame: pd.DataFrame) -> int | None:
-    """Typeahead search that returns the selected song ID to Python.
-
-    This replaces the old raw HTML iframe navigation. Selection is handled by
-    Streamlit itself, so clicking a result reliably loads details in this tab.
-    """
+def render_live_song_search(frame: pd.DataFrame) -> None:
+    """Client-side live search: no Enter/rerun and normal browser text editing."""
     rows = []
     for r in frame[["song_id", "artist", "title"]].itertuples(index=False):
         rows.append({
@@ -365,136 +315,322 @@ def render_live_song_search(frame: pd.DataFrame) -> int | None:
             "artist": str(r.artist),
             "title": str(r.title),
             "key": search_key(f"{r.artist} {r.title}"),
+            "spotify": spotify_search_url(str(r.artist), str(r.title)),
         })
-
-    def _search(term: str):
-        key = search_key(term)
-        if not key:
-            return []
-        tokens = [x for x in key.split() if x]
-        found = [x for x in rows if all(t in x["key"] for t in tokens)][:20]
-        return [(f'{x["title"]} — {x["artist"]}', int(x["id"])) for x in found]
-
-    selected = st_searchbox(
-        _search,
-        placeholder="Wykonawca lub tytuł — polskie znaki nie są wymagane",
-        label="Wyszukaj utwór",
-        key="song_live_search",
-        debounce=150,
-        clear_on_submit=False,
-        edit_after_submit="option",
+    payload = json.dumps(rows, ensure_ascii=False).replace("<", "\\u003c")
+    components.html(
+        f"""
+        <style>
+          body {{ margin:0; font-family:system-ui,-apple-system,Segoe UI,sans-serif; color:#e7ebf0; background:transparent; }}
+          #q {{ box-sizing:border-box; width:100%; padding:10px 12px; border-radius:7px; border:1px solid #596272; background:#202631; color:#fff; font-size:16px; outline:none; }}
+          #q:focus {{ border-color:#8995a8; }}
+          #hint {{ color:#aeb7c5; font-size:13px; margin:6px 0 8px; }}
+          #results {{ max-height:330px; overflow:auto; border-top:1px solid #343c49; }}
+          .row {{ display:flex; align-items:center; gap:10px; padding:8px 4px; border-bottom:1px solid #303744; }}
+          .song {{ flex:1; min-width:0; color:#f3f5f7; text-decoration:none; }}
+          .song:hover {{ text-decoration:underline; }}
+          .artist {{ color:#aeb7c5; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+          .spot {{ color:#dbe2ea; text-decoration:none; padding:3px 7px; border:1px solid #4d5767; border-radius:6px; }}
+          .empty {{ color:#aeb7c5; padding:10px 4px; }}
+        </style>
+        <input id="q" type="text" autocomplete="off" placeholder="Wykonawca lub tytuł — polskie znaki nie są wymagane">
+        <div id="hint">Wyniki pojawiają się podczas pisania. Ctrl+A / Delete działają normalnie. Kliknięcie utworu przechodzi do szczegółów w tym samym oknie.</div>
+        <div id="results"></div>
+        <script>
+          const songs = {payload};
+          const q = document.getElementById('q');
+          const results = document.getElementById('results');
+          function detailUrl(id) {{
+            try {{
+              const base = new URL((window.top && window.top.location) ? window.top.location.href : document.referrer);
+              base.search = '?view=song&song=' + encodeURIComponent(id);
+              return base.toString();
+            }} catch(e) {{ return '?view=song&song=' + encodeURIComponent(id); }}
+          }}
+          function openSong(id) {{
+            const url = detailUrl(id);
+            try {{ window.top.location.assign(url); }} catch(e) {{ window.location.href = url; }}
+          }}
+          function esc(s) {{ return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c])); }}
+          function render() {{
+            const query = q.value.toLowerCase().replace(/ł/g,'l').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+            if (!query) {{ results.innerHTML = ''; return; }}
+            const tokens = query.split(/\\s+/).filter(Boolean);
+            const found = songs.filter(s => tokens.every(t => s.key.includes(t))).slice(0, 20);
+            if (!found.length) {{ results.innerHTML = '<div class="empty">Brak wyników.</div>'; return; }}
+            results.innerHTML = found.map(s => `<div class="row"><a class="song" data-song-id="${{s.id}}" href="${{detailUrl(s.id)}}"><div>${{esc(s.title)}}</div><div class="artist">${{esc(s.artist)}}</div></a><a class="spot" target="_blank" rel="noopener" href="${{esc(s.spotify)}}">▶</a></div>`).join('');
+          }}
+          q.addEventListener('input', render);
+          results.addEventListener('click', function(ev) {{
+            const a = ev.target.closest('a.song');
+            if (!a) return;
+            ev.preventDefault();
+            openSong(a.dataset.songId);
+          }});
+          q.focus();
+        </script>
+        """,
+        height=420,
+        scrolling=False,
     )
-    try:
-        return int(selected) if selected is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 
-DETAIL_LINK_RENDERER = JsCode("""
-class RcDetailsRenderer {
-  init(params) {
-    this.params = params;
-    this.eGui = document.createElement('button');
-    this.eGui.type = 'button';
-    this.eGui.textContent = 'Otwórz ↗';
-    this.eGui.style.cssText = 'border:0;background:transparent;padding:0;color:#cfe4ff;font-weight:600;cursor:pointer;font:inherit';
-    this.click = (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      const sid = String((this.params.data || {}).song_id || '');
-      if (!sid) return;
-      // Do not try to navigate the Streamlit component iframe. Streamlit's
-      // iframe sandbox blocks top navigation. Instead mutate a hidden data
-      // field; cellValueChanged sends the request back to Python.
-      this.params.node.setDataValue('__details_request', sid + '|' + Date.now());
-    };
-    this.eGui.addEventListener('click', this.click);
-  }
-  getGui() { return this.eGui; }
-  refresh(params) { this.params = params; return true; }
-  destroy() { if (this.eGui && this.click) this.eGui.removeEventListener('click', this.click); }
+
+DETAIL_LABEL_FORMATTER = JsCode("""
+function(params) {
+  const url = String(params.value || '');
+  return url ? 'Otwórz ↗' : '-';
 }
 """)
 
-SPOTIFY_LINK_RENDERER = JsCode("""
-class RcSpotifyRenderer {
-  init(params) {
-    this.eGui = document.createElement('a');
-    this.eGui.textContent = 'Spotify ↗';
-    this.eGui.href = String(params.value || '#');
-    this.eGui.target = '_blank';
-    this.eGui.rel = 'noopener noreferrer';
-    this.eGui.style.cssText = 'color:#d7f9df;text-decoration:none;font-weight:600;white-space:nowrap';
-    this.eGui.addEventListener('click', (ev) => ev.stopPropagation());
-  }
-  getGui() { return this.eGui; }
-  refresh(params) { this.eGui.href = String(params.value || '#'); return true; }
+SPOTIFY_LABEL_FORMATTER = JsCode("""
+function(params) {
+  const url = String(params.value || '');
+  return url ? 'Spotify ↗' : '-';
 }
 """)
 
-PREVIEW_BUTTON_RENDERER = JsCode("""
-class RcPreviewRenderer {
-  init(params) {
-    this.params = params;
-    this.eGui = document.createElement('button');
-    this.eGui.type = 'button';
-    this.eGui.textContent = '▶ 30s';
-    this.eGui.style.cssText = 'border:0;background:transparent;padding:0;color:#f1f3f5;cursor:pointer;font:inherit;font-weight:600';
-    this.click = (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      const sid = String((this.params.data || {}).song_id || '');
-      if (!sid) return;
-      this.params.node.setDataValue('__preview_request', sid + '|' + Date.now());
-    };
-    this.eGui.addEventListener('click', this.click);
-  }
-  getGui() { return this.eGui; }
-  refresh(params) { this.params = params; return true; }
-  destroy() { if (this.eGui && this.click) this.eGui.removeEventListener('click', this.click); }
+PREVIEW_LABEL_FORMATTER = JsCode("""
+function(params) {
+  return '▶ 30s';
 }
 """)
 
-SOURCE_POSITION_RENDERER = JsCode("""
-class RcSourcePositionRenderer {
-  init(params) {
-    this.eGui = document.createElement('span');
-    this.eGui.style.whiteSpace = 'nowrap';
-    this.refresh(params);
-  }
-  getGui() { return this.eGui; }
-  refresh(params) {
-    this.params = params;
-    const field = String((params.colDef && params.colDef.field) || '');
-    const v = Number(params.value);
-    this.eGui.replaceChildren();
-    if (!isFinite(v) || v >= 999) {
-      this.eGui.textContent = '-';
-      return true;
-    }
-    const weekField = field + '_weeks';
-    let weekColumn = null;
+SOURCE_POSITION_FORMATTER = JsCode("""
+function(params) {
+  const field = String((params.colDef && params.colDef.field) || '');
+  const v = Number(params.value);
+  if (!isFinite(v) || v >= 999) return '-';
+
+  const weekField = field + '_weeks';
+  let weekColumn = null;
+  try {
+    if (params.api && params.api.getColumn) weekColumn = params.api.getColumn(weekField);
+    else if (params.columnApi && params.columnApi.getColumn) weekColumn = params.columnApi.getColumn(weekField);
+  } catch(e) {}
+  const compact = !!(weekColumn && weekColumn.isVisible && !weekColumn.isVisible());
+  if (!compact) return String(Math.round(v));
+
+  const weeks = Number((params.data || {})[weekField] || 0);
+  const weekLabel = weeks > 0 ? (Math.round(weeks) + 'w') : '–';
+  return '#' + Math.round(v) + ' · ' + weekLabel;
+}
+""")
+
+GRID_CLICK_HANDLER = JsCode("""
+function(params) {
+  const field = params && params.colDef ? params.colDef.field : null;
+  const row = params && params.data ? params.data : {};
+  const host = window.top || window;
+
+  if (field === 'details') {
+    const raw = String(row.details || params.value || '');
+    if (!raw) return;
     try {
-      if (params.api && params.api.getColumn) weekColumn = params.api.getColumn(weekField);
-      else if (params.columnApi && params.columnApi.getColumn) weekColumn = params.columnApi.getColumn(weekField);
-    } catch(e) {}
-    const compact = !!(weekColumn && weekColumn.isVisible && !weekColumn.isVisible());
-    if (!compact) {
-      this.eGui.textContent = String(Math.round(v));
-      return true;
+      const url = new URL(raw, host.location.href);
+      host.location.assign(url.toString());
+    } catch(e) {
+      try { host.location.href = raw; } catch(e2) {}
     }
-    const strong = document.createElement('strong');
-    strong.textContent = '#' + Math.round(v);
-    strong.style.fontWeight = '750';
-    const weeks = Number((params.data || {})[weekField] || 0);
-    const small = document.createElement('span');
-    small.textContent = weeks > 0 ? (Math.round(weeks) + 't') : '–';
-    small.style.cssText = 'opacity:.58;font-size:11px;margin-left:6px;font-weight:400';
-    this.eGui.appendChild(strong);
-    this.eGui.appendChild(small);
-    return true;
+    return;
   }
+
+  if (field === 'spotify') {
+    const raw = String(row.spotify || params.value || '');
+    if (!raw) return;
+    try { host.open(raw, '_blank', 'noopener,noreferrer'); } catch(e) {}
+    return;
+  }
+
+  if (field !== 'preview') return;
+  try {
+    if (typeof host.__rcPlayPreview === 'function') {
+      host.__rcPlayPreview({
+        songId: String(row.song_id || (row.artist || '') + '|' + (row.title || '')),
+        artist: String(row.artist || ''),
+        title: String(row.title || ''),
+        spotify: String(row.spotify || '')
+      });
+    }
+  } catch(e) {}
 }
 """)
+
+
+def install_client_helpers() -> None:
+    """Install hard-navigation/back-button support and one page-level preview player.
+
+    The AG Grid lives inside a component iframe.  The player is deliberately
+    created in the top document, so it is fixed to the bottom of the browser
+    viewport rather than the bottom of the table iframe.
+    """
+    components.html(
+        r"""
+        <script>
+        (() => {
+          let host = window.top || window;
+          let doc = document;
+          try { doc = host.document; } catch(e) { host = window; doc = document; }
+
+          if (!host.__rcBackReloadInstalled) {
+            host.__rcBackReloadInstalled = true;
+            host.addEventListener('popstate', function() {
+              // Streamlit does not always rerun when only query params change via
+              // browser history. Force a real reload on Back/Forward.
+              setTimeout(() => { try { host.location.reload(); } catch(e) {} }, 0);
+            });
+          }
+
+          if (typeof host.__rcPlayPreview === 'function') return;
+
+          const norm = (x) => String(x || '')
+            .toLowerCase()
+            .replace(/ł/g,'l')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g,'')
+            .replace(/[^a-z0-9]+/g,' ')
+            .trim();
+
+          const ensurePlayer = () => {
+            let wrap = doc.getElementById('__rcFloatingPlayer');
+            if (wrap) return wrap;
+            wrap = doc.createElement('div');
+            wrap.id = '__rcFloatingPlayer';
+            wrap.style.cssText = [
+              'display:none','position:fixed','left:50%','bottom:0','transform:translateX(-50%)',
+              'z-index:2147483000','width:min(980px,calc(100vw - 28px))','box-sizing:border-box',
+              'background:rgba(22,27,35,.985)','border:1px solid rgba(160,175,195,.42)',
+              'border-bottom:0','border-radius:13px 13px 0 0','box-shadow:0 -10px 36px rgba(0,0,0,.48)',
+              'padding:10px 13px 9px','font-family:system-ui,-apple-system,Segoe UI,sans-serif','color:#f4f6f8'
+            ].join(';');
+            wrap.innerHTML = `
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+                <div style="min-width:0;flex:1">
+                  <div id="__rcPlayerTitle" style="font-size:14px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Podgląd</div>
+                  <div id="__rcPlayerArtist" style="font-size:12px;opacity:.68;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+                </div>
+                <a id="__rcPlayerSpotify" href="#" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:#d7f9df;text-decoration:none;white-space:nowrap">Spotify ↗</a>
+                <button id="__rcPlayerClose" type="button" aria-label="Zamknij" style="border:0;background:transparent;color:#fff;font-size:22px;cursor:pointer;line-height:1;padding:0 3px">×</button>
+              </div>
+              <audio id="__rcPlayerAudio" controls preload="metadata" style="display:block;width:100%;height:34px"></audio>
+              <div id="__rcPlayerStatus" style="font-size:10px;opacity:.55;margin-top:3px">30-sekundowy podgląd Apple/iTunes</div>`;
+            doc.body.appendChild(wrap);
+            const audio = wrap.querySelector('#__rcPlayerAudio');
+            wrap.querySelector('#__rcPlayerClose').addEventListener('click', function(ev) {
+              ev.stopPropagation();
+              try { audio.pause(); audio.currentTime = 0; } catch(e) {}
+              wrap.style.display = 'none';
+              host.__rcPreviewSongId = null;
+            });
+            return wrap;
+          };
+
+          host.__rcPlayPreview = function(info) {
+            info = info || {};
+            const songId = String(info.songId || (info.artist || '') + '|' + (info.title || ''));
+            const artist = String(info.artist || '');
+            const title = String(info.title || '');
+            const spotify = String(info.spotify || '');
+            if (!artist && !title) return;
+
+            const player = ensurePlayer();
+            const audio = player.querySelector('#__rcPlayerAudio');
+            player.style.display = 'block';
+
+            if (host.__rcPreviewSongId === songId && audio.src) {
+              if (audio.paused) {
+                const pr = audio.play();
+                if (pr && pr.catch) pr.catch(() => {});
+              } else {
+                audio.pause();
+              }
+              return;
+            }
+
+            try { audio.pause(); } catch(e) {}
+            audio.removeAttribute('src');
+            audio.load();
+            host.__rcPreviewSongId = songId;
+            player.querySelector('#__rcPlayerTitle').textContent = title || 'Podgląd';
+            player.querySelector('#__rcPlayerArtist').textContent = artist;
+            const spot = player.querySelector('#__rcPlayerSpotify');
+            if (spotify) { spot.href = spotify; spot.style.display = ''; }
+            else { spot.style.display = 'none'; }
+            player.querySelector('#__rcPlayerStatus').textContent = 'Szukam podglądu…';
+
+            const cb = '__rcPreviewCB_' + Date.now() + '_' + Math.floor(Math.random()*1000000);
+            const script = doc.createElement('script');
+            const cleanup = () => {
+              try { delete host[cb]; } catch(e) {}
+              try { script.remove(); } catch(e) {}
+            };
+            host[cb] = function(payload) {
+              try {
+                if (host.__rcPreviewSongId !== songId) return;
+                const results = (payload && payload.results ? payload.results : []).filter(x => x.previewUrl);
+                const nt = norm(title), na = norm(artist);
+                let best = null, bestScore = -1;
+                for (const r of results) {
+                  const rt = norm(r.trackName), ra = norm(r.artistName);
+                  let score = 0;
+                  if (rt === nt) score += 10;
+                  if (nt && (rt.includes(nt) || nt.includes(rt))) score += 4;
+                  const artistTokens = na.split(' ').filter(x => x.length > 2);
+                  score += artistTokens.filter(t => ra.includes(t)).length;
+                  if (score > bestScore) { best = r; bestScore = score; }
+                }
+                if (!best) {
+                  player.querySelector('#__rcPlayerStatus').textContent = 'Brak 30-sekundowego podglądu dla tego utworu.';
+                  return;
+                }
+                audio.src = best.previewUrl;
+                audio.load();
+                player.querySelector('#__rcPlayerStatus').textContent = '30-sekundowy podgląd Apple/iTunes · możesz przewijać suwakiem';
+                const promise = audio.play();
+                if (promise && promise.catch) promise.catch(() => {});
+              } finally {
+                cleanup();
+              }
+            };
+            script.onerror = function() {
+              if (host.__rcPreviewSongId === songId) player.querySelector('#__rcPlayerStatus').textContent = 'Nie udało się pobrać podglądu.';
+              cleanup();
+            };
+            const term = encodeURIComponent(artist + ' ' + title);
+            script.src = 'https://itunes.apple.com/search?term=' + term + '&country=PL&media=music&entity=song&limit=5&callback=' + cb;
+            doc.body.appendChild(script);
+          };
+        })();
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
+
+
+def render_preview_button(song_id: int | str, artist: str, title: str, spotify: str) -> None:
+    payload = json.dumps({
+        "songId": str(song_id), "artist": str(artist), "title": str(title), "spotify": str(spotify),
+    }, ensure_ascii=False).replace("<", "\\u003c")
+    components.html(
+        f"""
+        <style>
+          body {{ margin:0; background:transparent; font-family:system-ui,-apple-system,Segoe UI,sans-serif; }}
+          button {{ width:100%; height:38px; border:1px solid #596272; border-radius:7px; background:#2a313d; color:#f1f4f7; font-weight:650; cursor:pointer; }}
+          button:hover {{ background:#343d4b; }}
+        </style>
+        <button id="play">▶ Odsłuch 30s</button>
+        <script>
+          const info = {payload};
+          document.getElementById('play').addEventListener('click', function() {{
+            try {{ if (window.top && typeof window.top.__rcPlayPreview === 'function') window.top.__rcPlayPreview(info); }} catch(e) {{}}
+          }});
+        </script>
+        """,
+        height=42,
+        scrolling=False,
+    )
 
 PERCENT_FORMATTER = JsCode("""
 function(params) {
@@ -527,31 +663,33 @@ def render_song_grid(
         return show
     if "preview" not in show.columns:
         show["preview"] = "▶"
-    # Hidden action fields are mutated by AG Grid renderers and returned through
-    # cellValueChanged. This avoids iframe navigation/popup limitations.
-    show["__details_request"] = ""
-    show["__preview_request"] = ""
 
     gb = GridOptionsBuilder.from_dataframe(show)
     gb.configure_default_column(resizable=True, sortable=True, filter=True, editable=False)
     gb.configure_selection(selection_mode="single", use_checkbox=False, suppressRowClickSelection=False)
-    gb.configure_grid_options(rowHeight=36, animateRows=False)
+    gb.configure_grid_options(rowHeight=36, animateRows=False, onCellClicked=GRID_CLICK_HANDLER)
 
     if "song_id" in show.columns:
         gb.configure_column("song_id", hide=True)
-    gb.configure_column("__details_request", hide=True)
-    gb.configure_column("__preview_request", hide=True)
     pin_identity = source_layout in {"auto", "compact"}
     if "artist" in show.columns:
         gb.configure_column("artist", "Wykonawca", minWidth=170 if pin_identity else 190, width=205 if pin_identity else 220, pinned="left" if pin_identity else None)
     if "title" in show.columns:
         gb.configure_column("title", "Tytuł", minWidth=185 if pin_identity else 210, width=235 if pin_identity else 260, pinned="left" if pin_identity else None)
     if "details" in show.columns:
-        gb.configure_column("details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False, cellRenderer=DETAIL_LINK_RENDERER)
+        gb.configure_column(
+            "details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False,
+            valueFormatter=DETAIL_LABEL_FORMATTER,
+            cellStyle={"cursor": "pointer", "color": "#cfe4ff", "fontWeight": "650"},
+        )
     if "spotify" in show.columns:
-        gb.configure_column("spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False, cellRenderer=SPOTIFY_LINK_RENDERER)
+        gb.configure_column(
+            "spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False,
+            valueFormatter=SPOTIFY_LABEL_FORMATTER,
+            cellStyle={"cursor": "pointer", "color": "#d7f9df", "fontWeight": "650"},
+        )
     if "preview" in show.columns:
-        gb.configure_column("preview", "Odsłuch", minWidth=90, width=98, sortable=False, filter=False, cellRenderer=PREVIEW_BUTTON_RENDERER)
+        gb.configure_column("preview", "Odsłuch", minWidth=90, width=98, sortable=False, filter=False, valueFormatter=PREVIEW_LABEL_FORMATTER, cellStyle={"cursor": "pointer"})
     if "heard" in show.columns:
         gb.configure_column(
             "heard", "✓", width=65, minWidth=58,
@@ -570,19 +708,12 @@ def render_song_grid(
     if "recommendation" in show.columns:
         gb.configure_column("recommendation", "Rekomendacja", minWidth=190, width=220)
 
-    if "plays" in show.columns:
-        gb.configure_column("plays", "Emisje", width=92, minWidth=82, type=["numericColumn"])
-    if "station_count" in show.columns:
-        gb.configure_column("station_count", "Stacje", width=82, minWidth=74, type=["numericColumn"])
-    if "last_played_at" in show.columns:
-        gb.configure_column("last_played_at", "Ostatnio", width=155, minWidth=145)
-
     source_names = [c for c in ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"] if c in show.columns]
     week_names = [f"{c}_weeks" for c in source_names if f"{c}_weeks" in show.columns]
     compact_initial = source_layout == "compact"
     for col in source_names:
         gb.configure_column(
-            col, valueFormatter=POSITION_FORMATTER, cellRenderer=SOURCE_POSITION_RENDERER,
+            col, valueFormatter=SOURCE_POSITION_FORMATTER,
             width=96 if source_layout in {"auto", "compact"} else 88, minWidth=82,
         )
     for col in week_names:
@@ -619,6 +750,18 @@ def render_song_grid(
         gb.configure_column("reported_weeks", "Tygodnie", width=90, minWidth=84)
     if "reported_peak" in show.columns:
         gb.configure_column("reported_peak", "Peak", width=75, minWidth=70, valueFormatter=POSITION_FORMATTER)
+    if "spins" in show.columns:
+        gb.configure_column("spins", "Emisje", width=92, minWidth=84, pinned="left" if source_layout == "airplay" else None)
+    if "stations_count" in show.columns:
+        gb.configure_column("stations_count", "Stacje", width=82, minWidth=76)
+    if "avg_per_station" in show.columns:
+        gb.configure_column("avg_per_station", "Śr./stację", width=105, minWidth=96)
+    if "max_station_spins" in show.columns:
+        gb.configure_column("max_station_spins", "Max/stacja", width=105, minWidth=96)
+    if "top_station" in show.columns:
+        gb.configure_column("top_station", "Najmocniejsza stacja", minWidth=165, width=190)
+    if "last_play" in show.columns:
+        gb.configure_column("last_play", "Ostatnio", minWidth=150, width=165)
 
     options = gb.build()
     options.pop("autoSizeStrategy", None)
@@ -648,41 +791,9 @@ def render_song_grid(
             edited = show
     edited = pd.DataFrame(edited)
 
-    # Cell-renderer actions are sent to Python through hidden columns. Details
-    # can therefore change Streamlit query params in the SAME browser tab, and
-    # preview can feed a player rendered in st.bottom outside the AG Grid iframe.
-    if "__details_request" in edited.columns:
-        detail_rows = edited[edited["__details_request"].astype(str).str.strip().ne("")]
-        if not detail_rows.empty:
-            action = detail_rows.iloc[-1]
-            token = str(action.get("__details_request") or "")
-            if token and token != st.session_state.get("rc_last_details_request"):
-                st.session_state["rc_last_details_request"] = token
-                try:
-                    sid = int(action.get("song_id"))
-                    st.query_params["view"] = "song"
-                    st.query_params["song"] = str(sid)
-                    st.rerun()
-                except Exception:
-                    pass
-
-    if "__preview_request" in edited.columns:
-        preview_rows = edited[edited["__preview_request"].astype(str).str.strip().ne("")]
-        if not preview_rows.empty:
-            action = preview_rows.iloc[-1]
-            token = str(action.get("__preview_request") or "")
-            if token and token != st.session_state.get("rc_last_preview_request"):
-                st.session_state["rc_last_preview_request"] = token
-                st.session_state["rc_preview_track"] = {
-                    "song_id": int(action.get("song_id")),
-                    "artist": str(action.get("artist") or ""),
-                    "title": str(action.get("title") or ""),
-                    "spotify": str(action.get("spotify") or spotify_search_url(str(action.get("artist") or ""), str(action.get("title") or ""))),
-                }
-
     if editable_state and {"song_id", "heard", "status"}.issubset(edited.columns) and not original.empty:
         before = original.set_index("song_id")
-        notes_by_id = {int(x["song_id"]): str(x.get("note") or "") for x in load_notes()}
+        notes_by_id = df.set_index("song_id")["note"].to_dict() if (not df.empty and "note" in df.columns) else {}
         changed = 0
         for r in edited[["song_id", "heard", "status"]].itertuples(index=False):
             try:
@@ -699,6 +810,31 @@ def render_song_grid(
             st.toast(f"Zapisano status dla {changed} utworów.")
             st.rerun()
     return edited
+
+
+def render_info_grid(frame: pd.DataFrame, *, key: str, height: int = 210) -> None:
+    """Read-only AG Grid used on the song-detail page for visual consistency."""
+    if frame.empty:
+        st.caption("Brak danych.")
+        return
+    gb = GridOptionsBuilder.from_dataframe(frame)
+    gb.configure_default_column(resizable=True, sortable=True, filter=False, editable=False)
+    gb.configure_grid_options(rowHeight=36, animateRows=False)
+    for col in frame.columns:
+        if col in {"Pozycja", "Peak", "Tygodnie"}:
+            gb.configure_column(col, width=105, minWidth=88)
+        elif col == "Źródło":
+            gb.configure_column(col, width=120, minWidth=105)
+        elif col == "Rola":
+            gb.configure_column(col, minWidth=180, width=220)
+    AgGrid(
+        frame,
+        gridOptions=gb.build(),
+        height=height,
+        theme="streamlit",
+        enable_enterprise_modules=False,
+        key=key,
+    )
 
 
 @st.fragment(run_every=0.8)
@@ -738,9 +874,10 @@ def render_job_status_fragment(group: str = "all", key_suffix: str = "main") -> 
 
 
 view_key = str(st.query_params.get("view", "dashboard"))
-if view_key not in {"dashboard", "song", "archive", "data", "import", "methodology"}:
+if view_key not in {"dashboard", "song", "archive", "airplay", "data", "import", "methodology"}:
     view_key = "dashboard"
 render_nav_tabs(view_key)
+install_client_helpers()
 
 
 if view_key == "dashboard":
@@ -843,20 +980,13 @@ if view_key == "dashboard":
                 show[col] = show[col].map(position_sort_value).astype(int)
             show = show.rename(columns={c: c.replace("_pos", "") for c in pos_cols})
             render_song_grid(show, key=f"dashboard_grid_{lookback}_{scope}_{source_layout}", height=660, editable_state=True, source_layout=source_layout)
-            st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7  5t; pozycja jest pogrubiona, tygodnie mniejsze. ▶ 30s otwiera pływający player z suwakiem. Spotify pozostaje linkiem do pełnego utworu.")
+            st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7 · 5w. ▶ 30s otwiera player przyklejony do dołu całego ekranu. Spotify pozostaje linkiem do pełnego utworu.")
 
 elif view_key == "song":
-    catalog = pd.DataFrame(list_all_songs())
-    if catalog.empty:
+    if df.empty:
         st.info("Najpierw dodaj dane.")
     else:
-        if df.empty:
-            song_df = catalog.copy()
-        else:
-            score_extra = [c for c in df.columns if c not in {"artist", "title", "release_date", "heard", "status", "note"}]
-            song_df = catalog.merge(df[["song_id"] + [c for c in score_extra if c != "song_id"]], on="song_id", how="left")
-        song_df = with_notes(song_df)
-        ordered = song_df.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
+        ordered = df.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
         ids = [int(r.song_id) for r in ordered.itertuples()]
         requested = st.query_params.get("song")
         try:
@@ -866,33 +996,27 @@ elif view_key == "song":
         if selected_id not in ids:
             selected_id = ids[0]
 
-        picked_id = render_live_song_search(ordered)
-        if picked_id is not None and picked_id in ids and picked_id != selected_id:
-            st.query_params["view"] = "song"
-            st.query_params["song"] = str(picked_id)
-            st.rerun()
+        render_live_song_search(ordered)
 
         song_id = selected_id
-        row = song_df[song_df.song_id == song_id].iloc[0]
+        row = df[df.song_id == song_id].iloc[0]
 
-        head1, head2 = st.columns([4, 1])
-        with head1:
-            st.subheader(f"{row.artist} — {row.title}")
-        with head2:
-            st.link_button("▶ Otwórz w Spotify", spotify_search_url(row.artist, row.title), use_container_width=True)
+        spotify_url = spotify_search_url(row.artist, row.title)
+        with st.container(border=True):
+            head1, head2, head3 = st.columns([5, 1.35, 1.35])
+            with head1:
+                st.subheader(f"{row.artist} — {row.title}")
+                st.caption(f"Status: {row.status} · {'przesłuchany' if bool(row.heard) else 'nieprzesłuchany'}")
+            with head2:
+                render_preview_button(song_id, row.artist, row.title, spotify_url)
+            with head3:
+                st.link_button("Spotify ↗", spotify_url, use_container_width=True)
 
-        a, b, c = st.columns(3)
-        def _metric_value(name: str) -> str:
-            val = row.get(name)
-            try:
-                return f"{float(val):.0f}%" if pd.notna(val) else "—"
-            except Exception:
-                return "—"
-        a.metric("Familiarity", _metric_value("familiarity"))
-        b.metric("Momentum", _metric_value("momentum"))
-        c.metric("Format Fit", _metric_value("format_fit"))
-        rec = row.get("recommendation")
-        st.write(f"**Rekomendacja:** {rec if pd.notna(rec) and str(rec) else '—'}")
+            a, b, c = st.columns(3)
+            a.metric("Familiarity", f"{row.familiarity:.0f}%")
+            b.metric("Momentum", f"{row.momentum:.0f}%")
+            c.metric("Format Fit", f"{row.format_fit:.0f}%")
+            st.markdown(f"**Rekomendacja:** {row.recommendation}")
 
         def _source_frame(sources: list[str]) -> pd.DataFrame:
             rows = []
@@ -905,10 +1029,13 @@ elif view_key == "song":
                 })
             return pd.DataFrame(rows)
 
-        st.markdown("**Polska / źródła Familiarity**")
-        st.dataframe(_source_frame(["OLIA", "RMF", "ZET", "OLIS", "ESKA"]), hide_index=True, use_container_width=True, height=215)
-        st.markdown("**Sygnały międzynarodowe**")
-        st.dataframe(_source_frame(["UK", "BILLBOARD"]), hide_index=True, use_container_width=True, height=120)
+        st.markdown("### Pozycje i historia źródłowa")
+        source_table = pd.concat([
+            _source_frame(["OLIA", "RMF", "ZET", "OLIS", "ESKA"]).assign(Rola="Polska / Familiarity"),
+            _source_frame(["UK", "BILLBOARD"]).assign(Rola="Sygnał międzynarodowy"),
+        ], ignore_index=True)
+        source_table = source_table[["Źródło", "Rola", "Pozycja", "Tygodnie", "Peak"]]
+        render_info_grid(source_table, key=f"song_sources_{song_id}", height=292)
         st.caption("UK/Billboard są sygnałami pomocniczymi i nie zmieniają wag Familiarity. W 0.2.1 stare błędnie przypisane metadane Billboardu są jednorazowo czyszczone i odbudowywane z poprawionego parsera.")
 
         h = song_history(song_id)
@@ -950,15 +1077,20 @@ elif view_key == "song":
                 fig.update_layout(height=690, legend=dict(orientation="h", yanchor="top", y=-0.12, x=0), margin=dict(t=55,b=90))
                 st.plotly_chart(fig, use_container_width=True)
 
-        with st.form("note_form"):
-            heard = st.checkbox("Przesłuchany", value=bool(row.heard))
-            idx = STATUSES.index(row.status) if row.status in STATUSES else 0
-            status = st.selectbox("Mój status", STATUSES, index=idx)
-            note = st.text_area("Notatka", value=row.note or "")
-            if st.form_submit_button("Zapisz"):
-                update_note(song_id, heard, status, note)
-                st.success("Zapisano")
-                st.rerun()
+        with st.container(border=True):
+            st.markdown("### Moja ocena")
+            with st.form("note_form"):
+                n1, n2 = st.columns([1, 2])
+                with n1:
+                    heard = st.checkbox("Przesłuchany", value=bool(row.heard))
+                with n2:
+                    idx = STATUSES.index(row.status) if row.status in STATUSES else 0
+                    status = st.selectbox("Status", STATUSES, index=idx)
+                note = st.text_area("Notatka", value=row.note or "")
+                if st.form_submit_button("Zapisz", use_container_width=True):
+                    update_note(song_id, heard, status, note)
+                    st.success("Zapisano")
+                    st.rerun()
 
 
 elif view_key == "archive":
@@ -1017,152 +1149,174 @@ elif view_key == "archive":
             st.caption("Poprzednio/Tygodnie/Peak są uzupełniane z danych źródła, a gdy ich brakuje — z naszej zapisanej historii. Trzy wskaźniki są liczone historycznie: tylko z danych dostępnych do daty tego notowania. Status i ✓ są Twoim obecnym stanem i można je edytować.")
 
 elif view_key == "airplay":
-    st.subheader("📻 Emisje — co było grane")
-    st.caption("Dane z odSluchane.eu są zapisywane jako pojedyncze emisje i deduplikowane po stacji, czasie i utworze. Możesz sumować dowolny zestaw stacji oraz dowolny zakres dat.")
+    st.subheader("📡 Emisje")
+    st.caption(
+        "Dane z odSluchane.eu są zapisywane jako konkretne emisje w blokach 2-godzinnych. "
+        "Możesz łączyć dowolne stacje i zakres dat, żeby zobaczyć zarówno sumę spinów, jak i zasięg między stacjami."
+    )
+    stations = list_airplay_stations(active_only=True)
     running = active_job() is not None
-    stations = list_airplay_stations()
-    stats = airplay_db_stats()
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Stacje", int(stats.get("stations") or 0))
-    m2.metric("Emisje w bazie", f"{int(stats.get('plays') or 0):,}".replace(",", " "))
-    m3.metric("Od", stats.get("first_date") or "—")
-    m4.metric("Do", stats.get("last_date") or "—")
+    top1, top2 = st.columns(2)
+    if top1.button("↻ Odkryj / odśwież wszystkie stacje", disabled=running, use_container_width=True):
+        start_job("airplay-discover")
+        st.rerun()
+    if top2.button("⬇ Pobierz ostatnie zakończone 2h", disabled=running, use_container_width=True):
+        start_job("airplay-latest")
+        st.rerun()
 
+    render_job_status_fragment("airplay", "airplay_top")
+    stations = list_airplay_stations(active_only=True)
     if not stations:
-        st.info("Najpierw pobierz katalog stacji z odSluchane. Później scheduler będzie zbierał emisje automatycznie.")
-        if st.button("Pobierz katalog stacji odSluchane", disabled=running, type="primary"):
-            start_job("airplay-stations")
-            st.rerun()
-        render_job_status_fragment("all", "airplay_catalog")
+        st.info("Nie ma jeszcze listy stacji. Kliknij „Odkryj / odśwież wszystkie stacje”. Pierwsze odkrywanie przechodzi po publicznym katalogu odSluchane.eu i może potrwać chwilę.")
     else:
-        today = datetime.now(ZoneInfo("Europe/Warsaw")).date()
-        date_range = st.date_input(
-            "Zakres dat",
-            value=(today - timedelta(days=6), today),
-            min_value=today - timedelta(days=366 * 5 + 5),
-            max_value=today,
-            key="airplay_date_range",
-        )
-        if isinstance(date_range, (tuple, list)) and len(date_range) >= 2:
-            air_start, air_end = date_range[0], date_range[1]
+        core_names = {"RMF FM", "ZET", "Eska"}
+        c_all, c_core, c_none = st.columns(3)
+        if c_all.button("✓ Wszystkie stacje", use_container_width=True, key="airplay_sel_all"):
+            for station in stations:
+                st.session_state[f"airplay_station_{int(station['station_id'])}"] = True
+            st.rerun()
+        if c_core.button("RMF + ZET + ESKA", use_container_width=True, key="airplay_sel_core"):
+            for station in stations:
+                st.session_state[f"airplay_station_{int(station['station_id'])}"] = str(station["name"]) in core_names
+            st.rerun()
+        if c_none.button("Wyczyść", use_container_width=True, key="airplay_sel_none"):
+            for station in stations:
+                st.session_state[f"airplay_station_{int(station['station_id'])}"] = False
+            st.rerun()
+
+        selected_ids: list[int] = []
+        with st.expander(f"Stacje do zliczania · katalog: {len(stations)}", expanded=False):
+            cols = st.columns(4)
+            for idx, station in enumerate(stations):
+                station_id = int(station["station_id"])
+                key = f"airplay_station_{station_id}"
+                if key not in st.session_state:
+                    st.session_state[key] = str(station["name"]) in core_names
+                checked = cols[idx % 4].checkbox(str(station["name"]), key=key)
+                if checked:
+                    selected_ids.append(station_id)
+
+        coverage = airplay_coverage(selected_ids or None)
+        first_date = coverage.get("first_date")
+        last_date = coverage.get("last_date")
+        if last_date:
+            default_end = date.fromisoformat(str(last_date))
         else:
-            air_start = air_end = date_range if isinstance(date_range, date) else today
+            default_end = date.today()
+        default_start = max(
+            date.fromisoformat(str(first_date)) if first_date else default_end - timedelta(days=6),
+            default_end - timedelta(days=6),
+        )
 
-        core_names = {"rmf fm", "zet", "eska"}
-        core_ids = {
-            int(x["id"]) for x in stations
-            if str(x["name"]).casefold().strip() in core_names
-        }
-        # First visit: keep the result readable. One click selects the whole catalogue.
-        if not st.session_state.get("airplay_station_defaults_set"):
-            for item in stations:
-                st.session_state[f"airplay_station_{int(item['id'])}"] = int(item["id"]) in core_ids
-            st.session_state["airplay_station_defaults_set"] = True
+        st.markdown("### Zbiorcze zestawienie")
+        d1, d2, d3 = st.columns([2, 1, 1])
+        selected_range = d1.date_input(
+            "Zakres dat",
+            value=(default_start, default_end),
+            key="airplay_range",
+            help="Zakres jest inkluzywny. Wynik liczymy wyłącznie z zapisanych emisji w bazie.",
+        )
+        if isinstance(selected_range, (list, tuple)) and len(selected_range) == 2:
+            range_start, range_end = selected_range
+        else:
+            range_start = range_end = selected_range if isinstance(selected_range, date) else default_end
+        if range_end < range_start:
+            range_start, range_end = range_end, range_start
 
-        with st.expander("Stacje do zliczania", expanded=True):
-            b_all, b_core, b_none, b_refresh = st.columns(4)
-            if b_all.button("✓ Wszystkie", use_container_width=True):
-                for item in stations:
-                    st.session_state[f"airplay_station_{int(item['id'])}"] = True
-                st.rerun()
-            if b_core.button("RMF + ZET + ESKA", use_container_width=True):
-                for item in stations:
-                    st.session_state[f"airplay_station_{int(item['id'])}"] = int(item["id"]) in core_ids
-                st.rerun()
-            if b_none.button("Wyczyść", use_container_width=True):
-                for item in stations:
-                    st.session_state[f"airplay_station_{int(item['id'])}"] = False
-                st.rerun()
-            if b_refresh.button("↻ Odśwież katalog", disabled=running, use_container_width=True):
-                start_job("airplay-stations")
-                st.rerun()
+        min_stations_max = max(1, len(selected_ids))
+        min_station_count = d2.number_input(
+            "Min. stacji",
+            min_value=1,
+            max_value=min_stations_max,
+            value=1,
+            step=1,
+            disabled=not selected_ids,
+        )
+        sort_mode = d3.selectbox("Sortuj", ["Emisje", "Liczba stacji", "Max/stacja"], index=0)
 
-            station_cols = st.columns(4)
-            for idx, item in enumerate(stations):
-                sid = int(item["id"])
-                station_cols[idx % 4].checkbox(str(item["name"]), key=f"airplay_station_{sid}")
-
-        selected_ids = [int(x["id"]) for x in stations if st.session_state.get(f"airplay_station_{int(x['id'])}", False)]
-        selected_names = {int(x["id"]): str(x["name"]) for x in stations if int(x["id"]) in selected_ids}
-        st.caption(f"Wybrano **{len(selected_ids)} / {len(stations)}** stacji.")
-
-        f1, f2, f3, f4 = st.columns(4)
-        min_plays = int(f1.number_input("Min. emisji", min_value=1, max_value=1000000, value=1, step=1))
-        max_station_filter = max(1, len(selected_ids))
-        if int(st.session_state.get("airplay_min_stations", 1) or 1) > max_station_filter:
-            st.session_state["airplay_min_stations"] = max_station_filter
-        min_stations = int(f2.number_input("Min. liczba stacji", min_value=1, max_value=max_station_filter, value=1, step=1, disabled=not selected_ids, key="airplay_min_stations"))
-        result_limit = int(f3.selectbox("Maks. wyników", [500, 2000, 5000, 10000, 50000], index=1))
-        show_breakdown = f4.checkbox("Kolumny per stacja", value=False, help="Dodaje osobną kolumnę z liczbą emisji dla każdej wybranej stacji. Przy kilkudziesięciu stacjach tabela będzie szeroka.")
+        cov1, cov2, cov3, cov4 = st.columns(4)
+        cov1.metric("Wybrane stacje", len(selected_ids))
+        cov2.metric("Zapisane emisje", int(coverage.get("plays") or 0))
+        cov3.metric("Okna 2h", f"{int(coverage.get('ok_windows') or 0)} / {int(coverage.get('windows') or 0)}")
+        cov4.metric("Zakres bazy", f"{first_date or '—'} → {last_date or '—'}")
 
         if not selected_ids:
             st.info("Zaznacz przynajmniej jedną stację.")
         else:
-            rows = pd.DataFrame(airplay_summary(air_start, air_end, selected_ids, min_plays=min_plays, min_stations=min_stations, limit=result_limit))
-            if rows.empty:
-                st.info("Brak zapisanych emisji dla wybranych stacji i dat. Możesz uruchomić pobieranie lub backfill poniżej.")
+            summary_rows = airplay_summary(selected_ids, range_start, range_end)
+            air = pd.DataFrame(summary_rows)
+            if air.empty:
+                st.info("Brak zapisanych emisji dla wybranych stacji i dat. Użyj pobierania bieżącego albo backfillu poniżej.")
             else:
-                rows = with_notes(rows)
-                if show_breakdown and not rows.empty:
-                    split = pd.DataFrame(airplay_station_breakdown(air_start, air_end, selected_ids, rows["song_id"].astype(int).tolist()))
-                    if not split.empty:
-                        split["station_label"] = split.apply(lambda r: f"📻 {r['station']}", axis=1)
-                        pivot = split.pivot_table(index="song_id", columns="station_label", values="plays", aggfunc="sum", fill_value=0).reset_index()
-                        rows = rows.merge(pivot, on="song_id", how="left")
-                rows["details"] = [song_link(sid) for sid in rows.song_id]
-                rows["preview"] = "▶"
-                rows["spotify"] = [spotify_search_url(a, t) for a, t in zip(rows.artist, rows.title)]
-                rows["heard"] = rows["heard"].fillna(False).astype(bool)
-                rows["status"] = rows["status"].fillna("Nie słuchałem").astype(str)
-                base_cols = ["song_id", "artist", "title", "details", "preview", "spotify", "heard", "status", "plays", "station_count", "last_played_at"]
-                extra_cols = [c for c in rows.columns if c.startswith("📻 ")]
-                air_show = rows[[c for c in base_cols if c in rows.columns] + sorted(extra_cols)].copy()
-                render_song_grid(air_show, key=f"airplay_grid_{air_start}_{air_end}_{len(selected_ids)}_{show_breakdown}", height=690, editable_state=True)
-                st.caption("Emisje = suma spinów w zaznaczonych stacjach. Stacje = w ilu z zaznaczonych stacji dany utwór pojawił się co najmniej raz. Status i ✓ są wspólne z Dashboardem.")
+                air = air[air["stations_count"] >= int(min_station_count)].copy()
+                if sort_mode == "Liczba stacji":
+                    air = air.sort_values(["stations_count", "spins"], ascending=[False, False])
+                elif sort_mode == "Max/stacja":
+                    air = air.sort_values(["max_station_spins", "spins"], ascending=[False, False])
+                else:
+                    air = air.sort_values(["spins", "stations_count"], ascending=[False, False])
 
-        st.divider()
-        st.markdown("### Pobieranie i backfill Emisji")
-        st.caption("Scheduler zbiera wszystkie wykryte stacje co 2 godziny. Backfill jest wznawialny: już poprawnie pobrane okna są pomijane, więc można zatrzymać proces i uruchomić go ponownie.")
-        p1, p2 = st.columns(2)
-        if p1.button("Pobierz ostatnie — wszystkie stacje", disabled=running, type="primary", use_container_width=True):
-            start_job("airplay-current")
-            st.rerun()
-        if p2.button("Pobierz ostatnie — wybrane", disabled=running or not selected_ids, use_container_width=True):
-            start_job("airplay-current", params={"station_ids": selected_ids})
-            st.rerun()
+                note_rows = {int(x["song_id"]): x for x in load_notes()}
+                air["details"] = [song_link(int(x)) if pd.notna(x) and x else "" for x in air["song_id"]]
+                air["preview"] = "▶"
+                air["spotify"] = [spotify_search_url(a, t) for a, t in zip(air["artist"], air["title"])]
+                air["heard"] = [bool(note_rows.get(int(x), {}).get("heard", False)) if pd.notna(x) and x else False for x in air["song_id"]]
+                air["status"] = [str(note_rows.get(int(x), {}).get("status", "Nie słuchałem")) if pd.notna(x) and x else "Poza bazą" for x in air["song_id"]]
+                air["last_play"] = air["last_play"].astype(str).str.replace("T", " ", regex=False)
 
-        days = abs((air_end - air_start).days) + 1
-        requests_est = days * max(1, len(selected_ids)) * 3
-        requests_all_est = days * len(stations) * 3
-        st.caption(f"Backfill wybranego zakresu: {days} dni × {len(selected_ids)} stacji × 3 okna/dobę = maks. **{requests_est:,}** zapytań (już pobrane okna są pomijane).".replace(",", " "))
-        bf1, bf2 = st.columns(2)
-        if bf1.button("Backfill: wybrane stacje + zakres", disabled=running or not selected_ids, use_container_width=True):
-            start_job("airplay-backfill", params={
-                "station_ids": selected_ids,
-                "start_date": air_start.isoformat(),
-                "end_date": air_end.isoformat(),
-                "skip_completed": True,
-                "request_delay": 0.25,
-            })
-            st.rerun()
-        confirm_all = st.checkbox(
-            f"Pozwól na backfill wszystkich {len(stations)} stacji w tym zakresie (maks. {requests_all_est:,} zapytań)".replace(",", " "),
-            value=False,
-            key="airplay_confirm_all_backfill",
+                air_cols = [
+                    "song_id", "artist", "title", "details", "preview", "spotify", "heard", "status",
+                    "spins", "stations_count", "avg_per_station", "max_station_spins", "top_station", "last_play",
+                ]
+                render_song_grid(
+                    air[[c for c in air_cols if c in air.columns]],
+                    key=f"airplay_grid_{range_start}_{range_end}_{len(selected_ids)}_{int(min_station_count)}_{sort_mode}",
+                    height=720,
+                    editable_state=True,
+                    source_layout="airplay",
+                )
+                st.caption(
+                    "Emisje = łączna liczba zapisanych spinów. Stacje = na ilu wybranych stacjach utwór wystąpił. "
+                    "Max/stacja pokazuje, ile spinów pochodziło z najmocniejszej pojedynczej stacji. „Poza bazą” oznacza brak dopasowania do utworu z naszych list przebojów."
+                )
+
+        st.markdown("### Backfill emisji")
+        st.caption(
+            "Backfill jest dokładny i idempotentny: pobiera publiczne bloki 2h, a okna już zapisane pomija. "
+            "Limit jednego procesu to 100 000 okien 2h, żeby przypadkiem nie uruchomić wielomilionowego pobierania."
         )
-        if bf2.button("Backfill: WSZYSTKIE stacje + zakres", disabled=running or not confirm_all, use_container_width=True, type="primary"):
-            start_job("airplay-backfill", params={
-                "station_ids": [int(x["id"]) for x in stations],
-                "start_date": air_start.isoformat(),
-                "end_date": air_end.isoformat(),
-                "skip_completed": True,
-                "request_delay": 0.25,
-            })
+        bf1, bf2 = st.columns([2, 1])
+        bf_default = default_end - timedelta(days=1)
+        bf_range = bf1.date_input(
+            "Zakres backfillu",
+            value=(bf_default, bf_default),
+            key="airplay_backfill_range",
+        )
+        if isinstance(bf_range, (list, tuple)) and len(bf_range) == 2:
+            bf_start, bf_end = bf_range
+        else:
+            bf_start = bf_end = bf_range if isinstance(bf_range, date) else bf_default
+        if bf_end < bf_start:
+            bf_start, bf_end = bf_end, bf_start
+        bf_days = (bf_end - bf_start).days + 1
+        estimated_windows = max(0, len(selected_ids) * bf_days * 12)
+        bf2.metric("Do pobrania / sprawdzenia", f"{estimated_windows:,} okien")
+        can_backfill = bool(selected_ids) and estimated_windows <= 100_000 and not running
+        if estimated_windows > 100_000:
+            st.warning("Ten zakres przekracza limit 100 000 okien. Zmniejsz liczbę stacji lub podziel daty na kilka procesów.")
+        if st.button("Backfill wybrane stacje i daty", disabled=not can_backfill, type="primary", use_container_width=True):
+            start_job(
+                "airplay-backfill",
+                params={
+                    "station_ids": selected_ids,
+                    "start_date": bf_start.isoformat(),
+                    "end_date": bf_end.isoformat(),
+                },
+            )
             st.rerun()
-        st.caption("Pełne spiny zostają w bazie, ale tabela zbiorcza korzysta z kompaktowych agregatów dziennych, żeby wieloletnia historia nie musiała być skanowana rekord po rekordzie.")
-        render_job_status_fragment("all", "airplay")
-
+        st.caption("Automatyczny worker pobiera poprzedni zakończony blok 2h wszystkich odkrytych stacji co dwie godziny o :12. Dzięki temu od teraz historia rośnie sama.")
+        render_job_status_fragment("airplay", "airplay_backfill")
 
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
@@ -1334,6 +1488,3 @@ Aplikacja tworzy link do wyszukiwania `wykonawca + tytuł` w Spotify. Podgląd w
 Progi są celowo konfigurowalne. Po zebraniu historii skalibrujemy je na utworach, które sam oznaczysz jako Current / Current Familiar / Recurrent.
         """
     )
-
-# Global bottom player is rendered after the selected view so it belongs to the main app.
-render_global_player()

@@ -7,10 +7,11 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 from radiocharts.collector import backfill_olis_source, backfill_rmf, backfill_weekly_source, backfill_zet
-from radiocharts.airplay import backfill_airplay, collect_airplay_recent, discover_stations
+from radiocharts.airplay import backfill_airplay, collect_latest_window, discover_stations
 from radiocharts.db import DB_PATH, record_source_check
 
 JOB_DIR = DB_PATH.parent / "jobs"
@@ -107,7 +108,14 @@ def main() -> int:
     global _CURRENT, _PATH
     p = argparse.ArgumentParser()
     p.add_argument("--job-id", required=True)
-    p.add_argument("--kind", required=True, choices=["collect-all", "collect-source", "backfill", "backfill-all", "airplay-current", "airplay-backfill", "airplay-stations"])
+    p.add_argument(
+        "--kind",
+        required=True,
+        choices=[
+            "collect-all", "collect-source", "backfill", "backfill-all",
+            "airplay-discover", "airplay-latest", "airplay-backfill",
+        ],
+    )
     p.add_argument("--source")
     p.add_argument("--count", type=int, default=0)
     p.add_argument("--params-json", default="{}")
@@ -141,34 +149,41 @@ def main() -> int:
         )
 
     try:
-        if args.kind == "airplay-stations":
-            stations = discover_stations()
-            messages = [f"odSluchane: zapisano katalog {len(stations)} stacji"]
-            _write(done=1, total=1, progress=1.0, message=messages[-1])
-        elif args.kind == "airplay-current":
-            station_ids = params.get("station_ids")
-            result = collect_airplay_recent(station_ids=station_ids, progress_callback=progress)
-            messages.append(
-                f"Emisje: ok {result['ok']}, błędy {result['failed']}, nowych emisji {result['inserted']}"
+        if args.kind == "airplay-discover":
+            stations = discover_stations(progress_callback=progress)
+            _write(
+                state="done", progress=1.0,
+                message=f"Odkryto {len(stations)} stacji odSluchane.eu.",
+                messages=messages[-50:], finished_at=time.time(),
             )
-            state = "partial" if result["failed"] else "done"
-            _write(state=state, progress=1.0, message=messages[-1], messages=messages[-50:], finished_at=time.time())
+            return 0
+        elif args.kind == "airplay-latest":
+            result = collect_latest_window(progress_callback=progress)
+            state = "partial" if int(result.get("errors") or 0) else "done"
+            _write(
+                state=state, progress=1.0,
+                message=(
+                    f"Emisje: stacje OK {result.get('ok', 0)}/{result.get('total', 0)}, "
+                    f"błędy {result.get('errors', 0)}, zapisano {result.get('plays', 0)} emisji."
+                ),
+                messages=list(result.get("messages") or messages)[-50:], finished_at=time.time(),
+            )
             return 0
         elif args.kind == "airplay-backfill":
-            station_ids = params.get("station_ids") or []
-            start_date = str(params.get("start_date") or "")
-            end_date = str(params.get("end_date") or "")
-            result = backfill_airplay(
-                station_ids, start_date, end_date, progress_callback=progress,
-                request_delay=float(params.get("request_delay", 0.25)),
-                skip_completed=bool(params.get("skip_completed", True)),
+            station_ids = [int(x) for x in params.get("station_ids", [])]
+            start_date = date.fromisoformat(str(params.get("start_date")))
+            end_date = date.fromisoformat(str(params.get("end_date")))
+            result = backfill_airplay(station_ids, start_date, end_date, progress_callback=progress)
+            errors = int(result.get("errors") or 0)
+            state = "partial" if errors else "done"
+            _write(
+                state=state, progress=1.0,
+                message=(
+                    f"Emisje backfill: pobrano {result.get('ok', 0)} okien, pominięto {result.get('skipped', 0)} już zapisanych, "
+                    f"błędy {errors}, zapisano {result.get('plays', 0)} emisji."
+                ),
+                messages=list(result.get("messages") or messages)[-50:], finished_at=time.time(),
             )
-            messages.append(
-                f"Emisje {result['start_date']}–{result['end_date']}: ok {result['ok']}, "
-                f"pominięto {result['skipped']}, błędy {result['failed']}, nowych emisji {result['inserted']}"
-            )
-            state = "partial" if result["failed"] else "done"
-            _write(state=state, progress=1.0, message=messages[-1], messages=messages[-50:], finished_at=time.time())
             return 0
         elif args.kind == "collect-all":
             total = len(AUTO_SOURCES)

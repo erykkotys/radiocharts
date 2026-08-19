@@ -85,48 +85,45 @@ CREATE TABLE IF NOT EXISTS source_checks (
 CREATE INDEX IF NOT EXISTS idx_source_checks_source_time ON source_checks(source, checked_at DESC);
 
 CREATE TABLE IF NOT EXISTS airplay_stations (
-    external_id INTEGER PRIMARY KEY,
+    station_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
+    slug TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    discovered_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS airplay_plays (
     id INTEGER PRIMARY KEY,
-    station_id INTEGER NOT NULL REFERENCES airplay_stations(external_id) ON DELETE CASCADE,
-    song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    station_id INTEGER NOT NULL REFERENCES airplay_stations(station_id) ON DELETE CASCADE,
     played_at TEXT NOT NULL,
-    play_date TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist_key TEXT NOT NULL,
+    title_key TEXT NOT NULL,
+    song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
     source_url TEXT,
-    UNIQUE(station_id, played_at, song_id)
+    retrieved_at TEXT NOT NULL,
+    UNIQUE(station_id, played_at, artist_key, title_key)
 );
-CREATE INDEX IF NOT EXISTS idx_airplay_date_station ON airplay_plays(play_date, station_id);
-CREATE INDEX IF NOT EXISTS idx_airplay_song_date ON airplay_plays(song_id, play_date);
-CREATE INDEX IF NOT EXISTS idx_airplay_station_time ON airplay_plays(station_id, played_at);
 
--- Compact daily rollup used by the Emisje summary table. Exact spins remain
--- in airplay_plays, but most analytical queries never need to scan them all.
-CREATE TABLE IF NOT EXISTS airplay_daily (
-    station_id INTEGER NOT NULL REFERENCES airplay_stations(external_id) ON DELETE CASCADE,
-    song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS airplay_windows (
+    station_id INTEGER NOT NULL REFERENCES airplay_stations(station_id) ON DELETE CASCADE,
     play_date TEXT NOT NULL,
-    plays INTEGER NOT NULL DEFAULT 0,
-    last_played_at TEXT NOT NULL,
-    PRIMARY KEY(station_id, song_id, play_date)
-);
-CREATE INDEX IF NOT EXISTS idx_airplay_daily_date_station ON airplay_daily(play_date, station_id);
-CREATE INDEX IF NOT EXISTS idx_airplay_daily_song_date ON airplay_daily(song_id, play_date);
-
-CREATE TABLE IF NOT EXISTS airplay_fetches (
-    station_id INTEGER NOT NULL REFERENCES airplay_stations(external_id) ON DELETE CASCADE,
-    play_date TEXT NOT NULL,
-    window_key TEXT NOT NULL,
-    success INTEGER NOT NULL,
-    entries INTEGER NOT NULL DEFAULT 0,
+    start_hour INTEGER NOT NULL,
+    end_hour INTEGER NOT NULL,
     fetched_at TEXT NOT NULL,
+    play_count INTEGER NOT NULL DEFAULT 0,
+    source_url TEXT,
+    success INTEGER NOT NULL DEFAULT 1,
     message TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY(station_id, play_date, window_key)
+    PRIMARY KEY(station_id, play_date, start_hour)
 );
-CREATE INDEX IF NOT EXISTS idx_airplay_fetch_date ON airplay_fetches(play_date, station_id);
+
+CREATE INDEX IF NOT EXISTS idx_airplay_plays_time_station ON airplay_plays(played_at, station_id);
+CREATE INDEX IF NOT EXISTS idx_airplay_plays_track ON airplay_plays(title_key, artist_key);
+CREATE INDEX IF NOT EXISTS idx_airplay_windows_date ON airplay_windows(play_date, station_id);
 """
 
 
@@ -249,10 +246,10 @@ def init_db() -> None:
         try:
             con0 = sqlite3.connect(DB_PATH, timeout=2)
             keys = {r[0] for r in con0.execute(
-                "SELECT key FROM app_meta WHERE key IN ('song_alias_merge_v1','billboard_metadata_reset_v1','billboard_metadata_reset_v2','source_checks_v1','airplay_v1','airplay_daily_v1')"
+                "SELECT key FROM app_meta WHERE key IN ('song_alias_merge_v1','billboard_metadata_reset_v1','billboard_metadata_reset_v2','source_checks_v1')"
             ).fetchall()}
             con0.close()
-            if len(keys) == 6:
+            if len(keys) == 4:
                 return
         except Exception:
             pass
@@ -309,19 +306,6 @@ def init_db() -> None:
         # Marker also forces pre-0.2.8 databases through SCHEMA once so the
         # source_checks table/index is created before the fast init path returns.
         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
-        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_v1','done')")
-
-        daily = con.execute("SELECT value FROM app_meta WHERE key='airplay_daily_v1'").fetchone()
-        if not daily:
-            # Safe for upgrades: if an experimental build already collected raw
-            # spins, build the compact rollup once from those exact rows.
-            con.execute("DELETE FROM airplay_daily")
-            con.execute(
-                """INSERT INTO airplay_daily(station_id,song_id,play_date,plays,last_played_at)
-                   SELECT station_id,song_id,play_date,COUNT(*),MAX(played_at)
-                   FROM airplay_plays GROUP BY station_id,song_id,play_date"""
-            )
-            con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_daily_v1','done')")
 
     _INITIALIZED_DB_PATH = current_path
 
@@ -425,11 +409,10 @@ def chart_revision() -> str:
         row = con.execute(
             """SELECT
                  COALESCE((SELECT MAX(retrieved_at) FROM chart_issues),'') AS charts,
-                 (SELECT COUNT(*) FROM chart_entries) AS entries"""
+                 (SELECT COUNT(*) FROM chart_entries) AS entries,
+                 (SELECT COUNT(*) FROM songs) AS songs"""
         ).fetchone()
-        # Airplay-only songs do not affect chart scores; excluding the global
-        # songs count prevents every Emisje sync from invalidating Dashboard caches.
-        return f"{row['charts']}|{row['entries']}"
+        return f"{row['charts']}|{row['entries']}|{row['songs']}"
 
 
 def load_notes() -> list[dict]:
@@ -672,180 +655,250 @@ def latest_issues() -> list[dict]:
 
 
 def upsert_airplay_stations(stations: Iterable[dict]) -> int:
-    """Store/update the odSluchane station catalogue."""
+    """Insert/update radio stations discovered on odSluchane.eu."""
     init_db()
+    now = _utcnow()
     count = 0
     with connect() as con:
-        for item in stations:
-            sid = int(item["id"])
-            name = str(item.get("name") or f"Stacja {sid}").strip()
+        for station in stations:
+            try:
+                station_id = int(station["station_id"])
+            except Exception:
+                continue
+            name = str(station.get("name") or f"Stacja {station_id}").strip()
+            slug = str(station.get("slug") or "").strip()
+            source_url = str(station.get("source_url") or "").strip()
+            active = int(bool(station.get("active", True)))
             con.execute(
-                """INSERT INTO airplay_stations(external_id,name,updated_at) VALUES(?,?,?)
-                   ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at""",
-                (sid, name, _utcnow()),
+                """INSERT INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(station_id) DO UPDATE SET
+                     name=excluded.name,slug=excluded.slug,source_url=excluded.source_url,
+                     active=excluded.active,updated_at=excluded.updated_at""",
+                (station_id, name, slug, source_url, active, now, now),
             )
             count += 1
     return count
 
 
-def list_airplay_stations() -> list[dict]:
+def list_airplay_stations(active_only: bool = True) -> list[dict]:
     init_db()
     with connect() as con:
-        rows = con.execute(
-            "SELECT external_id AS id,name,updated_at FROM airplay_stations ORDER BY name COLLATE NOCASE"
-        ).fetchall()
-    return [dict(r) for r in rows]
+        sql = "SELECT station_id,name,slug,source_url,active,discovered_at,updated_at FROM airplay_stations"
+        params: tuple = ()
+        if active_only:
+            sql += " WHERE active=1"
+        sql += " ORDER BY name COLLATE NOCASE, station_id"
+        rows = con.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
 
-def airplay_window_done(station_id: int, play_date: str | date, window_key: str) -> bool:
+def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | None:
+    """Best-effort match of an airplay credit to an existing chart song."""
+    akey = normalize(artist)
+    tkey = normalize(title)
+    if not tkey:
+        return None
+    exact = con.execute(
+        "SELECT id FROM songs WHERE artist_key=? AND title_key=? LIMIT 1",
+        (akey, tkey),
+    ).fetchone()
+    if exact:
+        return int(exact["id"])
+    anchor = artist_anchor(artist)
+    if not anchor:
+        return None
+    candidates = con.execute(
+        "SELECT id,artist FROM songs WHERE title_key=? ORDER BY id",
+        (tkey,),
+    ).fetchall()
+    for row in candidates:
+        if artist_anchor(str(row["artist"])) == anchor:
+            return int(row["id"])
+    return None
+
+
+def airplay_window_exists(station_id: int, play_date: date | str, start_hour: int) -> bool:
     init_db()
     d = play_date.isoformat() if isinstance(play_date, date) else str(play_date)
     with connect() as con:
         row = con.execute(
-            "SELECT success FROM airplay_fetches WHERE station_id=? AND play_date=? AND window_key=?",
-            (int(station_id), d, str(window_key)),
+            "SELECT success FROM airplay_windows WHERE station_id=? AND play_date=? AND start_hour=?",
+            (int(station_id), d, int(start_hour)),
         ).fetchone()
-    return bool(row and int(row["success"]) == 1)
+        return bool(row and row["success"])
 
 
-def record_airplay_fetch(
-    station_id: int, play_date: str | date, window_key: str, success: bool, entries: int = 0, message: str = ""
-) -> None:
+def store_airplay_window(
+    station_id: int,
+    station_name: str,
+    play_date: date | str,
+    start_hour: int,
+    plays: Iterable[dict],
+    source_url: str = "",
+    *,
+    success: bool = True,
+    message: str = "",
+) -> int:
+    """Replace one two-hour station window atomically.
+
+    Re-fetching the same window is safe: prior rows in that interval are removed
+    and the newly parsed rows are inserted with a uniqueness guard.
+    """
     init_db()
-    d = play_date.isoformat() if isinstance(play_date, date) else str(play_date)
+    station_id = int(station_id)
+    start_hour = int(start_hour) % 24
+    d = date.fromisoformat(play_date) if isinstance(play_date, str) else play_date
+    end_hour = (start_hour + 2) % 24
+    start_dt = datetime.combine(d, dt_time(start_hour, 0))
+    end_dt = start_dt + timedelta(hours=2)
+    now = _utcnow()
+    rows = list(plays)
+
     with connect() as con:
         con.execute(
-            """INSERT INTO airplay_fetches(station_id,play_date,window_key,success,entries,fetched_at,message)
-               VALUES(?,?,?,?,?,?,?)
-               ON CONFLICT(station_id,play_date,window_key) DO UPDATE SET
-                 success=excluded.success,entries=excluded.entries,fetched_at=excluded.fetched_at,message=excluded.message""",
-            (int(station_id), d, str(window_key), int(bool(success)), int(entries), _utcnow(), str(message or "")),
+            """INSERT INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
+               VALUES(?,?,?,?,1,?,?)
+               ON CONFLICT(station_id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at""",
+            (station_id, str(station_name or f"Stacja {station_id}"), "", "", now, now),
         )
-
-
-def save_airplay_plays(
-    station_id: int, station_name: str, play_date: str | date, plays: Iterable[dict],
-    source_url: str | None = None, window_key: str = "",
-) -> tuple[int, int]:
-    """Insert exact spin timestamps. Returns (parsed rows, newly inserted rows)."""
-    init_db()
-    d = play_date.isoformat() if isinstance(play_date, date) else str(play_date)
-    rows = [dict(x) for x in plays]
-    inserted = 0
-    with connect() as con:
         con.execute(
-            """INSERT INTO airplay_stations(external_id,name,updated_at) VALUES(?,?,?)
-               ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at""",
-            (int(station_id), str(station_name), _utcnow()),
+            "DELETE FROM airplay_plays WHERE station_id=? AND played_at>=? AND played_at<?",
+            (station_id, start_dt.isoformat(timespec="minutes"), end_dt.isoformat(timespec="minutes")),
         )
-        for item in rows:
-            artist = str(item.get("artist") or "").strip()
-            title = str(item.get("title") or "").strip()
-            played_at = str(item.get("played_at") or "").strip()
+        inserted = 0
+        for play in rows:
+            artist = str(play.get("artist") or "").strip()
+            title = str(play.get("title") or "").strip()
+            played_at = str(play.get("played_at") or "").strip()
             if not artist or not title or not played_at:
                 continue
-            song_id = get_or_create_song(con, artist, title)
+            artist_key = artist_anchor(artist) or normalize(artist)
+            title_key = normalize(title)
+            if not title_key:
+                continue
+            song_id = _match_song_id(con, artist, title)
             cur = con.execute(
-                """INSERT OR IGNORE INTO airplay_plays(station_id,song_id,played_at,play_date,source_url)
-                   VALUES(?,?,?,?,?)""",
-                (int(station_id), int(song_id), played_at, d, source_url),
+                """INSERT OR IGNORE INTO airplay_plays(
+                       station_id,played_at,artist,title,artist_key,title_key,song_id,source_url,retrieved_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    station_id, played_at, artist, title, artist_key, title_key, song_id,
+                    str(play.get("source_url") or source_url or ""), now,
+                ),
             )
-            if cur.rowcount and cur.rowcount > 0:
-                inserted += 1
+            inserted += int(cur.rowcount or 0)
+        con.execute(
+            """INSERT INTO airplay_windows(station_id,play_date,start_hour,end_hour,fetched_at,play_count,source_url,success,message)
+               VALUES(?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(station_id,play_date,start_hour) DO UPDATE SET
+                 end_hour=excluded.end_hour,fetched_at=excluded.fetched_at,play_count=excluded.play_count,
+                 source_url=excluded.source_url,success=excluded.success,message=excluded.message""",
+            (
+                station_id, d.isoformat(), start_hour, end_hour, now, inserted,
+                str(source_url or ""), int(bool(success)), str(message or "")[:1000],
+            ),
+        )
+        return inserted
+
+
+def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date: date | str) -> list[dict]:
+    """Aggregate exact stored spins by song and station for an inclusive date range."""
+    init_db()
+    ids = sorted({int(x) for x in station_ids})
+    if not ids:
+        return []
+    start = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    if end < start:
+        start, end = end, start
+    start_ts = datetime.combine(start, dt_time.min).isoformat(timespec="minutes")
+    end_ts = datetime.combine(end + timedelta(days=1), dt_time.min).isoformat(timespec="minutes")
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as con:
+        rows = con.execute(
+            f"""SELECT p.artist_key,p.title_key,p.station_id,s.name AS station_name,
+                       MAX(p.artist) AS artist,MAX(p.title) AS title,
+                       COUNT(*) AS spins,MAX(p.played_at) AS last_play,MAX(p.song_id) AS song_id
+                FROM airplay_plays p
+                JOIN airplay_stations s ON s.station_id=p.station_id
+                WHERE p.station_id IN ({placeholders}) AND p.played_at>=? AND p.played_at<?
+                GROUP BY p.artist_key,p.title_key,p.station_id
+                ORDER BY spins DESC""",
+            (*ids, start_ts, end_ts),
+        ).fetchall()
+        station_rows = [dict(r) for r in rows]
+
+        # Opportunistically link old airplay rows when the song entered a chart later.
+        unresolved = {(r["artist_key"], r["title_key"]): r for r in station_rows if not r.get("song_id")}
+        for _, sample in list(unresolved.items()):
+            sid = _match_song_id(con, str(sample.get("artist") or ""), str(sample.get("title") or ""))
+            if sid:
                 con.execute(
-                    """INSERT INTO airplay_daily(station_id,song_id,play_date,plays,last_played_at)
-                       VALUES(?,?,?,?,?)
-                       ON CONFLICT(station_id,song_id,play_date) DO UPDATE SET
-                         plays=airplay_daily.plays+1,
-                         last_played_at=CASE WHEN excluded.last_played_at>airplay_daily.last_played_at
-                                             THEN excluded.last_played_at ELSE airplay_daily.last_played_at END""",
-                    (int(station_id), int(song_id), d, 1, played_at),
+                    "UPDATE airplay_plays SET song_id=? WHERE artist_key=? AND title_key=? AND song_id IS NULL",
+                    (sid, sample["artist_key"], sample["title_key"]),
                 )
-        if window_key:
-            con.execute(
-                """INSERT INTO airplay_fetches(station_id,play_date,window_key,success,entries,fetched_at,message)
-                   VALUES(?,?,?,?,?,?,?)
-                   ON CONFLICT(station_id,play_date,window_key) DO UPDATE SET
-                     success=excluded.success,entries=excluded.entries,fetched_at=excluded.fetched_at,message=excluded.message""",
-                (int(station_id), d, str(window_key), 1, len(rows), _utcnow(), "OK"),
-            )
-    return len(rows), inserted
+                for r in station_rows:
+                    if r["artist_key"] == sample["artist_key"] and r["title_key"] == sample["title_key"]:
+                        r["song_id"] = sid
+
+    grouped: dict[tuple[str, str], dict] = {}
+    for r in station_rows:
+        key = (str(r["artist_key"]), str(r["title_key"]))
+        g = grouped.setdefault(key, {
+            "artist": str(r.get("artist") or ""),
+            "title": str(r.get("title") or ""),
+            "song_id": int(r["song_id"]) if r.get("song_id") else None,
+            "spins": 0,
+            "stations_count": 0,
+            "max_station_spins": 0,
+            "top_station": "",
+            "last_play": "",
+        })
+        spins = int(r.get("spins") or 0)
+        g["spins"] += spins
+        g["stations_count"] += 1
+        if spins > int(g["max_station_spins"]):
+            g["max_station_spins"] = spins
+            g["top_station"] = str(r.get("station_name") or "")
+            g["artist"] = str(r.get("artist") or g["artist"])
+            g["title"] = str(r.get("title") or g["title"])
+        last_play = str(r.get("last_play") or "")
+        if last_play > str(g["last_play"] or ""):
+            g["last_play"] = last_play
+        if not g.get("song_id") and r.get("song_id"):
+            g["song_id"] = int(r["song_id"])
+    out = []
+    for g in grouped.values():
+        stations = max(1, int(g["stations_count"]))
+        g["avg_per_station"] = round(float(g["spins"]) / stations, 1)
+        out.append(g)
+    out.sort(key=lambda r: (-int(r["spins"]), -int(r["stations_count"]), str(r["artist"]).casefold(), str(r["title"]).casefold()))
+    return out
 
 
-def airplay_summary(
-    start_date: str | date, end_date: str | date, station_ids: Iterable[int],
-    *, min_plays: int = 1, min_stations: int = 1, limit: int = 5000,
-) -> list[dict]:
+def airplay_coverage(station_ids: Iterable[int] | None = None) -> dict:
     init_db()
-    start = start_date.isoformat() if isinstance(start_date, date) else str(start_date)
-    end = end_date.isoformat() if isinstance(end_date, date) else str(end_date)
-    ids = sorted({int(x) for x in station_ids})
-    if not ids:
-        return []
-    placeholders = ",".join("?" for _ in ids)
-    limit = max(1, min(int(limit), 50000))
-    sql = f"""
-        SELECT s.id AS song_id,s.artist,s.title,
-               SUM(p.plays) AS plays,COUNT(DISTINCT p.station_id) AS station_count,MAX(p.last_played_at) AS last_played_at
-        FROM airplay_daily p
-        JOIN songs s ON s.id=p.song_id
-        WHERE p.play_date BETWEEN ? AND ? AND p.station_id IN ({placeholders})
-        GROUP BY s.id,s.artist,s.title
-        HAVING SUM(p.plays)>=? AND COUNT(DISTINCT p.station_id)>=?
-        ORDER BY plays DESC,station_count DESC,s.artist COLLATE NOCASE,s.title COLLATE NOCASE
-        LIMIT ?
-    """
-    with connect() as con:
-        rows = con.execute(sql, (start, end, *ids, max(1, int(min_plays)), max(1, int(min_stations)), limit)).fetchall()
-    return [dict(r) for r in rows]
-
-
-def airplay_station_breakdown(
-    start_date: str | date, end_date: str | date, station_ids: Iterable[int],
-    song_ids: Iterable[int] | None = None,
-) -> list[dict]:
-    init_db()
-    start = start_date.isoformat() if isinstance(start_date, date) else str(start_date)
-    end = end_date.isoformat() if isinstance(end_date, date) else str(end_date)
-    ids = sorted({int(x) for x in station_ids})
-    songs = sorted({int(x) for x in (song_ids or [])})
-    if not ids:
-        return []
-    placeholders = ",".join("?" for _ in ids)
-    song_filter = ""
-    params: list[object] = [start, end, *ids]
-    if songs:
-        song_filter = f" AND p.song_id IN ({','.join('?' for _ in songs)})"
-        params.extend(songs)
-    sql = f"""
-        SELECT p.song_id,p.station_id,st.name AS station,SUM(p.plays) AS plays
-        FROM airplay_daily p JOIN airplay_stations st ON st.external_id=p.station_id
-        WHERE p.play_date BETWEEN ? AND ? AND p.station_id IN ({placeholders}){song_filter}
-        GROUP BY p.song_id,p.station_id,st.name
-    """
-    with connect() as con:
-        rows = con.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
-
-
-def airplay_db_stats() -> dict:
-    init_db()
+    ids = sorted({int(x) for x in station_ids or []})
+    where = ""
+    params: tuple = ()
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        where = f" WHERE station_id IN ({placeholders})"
+        params = tuple(ids)
     with connect() as con:
         row = con.execute(
-            """SELECT
-                 (SELECT COUNT(*) FROM airplay_stations) AS stations,
-                 (SELECT COUNT(*) FROM airplay_plays) AS plays,
-                 (SELECT MIN(play_date) FROM airplay_plays) AS first_date,
-                 (SELECT MAX(play_date) FROM airplay_plays) AS last_date,
-                 (SELECT COUNT(*) FROM airplay_fetches WHERE success=1) AS windows_ok
-            """
+            f"""SELECT COUNT(*) AS windows,
+                       SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) AS ok_windows,
+                       MIN(play_date) AS first_date,MAX(play_date) AS last_date,
+                       COUNT(DISTINCT station_id) AS stations
+                FROM airplay_windows{where}""",
+            params,
         ).fetchone()
-    return dict(row) if row else {}
-
-
-def list_all_songs() -> list[dict]:
-    """All songs, including airplay-only records that do not have chart entries yet."""
-    init_db()
-    with connect() as con:
-        rows = con.execute("SELECT id AS song_id,artist,title,release_date FROM songs ORDER BY artist COLLATE NOCASE,title COLLATE NOCASE").fetchall()
-    return [dict(r) for r in rows]
+        plays_row = con.execute(
+            f"SELECT COUNT(*) AS plays FROM airplay_plays{where}",
+            params,
+        ).fetchone()
+        out = dict(row) if row else {}
+        out["plays"] = int(plays_row["plays"] or 0) if plays_row else 0
+        return out
