@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import time
 import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
+
+from filelock import FileLock
 
 DB_PATH = Path(os.getenv("RADIOCHARTS_DB", "/app/data/radiocharts.db"))
 if str(DB_PATH).startswith("/app/") and not Path("/app").exists():
@@ -121,14 +124,96 @@ CREATE TABLE IF NOT EXISTS airplay_windows (
     PRIMARY KEY(station_id, play_date, start_hour)
 );
 
-CREATE INDEX IF NOT EXISTS idx_airplay_plays_time_station ON airplay_plays(played_at, station_id);
-CREATE INDEX IF NOT EXISTS idx_airplay_plays_track ON airplay_plays(title_key, artist_key);
-CREATE INDEX IF NOT EXISTS idx_airplay_windows_date ON airplay_windows(play_date, station_id);
 """
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row["name"]) for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    if column not in _table_columns(con, table):
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _ensure_airplay_schema(con: sqlite3.Connection) -> None:
+    """Make the airplay tables usable even after a partial/older experiment.
+
+    0.3.6 introduced the production airplay schema.  A few development builds
+    had tables with the same names but a smaller set of columns.  SQLite's
+    ``CREATE TABLE IF NOT EXISTS`` quite correctly leaves such a table alone,
+    but then an index on a new column aborts the whole application startup.
+
+    Keep the migration deliberately additive: no existing chart or airplay row
+    is dropped.  New databases still get the stricter canonical definitions
+    from SCHEMA; old/partial tables merely receive the columns the current code
+    needs.
+    """
+    # SCHEMA above creates these on a clean database.  The calls below are for
+    # an existing table with an older shape.
+    station_columns = {
+        "station_id": "INTEGER",
+        "name": "TEXT NOT NULL DEFAULT ''",
+        "slug": "TEXT NOT NULL DEFAULT ''",
+        "source_url": "TEXT NOT NULL DEFAULT ''",
+        "active": "INTEGER NOT NULL DEFAULT 1",
+        "discovered_at": "TEXT NOT NULL DEFAULT ''",
+        "updated_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, ddl in station_columns.items():
+        _ensure_column(con, "airplay_stations", column, ddl)
+
+    # If station_id had to be added to a legacy table, give legacy rows stable
+    # negative IDs.  Positive odSluchane IDs discovered later therefore cannot
+    # collide with them.
+    try:
+        con.execute(
+            "UPDATE airplay_stations SET station_id=-rowid "
+            "WHERE station_id IS NULL OR station_id=0"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    play_columns = {
+        "station_id": "INTEGER",
+        "played_at": "TEXT NOT NULL DEFAULT ''",
+        "artist": "TEXT NOT NULL DEFAULT ''",
+        "title": "TEXT NOT NULL DEFAULT ''",
+        "artist_key": "TEXT NOT NULL DEFAULT ''",
+        "title_key": "TEXT NOT NULL DEFAULT ''",
+        "song_id": "INTEGER",
+        "source_url": "TEXT NOT NULL DEFAULT ''",
+        "retrieved_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, ddl in play_columns.items():
+        _ensure_column(con, "airplay_plays", column, ddl)
+
+    window_columns = {
+        "station_id": "INTEGER",
+        "play_date": "TEXT NOT NULL DEFAULT ''",
+        "start_hour": "INTEGER NOT NULL DEFAULT 0",
+        "end_hour": "INTEGER NOT NULL DEFAULT 0",
+        "fetched_at": "TEXT NOT NULL DEFAULT ''",
+        "play_count": "INTEGER NOT NULL DEFAULT 0",
+        "source_url": "TEXT NOT NULL DEFAULT ''",
+        "success": "INTEGER NOT NULL DEFAULT 1",
+        "message": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, ddl in window_columns.items():
+        _ensure_column(con, "airplay_windows", column, ddl)
+
+    # Create indexes only *after* the additive migration, otherwise a legacy
+    # table missing e.g. played_at makes executescript(SCHEMA) fail at startup.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_stations_station_id ON airplay_stations(station_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_plays_time_station ON airplay_plays(played_at, station_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_plays_track ON airplay_plays(title_key, artist_key)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_windows_date ON airplay_windows(play_date, station_id)")
 
 
 def normalize(value: str) -> str:
@@ -240,75 +325,140 @@ def connect():
 def init_db() -> None:
     global _INITIALIZED_DB_PATH
     current_path = str(DB_PATH)
+    required_markers = {
+        "song_alias_merge_v1",
+        "billboard_metadata_reset_v1",
+        "billboard_metadata_reset_v2",
+        "source_checks_v1",
+        "airplay_schema_v2",
+    }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
         # Very cheap fast path. If a migration marker was deliberately removed
         # (tests/maintenance), fall through and run migrations again.
         try:
             con0 = sqlite3.connect(DB_PATH, timeout=2)
+            placeholders = ",".join("?" for _ in required_markers)
             keys = {r[0] for r in con0.execute(
-                "SELECT key FROM app_meta WHERE key IN ('song_alias_merge_v1','billboard_metadata_reset_v1','billboard_metadata_reset_v2','source_checks_v1')"
+                f"SELECT key FROM app_meta WHERE key IN ({placeholders})",
+                tuple(sorted(required_markers)),
             ).fetchall()}
             con0.close()
-            if len(keys) == 4:
+            if required_markers.issubset(keys):
                 return
         except Exception:
             pass
-    with connect() as con:
-        con.executescript(SCHEMA)
-        # Lightweight migrations for existing MVP databases.
-        cols = {row["name"] for row in con.execute("PRAGMA table_info(chart_entries)").fetchall()}
-        if "reported_weeks" not in cols:
-            con.execute("ALTER TABLE chart_entries ADD COLUMN reported_weeks INTEGER")
-        if "reported_peak" not in cols:
-            con.execute("ALTER TABLE chart_entries ADD COLUMN reported_peak INTEGER")
 
-        # Remove incomplete 100-position issues left by early experimental
-        # parsers / failed pre-0.1.9 transactions. They would otherwise make
-        # coverage look complete and distort scores until a valid issue lands.
-        con.execute(
-            """DELETE FROM chart_issues
-               WHERE source IN ('OLIA','OLIS','UK','BILLBOARD')
-                 AND chart_size >= 50
-                 AND (SELECT COUNT(*) FROM chart_entries e WHERE e.issue_id=chart_issues.id) < 50"""
-        )
-        # Remove the one ZET demonstration issue used by early MVP builds.
-        # RMF demo issue 6180 shares the real RMF issue key and has already been
-        # replaced by the real backfill/current collector.
-        con.execute(
-            """DELETE FROM chart_issues
-               WHERE source='ZET' AND issue_key='ZET-2026-08-06'
-                 AND source_url='manual seed from public chart'"""
-        )
+    # web + worker start together and share the same SQLite file.  Serialize
+    # schema/migration work across processes so a simultaneous deploy cannot
+    # make one container fail in executescript().
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    init_lock = FileLock(f"{DB_PATH}.init.lock", timeout=90)
+    with init_lock:
+        # Another process may have completed the migration while we waited.
+        try:
+            con0 = sqlite3.connect(DB_PATH, timeout=5)
+            con0.row_factory = sqlite3.Row
+            tables = {r[0] for r in con0.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='app_meta'"
+            ).fetchall()}
+            if "app_meta" in tables:
+                placeholders = ",".join("?" for _ in required_markers)
+                keys = {r[0] for r in con0.execute(
+                    f"SELECT key FROM app_meta WHERE key IN ({placeholders})",
+                    tuple(sorted(required_markers)),
+                ).fetchall()}
+                if required_markers.issubset(keys):
+                    con0.close()
+                    _INITIALIZED_DB_PATH = current_path
+                    return
+            con0.close()
+        except Exception:
+            try:
+                con0.close()
+            except Exception:
+                pass
 
-        migration = con.execute("SELECT value FROM app_meta WHERE key='song_alias_merge_v1'").fetchone()
-        if not migration:
-            merged = _merge_duplicate_songs(con)
-            con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v1',?)", (str(merged),))
+        # A long-running writer can still briefly hold SQLite's write lock.
+        # busy_timeout + a few retries turns that into a short startup delay
+        # instead of a dead Streamlit page.
+        last_exc: Exception | None = None
+        for attempt in range(5):
+            try:
+                with connect() as con:
+                    con.execute("PRAGMA busy_timeout=60000")
+                    try:
+                        con.execute("PRAGMA journal_mode=WAL")
+                    except sqlite3.OperationalError as exc:
+                        # WAL is an optimisation, not a prerequisite.  If an
+                        # existing connection temporarily prevents changing the
+                        # journal mode, continue with the current mode.
+                        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                            raise
+                    con.executescript(SCHEMA)
+                    _ensure_airplay_schema(con)
 
-        bb_reset = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v1'").fetchone()
-        if not bb_reset:
-            con.execute(
-                """UPDATE chart_entries
-                   SET previous_position=NULL, reported_weeks=NULL, reported_peak=NULL
-                   WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
-            )
-            con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v1','done')")
+                    # Lightweight migrations for existing MVP databases.
+                    cols = {row["name"] for row in con.execute("PRAGMA table_info(chart_entries)").fetchall()}
+                    if "reported_weeks" not in cols:
+                        con.execute("ALTER TABLE chart_entries ADD COLUMN reported_weeks INTEGER")
+                    if "reported_peak" not in cols:
+                        con.execute("ALTER TABLE chart_entries ADD COLUMN reported_peak INTEGER")
 
-        bb_reset_v2 = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v2'").fetchone()
-        if not bb_reset_v2:
-            con.execute(
-                """UPDATE chart_entries
-                   SET previous_position=NULL, reported_weeks=NULL, reported_peak=NULL
-                   WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
-            )
-            con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v2','done')")
+                    # Remove incomplete 100-position issues left by early experimental
+                    # parsers / failed pre-0.1.9 transactions. They would otherwise make
+                    # coverage look complete and distort scores until a valid issue lands.
+                    con.execute(
+                        """DELETE FROM chart_issues
+                           WHERE source IN ('OLIA','OLIS','UK','BILLBOARD')
+                             AND chart_size >= 50
+                             AND (SELECT COUNT(*) FROM chart_entries e WHERE e.issue_id=chart_issues.id) < 50"""
+                    )
+                    # Remove the one ZET demonstration issue used by early MVP builds.
+                    con.execute(
+                        """DELETE FROM chart_issues
+                           WHERE source='ZET' AND issue_key='ZET-2026-08-06'
+                             AND source_url='manual seed from public chart'"""
+                    )
 
-        # Marker also forces pre-0.2.8 databases through SCHEMA once so the
-        # source_checks table/index is created before the fast init path returns.
-        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
+                    migration = con.execute("SELECT value FROM app_meta WHERE key='song_alias_merge_v1'").fetchone()
+                    if not migration:
+                        merged = _merge_duplicate_songs(con)
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v1',?)", (str(merged),))
+
+                    bb_reset = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v1'").fetchone()
+                    if not bb_reset:
+                        con.execute(
+                            """UPDATE chart_entries
+                               SET previous_position=NULL, reported_weeks=NULL, reported_peak=NULL
+                               WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
+                        )
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v1','done')")
+
+                    bb_reset_v2 = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v2'").fetchone()
+                    if not bb_reset_v2:
+                        con.execute(
+                            """UPDATE chart_entries
+                               SET previous_position=NULL, reported_weeks=NULL, reported_peak=NULL
+                               WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
+                        )
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v2','done')")
+
+                    con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
+                    con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v2','done')")
+                last_exc = None
+                break
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                text = str(exc).lower()
+                if "locked" not in text and "busy" not in text:
+                    raise
+                if attempt >= 4:
+                    raise
+                time.sleep(0.7 * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
 
     _INITIALIZED_DB_PATH = current_path
-
 
 def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release_date: str | None = None) -> int:
     akey, tkey = normalize(artist), normalize(title)
@@ -669,14 +819,18 @@ def upsert_airplay_stations(stations: Iterable[dict]) -> int:
             slug = str(station.get("slug") or "").strip()
             source_url = str(station.get("source_url") or "").strip()
             active = int(bool(station.get("active", True)))
-            con.execute(
-                """INSERT INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?)
-                   ON CONFLICT(station_id) DO UPDATE SET
-                     name=excluded.name,slug=excluded.slug,source_url=excluded.source_url,
-                     active=excluded.active,updated_at=excluded.updated_at""",
-                (station_id, name, slug, source_url, active, now, now),
+            cur = con.execute(
+                """UPDATE airplay_stations
+                   SET name=?,slug=?,source_url=?,active=?,updated_at=?
+                   WHERE station_id=?""",
+                (name, slug, source_url, active, now, station_id),
             )
+            if int(cur.rowcount or 0) == 0:
+                con.execute(
+                    """INSERT INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (station_id, name, slug, source_url, active, now, now),
+                )
             count += 1
     return count
 
@@ -756,12 +910,17 @@ def store_airplay_window(
     rows = list(plays)
 
     with connect() as con:
-        con.execute(
-            """INSERT INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
-               VALUES(?,?,?,?,1,?,?)
-               ON CONFLICT(station_id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at""",
-            (station_id, str(station_name or f"Stacja {station_id}"), "", "", now, now),
+        station_label = str(station_name or f"Stacja {station_id}")
+        cur_station = con.execute(
+            "UPDATE airplay_stations SET name=?,updated_at=? WHERE station_id=?",
+            (station_label, now, station_id),
         )
+        if int(cur_station.rowcount or 0) == 0:
+            con.execute(
+                """INSERT INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
+                   VALUES(?,?,?,?,1,?,?)""",
+                (station_id, station_label, "", "", now, now),
+            )
         con.execute(
             "DELETE FROM airplay_plays WHERE station_id=? AND played_at>=? AND played_at<?",
             (station_id, start_dt.isoformat(timespec="minutes"), end_dt.isoformat(timespec="minutes")),
@@ -789,11 +948,12 @@ def store_airplay_window(
             )
             inserted += int(cur.rowcount or 0)
         con.execute(
+            "DELETE FROM airplay_windows WHERE station_id=? AND play_date=? AND start_hour=?",
+            (station_id, d.isoformat(), start_hour),
+        )
+        con.execute(
             """INSERT INTO airplay_windows(station_id,play_date,start_hour,end_hour,fetched_at,play_count,source_url,success,message)
-               VALUES(?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(station_id,play_date,start_hour) DO UPDATE SET
-                 end_hour=excluded.end_hour,fetched_at=excluded.fetched_at,play_count=excluded.play_count,
-                 source_url=excluded.source_url,success=excluded.success,message=excluded.message""",
+               VALUES(?,?,?,?,?,?,?,?,?)""",
             (
                 station_id, d.isoformat(), start_hour, end_hour, now, inserted,
                 str(source_url or ""), int(bool(success)), str(message or "")[:1000],
