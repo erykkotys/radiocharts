@@ -43,11 +43,11 @@ def test_playlist_parser_keeps_exact_times_and_song_credit():
     ]
 
 
-def test_airplay_summary_is_independent_and_track_detail_breaks_down_stations(tmp_path, monkeypatch):
+def test_airplay_summary_keeps_metric_separate_but_shares_song_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "airplay.db")
     monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
     db.init_db()
-    # A chart song with the same credit may exist, but Emisje must not link to it.
+    # Same musical object: airplay links to the chart song, but spin counts stay separate.
     db.upsert_issue("RMF", "2026-08-18", "x", 20, [
         {"position": 1, "artist": "Dua Lipa", "title": "Houdini"},
     ])
@@ -69,7 +69,7 @@ def test_airplay_summary_is_independent_and_track_detail_breaks_down_stations(tm
     assert row["stations_count"] == 2
     assert row["max_station_spins"] == 2
     assert row["top_station"] == "RMF FM"
-    assert "song_id" not in row
+    assert isinstance(row["song_id"], int)
 
     detail = db.airplay_track_detail(
         [2, 3], date(2026, 8, 18), date(2026, 8, 18),
@@ -82,6 +82,32 @@ def test_airplay_summary_is_independent_and_track_detail_breaks_down_stations(tm
     assert len(detail["plays"]) == 3
 
     with db.connect() as con:
-        linked = con.execute("SELECT COUNT(*) FROM airplay_plays WHERE song_id IS NOT NULL").fetchone()[0]
-    assert linked == 0
+        chart_song_id = con.execute("SELECT song_id FROM chart_entries LIMIT 1").fetchone()[0]
+        linked_ids = {r[0] for r in con.execute("SELECT DISTINCT song_id FROM airplay_plays").fetchall()}
+    assert linked_ids == {chart_song_id}
+    assert row["song_id"] == chart_song_id
 
+
+
+def test_airplay_only_song_does_not_change_chart_revision_or_scores(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "separate-metric.db")
+    monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
+    db.init_db()
+    db.upsert_issue("RMF", "2026-08-18", "x", 20, [
+        {"position": 4, "artist": "Chart Artist", "title": "Chart Song"},
+    ])
+    before = db.chart_revision()
+
+    db.upsert_airplay_stations([{"station_id": 48, "name": "Radio Kalisz"}])
+    db.store_airplay_window(48, "Radio Kalisz", "2026-08-18", 18, [
+        {"played_at": "2026-08-18T18:12", "artist": "Airplay Artist", "title": "Airplay Only"},
+    ])
+    after = db.chart_revision()
+
+    assert after == before
+    with db.connect() as con:
+        chart_ids = {r[0] for r in con.execute("SELECT DISTINCT song_id FROM chart_entries").fetchall()}
+        airplay_ids = {r[0] for r in con.execute("SELECT DISTINCT song_id FROM airplay_plays").fetchall()}
+    assert chart_ids.isdisjoint(airplay_ids)
+    assert len(chart_ids) == 1
+    assert len(airplay_ids) == 1

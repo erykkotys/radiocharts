@@ -18,7 +18,7 @@ from radiocharts.build_info import BUILD_DATE, display_version
 from radiocharts.db import (
     DB_PATH, airplay_coverage, airplay_summary, airplay_track_detail, chart_revision, init_db,
     issue_entries, issue_entries_enriched, latest_issues, latest_source_checks,
-    source_check_day_summary, list_airplay_stations, list_issues, load_notes,
+    source_check_day_summary, list_airplay_stations, list_issues, list_songs, load_notes, normalize,
     update_note, upsert_issue,
 )
 from radiocharts.job_manager import active_job, latest_job, start_job, stop_job
@@ -297,33 +297,90 @@ def spotify_search_url(artist: str, title: str) -> str:
 
 
 def render_song_picker(frame: pd.DataFrame, selected_id: int) -> int:
-    """Native searchable selector; avoids navigating inside a component iframe."""
+    """Native song picker with an accent-insensitive pre-filter.
+
+    Streamlit's built-in selectbox search does not consistently fold Polish
+    diacritics, so the small filter is done server-side with the same
+    normalization used for song identity: ``meskie`` matches ``Męskie``.
+    """
     rows = frame[["song_id", "artist", "title"]].copy()
-    options = [int(x) for x in rows["song_id"].tolist()]
+    rows["search_key"] = [
+        normalize(f"{artist} {title}")
+        for artist, title in zip(rows["artist"], rows["title"])
+    ]
     labels = {
         int(r.song_id): f"{r.artist} — {r.title}"
         for r in rows.itertuples(index=False)
     }
+
+    query = st.text_input(
+        "Znajdź utwór",
+        key="song_picker_query_v3",
+        placeholder="Wpisz wykonawcę lub tytuł, np. meskie…",
+        help="Wyszukiwanie ignoruje wielkość liter i polskie znaki: „meskie” znajdzie „Męskie”.",
+    )
+    q = normalize(query)
+    if q:
+        candidates = rows[rows["search_key"].str.contains(q, regex=False)]
+        options = [int(x) for x in candidates["song_id"].tolist()]
+        if not options:
+            st.caption("Brak pasujących utworów.")
+            return int(selected_id)
+        picked = st.selectbox(
+            "Wyniki wyszukiwania",
+            options,
+            index=None,
+            placeholder=f"{len(options)} wyników — wybierz utwór",
+            format_func=lambda sid: labels.get(int(sid), str(sid)),
+            key=f"song_picker_filtered_{q}_{int(selected_id)}",
+            label_visibility="collapsed",
+        )
+        return int(picked) if picked is not None else int(selected_id)
+
+    options = [int(x) for x in rows["song_id"].tolist()]
     try:
         index = options.index(int(selected_id))
     except (ValueError, TypeError):
         index = 0
     picked = st.selectbox(
-        "Znajdź utwór",
+        "Wybierz z całej bazy",
         options,
         index=index,
         format_func=lambda sid: labels.get(int(sid), str(sid)),
-        key=f"song_picker_{int(selected_id)}",
-        help="Kliknij pole i zacznij pisać wykonawcę lub tytuł. Wybór przechodzi do szczegółów bez zagnieżdżania strony.",
+        key=f"song_picker_all_v3_{int(selected_id)}",
+        label_visibility="collapsed",
     )
     return int(picked)
 
 
 def navigate_to_song(song_id: int) -> None:
     """Server-side navigation used by AG Grid and native selectors."""
+    st.session_state["_rc_song_scroll_top"] = True
     st.query_params["view"] = "song"
     st.query_params["song"] = str(int(song_id))
     st.rerun()
+
+
+def scroll_song_to_top_once() -> None:
+    """Undo browser/component scroll restoration after opening a song row."""
+    if not st.session_state.pop("_rc_song_scroll_top", False):
+        return
+    components.html(
+        """
+        <script>
+          function rcTop() {
+            try { window.parent.scrollTo(0, 0); } catch(e) {}
+            try { window.parent.document.documentElement.scrollTop = 0; } catch(e) {}
+            try { window.parent.document.body.scrollTop = 0; } catch(e) {}
+          }
+          rcTop();
+          setTimeout(rcTop, 40);
+          setTimeout(rcTop, 160);
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
 
 
 
@@ -624,7 +681,7 @@ def render_song_grid(
 
     if "song_id" in show.columns:
         gb.configure_column("song_id", hide=True)
-    pin_identity = source_layout in {"auto", "compact"}
+    pin_identity = source_layout in {"auto", "compact", "airplay"}
     if "artist" in show.columns:
         gb.configure_column("artist", "Wykonawca", minWidth=170 if pin_identity else 190, width=205 if pin_identity else 220, pinned="left" if pin_identity else None)
     if "title" in show.columns:
@@ -707,6 +764,8 @@ def render_song_grid(
         gb.configure_column("spins", "Emisje", width=92, minWidth=84, pinned="left" if source_layout == "airplay" else None)
     if "stations_count" in show.columns:
         gb.configure_column("stations_count", "Stacje", width=82, minWidth=76)
+    if "avg_per_day" in show.columns:
+        gb.configure_column("avg_per_day", "Śr./dzień", width=105, minWidth=96)
     if "avg_per_station" in show.columns:
         gb.configure_column("avg_per_station", "Śr./stację", width=105, minWidth=96)
     if "max_station_spins" in show.columns:
@@ -767,7 +826,8 @@ def render_song_grid(
 
     if editable_state and {"song_id", "heard", "status"}.issubset(edited.columns) and not original.empty:
         before = original.set_index("song_id")
-        notes_by_id = df.set_index("song_id")["note"].to_dict() if (not df.empty and "note" in df.columns) else {}
+        note_rows = load_notes()
+        notes_by_id = {int(r["song_id"]): str(r.get("note") or "") for r in note_rows}
         changed = 0
         for r in edited[["song_id", "heard", "status"]].itertuples(index=False):
             try:
@@ -957,10 +1017,12 @@ if view_key == "dashboard":
             st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7 · 5w. ▶ 30s otwiera player przyklejony do dołu całego ekranu. Spotify pozostaje linkiem do pełnego utworu.")
 
 elif view_key == "song":
-    if df.empty:
-        st.info("Najpierw dodaj dane.")
+    catalog = pd.DataFrame(list_songs())
+    if catalog.empty:
+        st.info("Najpierw dodaj dane z notowań albo emisji.")
     else:
-        ordered = df.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
+        scroll_song_to_top_once()
+        ordered = catalog.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
         ids = [int(r.song_id) for r in ordered.itertuples()]
         requested = st.query_params.get("song")
         try:
@@ -975,9 +1037,26 @@ elif view_key == "song":
             navigate_to_song(picked_id)
 
         song_id = selected_id
-        row = df[df.song_id == song_id].iloc[0]
+        song_meta = catalog[catalog.song_id.astype(int) == song_id].iloc[0]
+        chart_match = df[df.song_id.astype(int) == song_id] if not df.empty else pd.DataFrame()
+        has_chart_data = not chart_match.empty
+        if has_chart_data:
+            row = chart_match.iloc[0].copy()
+            row["heard"] = bool(song_meta.get("heard", False))
+            row["status"] = str(song_meta.get("status") or "Nie słuchałem")
+            row["note"] = str(song_meta.get("note") or "")
+        else:
+            row = song_meta.copy()
+            row["familiarity"] = None
+            row["momentum"] = None
+            row["format_fit"] = None
+            row["recommendation"] = "Brak danych z notowań"
+            for src in ["OLIA", "RMF", "ZET", "OLIS", "ESKA", "UK", "BILLBOARD"]:
+                row[f"{src}_pos"] = None
+                row[f"{src}_weeks"] = 0
+                row[f"{src}_peak"] = None
 
-        spotify_url = spotify_search_url(row.artist, row.title)
+        spotify_url = spotify_search_url(str(row.artist), str(row.title))
         with st.container(border=True):
             head1, head2, head3 = st.columns([5, 1.35, 1.35])
             with head1:
@@ -989,10 +1068,17 @@ elif view_key == "song":
                 st.link_button("Spotify ↗", spotify_url, use_container_width=True)
 
             a, b, c = st.columns(3)
-            a.metric("Familiarity", f"{row.familiarity:.0f}%")
-            b.metric("Momentum", f"{row.momentum:.0f}%")
-            c.metric("Format Fit", f"{row.format_fit:.0f}%")
-            st.markdown(f"**Rekomendacja:** {row.recommendation}")
+            if has_chart_data:
+                a.metric("Familiarity", f"{float(row.familiarity):.0f}%")
+                b.metric("Momentum", f"{float(row.momentum):.0f}%")
+                c.metric("Format Fit", f"{float(row.format_fit):.0f}%")
+                st.markdown(f"**Rekomendacja:** {row.recommendation}")
+            else:
+                a.metric("Familiarity", "—")
+                b.metric("Momentum", "—")
+                c.metric("Format Fit", "—")
+                st.markdown("**Rekomendacja:** —")
+                st.caption("Utwór jest we wspólnym katalogu, ale nie ma jeszcze zapisanej pozycji w źródłach notowań. Emisje nie są przeliczane na Familiarity ani Momentum.")
 
         def _source_frame(sources: list[str]) -> pd.DataFrame:
             rows = []
@@ -1127,8 +1213,9 @@ elif view_key == "archive":
 elif view_key == "airplay":
     st.subheader("📡 Emisje")
     st.info(
-        "**Emisje są osobnym zbiorem danych.** Ta zakładka nie zmienia Dashboardu, Familiarity, Momentum, "
-        "statusów ani pozycji w Notowaniach. Tutaj liczymy wyłącznie faktyczne odtworzenia zapisane z odSluchane.eu."
+        "**Emisje są osobną miarą, ale utwory są wspólne.** Liczba odtworzeń z odSluchane.eu nie wpływa na "
+        "Familiarity, Momentum ani pozycje w notowaniach. Jeśli ten sam utwór występuje w obu miejscach, ma jeden "
+        "rekord, ten sam odsłuch/status/notatkę, a w Emisjach możemy obok pokazać jego bieżące pozycje z RMF/ZET/OLiA/OLiS/ESKA."
     )
     stations = list_airplay_stations(active_only=True)
     running = active_job() is not None
@@ -1234,23 +1321,44 @@ elif view_key == "airplay":
                 if top_n != "Wszystkie":
                     ranked = ranked.head(int(top_n))
                 ranked = ranked.reset_index(drop=True)
-                ranked.insert(0, "#", ranked.index + 1)
-                ranked["Śr./dzień"] = (ranked["spins"] / period_days).round(1)
+                ranked = ranked[ranked["song_id"].notna()].copy()
+                ranked["song_id"] = ranked["song_id"].astype(int)
+                ranked["avg_per_day"] = (ranked["spins"] / period_days).round(1)
                 ranked["last_play"] = ranked["last_play"].astype(str).str.replace("T", " ", regex=False)
-                table = ranked[[
-                    "#", "artist", "title", "spins", "stations_count", "Śr./dzień",
-                    "max_station_spins", "top_station", "last_play",
-                ]].rename(columns={
-                    "artist": "Wykonawca",
-                    "title": "Tytuł",
-                    "spins": "Emisje",
-                    "stations_count": "Stacje",
-                    "max_station_spins": "Max/stacja",
-                    "top_station": "Najmocniejsza stacja",
-                    "last_play": "Ostatnio",
-                })
-                st.dataframe(table, hide_index=True, use_container_width=True, height=650)
-                st.caption("Ranking dotyczy wyłącznie emisji. Nie jest pozycją na liście przebojów i nie zasila wskaźników Dashboardu.")
+                ranked = with_notes(ranked)
+
+                # Join only chart-derived *positions*.  Spin counts stay a separate
+                # dimension and never enter compute_scores/Familiarity/Momentum.
+                source_cols = ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]
+                if not df.empty:
+                    chart_cols = ["song_id"] + [f"{src}_pos" for src in source_cols if f"{src}_pos" in df.columns]
+                    chart_ref = df[chart_cols].drop_duplicates("song_id")
+                    ranked = ranked.merge(chart_ref, on="song_id", how="left")
+                for src in source_cols:
+                    pos_col = f"{src}_pos"
+                    ranked[src] = ranked[pos_col].map(position_sort_value).astype(int) if pos_col in ranked.columns else 999
+
+                ranked["details"] = [song_link(sid) for sid in ranked["song_id"]]
+                ranked["preview"] = "▶"
+                ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
+                air_cols = [
+                    "song_id", "spins", "artist", "title", "details", "preview", "spotify", "heard", "status",
+                    "stations_count", "avg_per_day", "max_station_spins", "top_station", "last_play",
+                    "RMF", "ZET", "OLIA", "OLIS", "ESKA",
+                ]
+                air_show = ranked[[c for c in air_cols if c in ranked.columns]].copy()
+                station_key = "-".join(str(x) for x in selected_ids)
+                render_song_grid(
+                    air_show,
+                    key=f"airplay_rank_{range_start}_{range_end}_{sort_mode}_{top_n}_{min_station_count}_{station_key}",
+                    height=690,
+                    editable_state=True,
+                    source_layout="airplay",
+                )
+                st.caption(
+                    "Emisje decydują wyłącznie o kolejności tej tabeli. Kolumny RMF/ZET/OLiA/OLiS/ESKA są tylko podglądem "
+                    "bieżących pozycji tego samego utworu; nie przeliczamy emisji na wynik Dashboardu. Status i ✓ są wspólne z kartą Utwór."
+                )
 
             with tab_track:
                 order = air.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
@@ -1263,20 +1371,39 @@ elif view_key == "airplay":
                     help="Kliknij i zacznij pisać. Lista obejmuje wszystkie utwory obecne w wybranym okresie i na wybranych stacjach.",
                 )
                 chosen = order.iloc[int(picked_idx)]
+                chosen_song_id = int(chosen["song_id"])
                 detail = airplay_track_detail(
                     selected_ids, range_start, range_end,
                     str(chosen["artist_key"]), str(chosen["title_key"]),
                 )
                 st.markdown(f"### {chosen['artist']} — {chosen['title']}")
                 spotify_url = spotify_search_url(str(chosen["artist"]), str(chosen["title"]))
-                d1, d2, d3, d4, d5 = st.columns([1, 1, 1, 1.25, 0.8])
+                d1, d2, d3, d4 = st.columns([1, 1, 1, 1.35])
                 d1.metric("Emisje", int(detail.get("total_spins") or 0))
                 d2.metric("Stacje", int(detail.get("stations_count") or 0))
                 d3.metric("Śr./dzień", f"{float(detail.get('total_spins') or 0) / period_days:.1f}")
                 d4.metric("Ostatnio", str(detail.get("last_play") or "—").replace("T", " "))
-                with d5:
-                    st.write("")
+
+                chart_match = df[df.song_id.astype(int) == chosen_song_id] if not df.empty else pd.DataFrame()
+                if not chart_match.empty:
+                    chart_row = chart_match.iloc[0]
+                    pos_bits = []
+                    for src in ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]:
+                        pos = position_display(chart_row.get(f"{src}_pos"))
+                        if pos != "-":
+                            pos_bits.append(f"{src} #{pos}")
+                    st.markdown("**Bieżące pozycje z notowań:** " + (" · ".join(pos_bits) if pos_bits else "brak w najnowszych notowaniach"))
+                else:
+                    st.caption("Ten utwór nie ma jeszcze zapisanej historii w źródłach notowań. To nie przeszkadza w śledzeniu jego emisji i nadaniu mu statusu.")
+
+                act1, act2, act3 = st.columns(3)
+                with act1:
+                    render_preview_button(chosen_song_id, str(chosen["artist"]), str(chosen["title"]), spotify_url)
+                with act2:
                     st.link_button("Spotify ↗", spotify_url, use_container_width=True)
+                with act3:
+                    if st.button("Otwórz kartę utworu", key=f"airplay_open_song_{chosen_song_id}", use_container_width=True):
+                        navigate_to_song(chosen_song_id)
 
                 station_df = pd.DataFrame(detail.get("stations") or [])
                 if not station_df.empty:
@@ -1314,7 +1441,7 @@ elif view_key == "airplay":
                             st.caption(f"Pokazuję ostatnie {len(history_table)} emisji; podsumowania powyżej liczą cały wybrany okres.")
 
         with st.expander("⚙️ Pobieranie danych / backfill", expanded=False):
-            st.caption("To sekcja techniczna. Nie wpływa na listy przebojów — tylko uzupełnia osobną bazę emisji.")
+            st.caption("To sekcja techniczna. Uzupełnia historię emisji; utwory i ich ręczne statusy pozostają wspólne z resztą aplikacji.")
             top1, top2 = st.columns(2)
             if top1.button("↻ Odkryj / odśwież wszystkie stacje", disabled=running, use_container_width=True, key="airplay_refresh_stations"):
                 start_job("airplay-discover")

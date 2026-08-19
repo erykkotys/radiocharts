@@ -28,14 +28,18 @@ def test_init_upgrades_partial_airplay_tables(monkeypatch, tmp_path):
     con = sqlite3.connect(path)
     cols_plays = {r[1] for r in con.execute("PRAGMA table_info(airplay_plays)")}
     cols_windows = {r[1] for r in con.execute("PRAGMA table_info(airplay_windows)")}
+    station_info = {r[1]: r for r in con.execute("PRAGMA table_info(airplay_stations)")}
     indexes = {r[1] for r in con.execute("PRAGMA index_list(airplay_plays)")}
-    marker = con.execute("SELECT value FROM app_meta WHERE key='airplay_schema_v2'").fetchone()
+    marker_v3 = con.execute("SELECT value FROM app_meta WHERE key='airplay_schema_v3'").fetchone()
+    fk_errors = con.execute("PRAGMA foreign_key_check").fetchall()
     con.close()
 
+    assert station_info["station_id"][5] == 1  # real PRIMARY KEY, not merely an index
     assert {"played_at", "artist", "title", "artist_key", "title_key", "retrieved_at"} <= cols_plays
     assert {"start_hour", "end_hour", "fetched_at", "play_count", "success"} <= cols_windows
     assert "idx_airplay_plays_time_station" in indexes
-    assert marker == ("done",)
+    assert marker_v3 == ("done",)
+    assert fk_errors == []
 
     db.upsert_airplay_stations([
         {"station_id": 2, "name": "RMF FM", "slug": "rmf-fm", "source_url": "https://example/rmf"}
@@ -52,8 +56,62 @@ def test_init_upgrades_partial_airplay_tables(monkeypatch, tmp_path):
     assert db.airplay_window_exists(2, date(2026, 8, 19), 10)
 
 
-def test_airplay_detach_migration_clears_legacy_song_links(monkeypatch, tmp_path):
-    path = tmp_path / "detach.db"
+def test_rebuild_repairs_real_foreign_key_mismatch(monkeypatch, tmp_path):
+    """Reproduce the user's DB: FK targets a non-UNIQUE station_id column."""
+    path = tmp_path / "fk-mismatch.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        PRAGMA foreign_keys=OFF;
+        CREATE TABLE airplay_stations (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            station_id INTEGER,
+            slug TEXT,
+            source_url TEXT,
+            active INTEGER,
+            discovered_at TEXT,
+            updated_at TEXT
+        );
+        CREATE INDEX idx_airplay_stations_station_id ON airplay_stations(station_id);
+        CREATE TABLE airplay_plays (
+            id INTEGER PRIMARY KEY,
+            station_id INTEGER REFERENCES airplay_stations(station_id),
+            played_at TEXT, artist TEXT, title TEXT, artist_key TEXT, title_key TEXT,
+            song_id INTEGER, source_url TEXT, retrieved_at TEXT
+        );
+        CREATE TABLE airplay_windows (
+            station_id INTEGER REFERENCES airplay_stations(station_id),
+            play_date TEXT, start_hour INTEGER, end_hour INTEGER, fetched_at TEXT,
+            play_count INTEGER, source_url TEXT, success INTEGER, message TEXT
+        );
+        INSERT INTO airplay_stations(id,name,station_id,active,discovered_at,updated_at)
+        VALUES(1,'Radio Kalisz',48,1,'','');
+        """
+    )
+    con.commit()
+    con.close()
+
+    _use_db(monkeypatch, path)
+    db.init_db()
+    stored = db.store_airplay_window(
+        48,
+        "Radio Kalisz",
+        "2026-08-19",
+        12,
+        [{"played_at": "2026-08-19T12:05", "artist": "Męskie Granie Orkiestra 2026", "title": "Nareszcie"}],
+    )
+    assert stored == 1
+    assert db.airplay_window_exists(48, "2026-08-19", 12)
+
+    with db.connect() as con:
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+        parent = con.execute("SELECT station_id,name FROM airplay_stations WHERE station_id=48").fetchone()
+        assert tuple(parent) == (48, "Radio Kalisz")
+
+
+def test_airplay_link_migration_restores_shared_song_links(monkeypatch, tmp_path):
+    path = tmp_path / "link.db"
     _use_db(monkeypatch, path)
     db.init_db()
     db.upsert_issue("RMF", "2026-08-18", "x", 20, [
@@ -68,14 +126,14 @@ def test_airplay_detach_migration_clears_legacy_song_links(monkeypatch, tmp_path
         [{"played_at": "2026-08-18T18:05", "artist": "Dua Lipa", "title": "Houdini"}],
     )
     with db.connect() as con:
-        song_id = con.execute("SELECT id FROM songs LIMIT 1").fetchone()[0]
-        con.execute("UPDATE airplay_plays SET song_id=?", (song_id,))
-        con.execute("DELETE FROM app_meta WHERE key='airplay_detach_chart_v1'")
+        chart_song_id = con.execute("SELECT song_id FROM chart_entries LIMIT 1").fetchone()[0]
+        con.execute("UPDATE airplay_plays SET song_id=NULL")
+        con.execute("DELETE FROM app_meta WHERE key='airplay_link_songs_v1'")
 
     monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
     db.init_db()
     with db.connect() as con:
-        linked = con.execute("SELECT COUNT(*) FROM airplay_plays WHERE song_id IS NOT NULL").fetchone()[0]
-        marker = con.execute("SELECT value FROM app_meta WHERE key='airplay_detach_chart_v1'").fetchone()[0]
-    assert linked == 0
-    assert marker == "done"
+        linked_id = con.execute("SELECT song_id FROM airplay_plays LIMIT 1").fetchone()[0]
+        marker = con.execute("SELECT value FROM app_meta WHERE key='airplay_link_songs_v1'").fetchone()[0]
+    assert linked_id == chart_song_id
+    assert marker.isdigit()

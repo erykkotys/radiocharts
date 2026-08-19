@@ -142,21 +142,242 @@ def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str) -
         con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
-def _ensure_airplay_schema(con: sqlite3.Connection) -> None:
-    """Make the airplay tables usable even after a partial/older experiment.
+def _airplay_fk_points_to_station_id(con: sqlite3.Connection, table: str) -> bool:
+    try:
+        rows = con.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+    except Exception:
+        return False
+    return any(
+        str(row["table"]) == "airplay_stations"
+        and str(row["from"]) == "station_id"
+        and str(row["to"]) == "station_id"
+        for row in rows
+    )
 
-    0.3.6 introduced the production airplay schema.  A few development builds
-    had tables with the same names but a smaller set of columns.  SQLite's
-    ``CREATE TABLE IF NOT EXISTS`` quite correctly leaves such a table alone,
-    but then an index on a new column aborts the whole application startup.
 
-    Keep the migration deliberately additive: no existing chart or airplay row
-    is dropped.  New databases still get the stricter canonical definitions
-    from SCHEMA; old/partial tables merely receive the columns the current code
-    needs.
+def _airplay_schema_is_canonical(con: sqlite3.Connection) -> bool:
+    """Return True only when the parent key really satisfies SQLite FK rules.
+
+    Older experimental builds sometimes had ``airplay_stations(id PRIMARY KEY, ...)``
+    and later merely *added* a ``station_id`` column.  A normal index on that
+    column is not enough for a referenced parent key, so SQLite reports
+    ``foreign key mismatch`` on every insert into airplay_windows/airplay_plays.
     """
-    # SCHEMA above creates these on a clean database.  The calls below are for
-    # an existing table with an older shape.
+    station_info = con.execute("PRAGMA table_info(airplay_stations)").fetchall()
+    station_cols = {str(r["name"]): r for r in station_info}
+    if "station_id" not in station_cols or int(station_cols["station_id"]["pk"] or 0) != 1:
+        return False
+
+    required_plays = {"id", "station_id", "played_at", "artist", "title", "artist_key", "title_key", "song_id", "retrieved_at"}
+    required_windows = {"station_id", "play_date", "start_hour", "end_hour", "fetched_at", "play_count", "success", "message"}
+    if not required_plays.issubset(_table_columns(con, "airplay_plays")):
+        return False
+    if not required_windows.issubset(_table_columns(con, "airplay_windows")):
+        return False
+    if not _airplay_fk_points_to_station_id(con, "airplay_plays"):
+        return False
+    if not _airplay_fk_points_to_station_id(con, "airplay_windows"):
+        return False
+    return True
+
+
+def _legacy_expr(columns: set[str], column: str, default_sql: str) -> str:
+    return column if column in columns else default_sql
+
+
+def _rebuild_airplay_tables(con: sqlite3.Connection) -> None:
+    """Rebuild all three airplay tables into one canonical FK-safe schema.
+
+    This is intentionally a preservation migration: rows from partial/legacy
+    tables are copied through TEMP backups, child rows with an unknown station
+    get a placeholder parent, and no chart/notowania tables are touched.
+    """
+    station_cols = _table_columns(con, "airplay_stations")
+    play_cols = _table_columns(con, "airplay_plays")
+    window_cols = _table_columns(con, "airplay_windows")
+
+    # PRAGMA foreign_keys can only be changed outside an active transaction.
+    con.commit()
+    con.execute("PRAGMA foreign_keys=OFF")
+    try:
+        con.executescript(
+            """
+            DROP TABLE IF EXISTS temp._rc_airplay_stations_backup;
+            DROP TABLE IF EXISTS temp._rc_airplay_plays_backup;
+            DROP TABLE IF EXISTS temp._rc_airplay_windows_backup;
+            """
+        )
+
+        if "station_id" in station_cols:
+            station_id_expr = "CASE WHEN station_id IS NULL OR station_id=0 THEN -rowid ELSE station_id END"
+        elif "id" in station_cols:
+            station_id_expr = "CASE WHEN id IS NULL OR id=0 THEN -rowid ELSE id END"
+        else:
+            station_id_expr = "-rowid"
+        name_expr = _legacy_expr(station_cols, "name", "''")
+        slug_expr = _legacy_expr(station_cols, "slug", "''")
+        station_url_expr = _legacy_expr(station_cols, "source_url", "''")
+        active_expr = _legacy_expr(station_cols, "active", "1")
+        discovered_expr = _legacy_expr(station_cols, "discovered_at", "''")
+        updated_expr = _legacy_expr(station_cols, "updated_at", "''")
+        con.execute(
+            f"""CREATE TEMP TABLE _rc_airplay_stations_backup AS
+                SELECT {station_id_expr} AS station_id,
+                       COALESCE(NULLIF({name_expr},''), 'Stacja ' || {station_id_expr}) AS name,
+                       COALESCE({slug_expr},'') AS slug,
+                       COALESCE({station_url_expr},'') AS source_url,
+                       COALESCE({active_expr},1) AS active,
+                       COALESCE({discovered_expr},'') AS discovered_at,
+                       COALESCE({updated_expr},'') AS updated_at
+                FROM airplay_stations"""
+        )
+
+        play_id_expr = _legacy_expr(play_cols, "id", "rowid")
+        play_station_expr = _legacy_expr(play_cols, "station_id", "NULL")
+        played_expr = _legacy_expr(play_cols, "played_at", "''")
+        artist_expr = _legacy_expr(play_cols, "artist", "''")
+        title_expr = _legacy_expr(play_cols, "title", "''")
+        artist_key_expr = _legacy_expr(play_cols, "artist_key", "''")
+        title_key_expr = _legacy_expr(play_cols, "title_key", "''")
+        song_id_expr = _legacy_expr(play_cols, "song_id", "NULL")
+        play_url_expr = _legacy_expr(play_cols, "source_url", "''")
+        retrieved_expr = _legacy_expr(play_cols, "retrieved_at", "''")
+        con.execute(
+            f"""CREATE TEMP TABLE _rc_airplay_plays_backup AS
+                SELECT {play_id_expr} AS id,{play_station_expr} AS station_id,
+                       COALESCE({played_expr},'') AS played_at,
+                       COALESCE({artist_expr},'') AS artist,
+                       COALESCE({title_expr},'') AS title,
+                       COALESCE({artist_key_expr},'') AS artist_key,
+                       COALESCE({title_key_expr},'') AS title_key,
+                       {song_id_expr} AS song_id,
+                       COALESCE({play_url_expr},'') AS source_url,
+                       COALESCE({retrieved_expr},'') AS retrieved_at
+                FROM airplay_plays"""
+        )
+
+        window_station_expr = _legacy_expr(window_cols, "station_id", "NULL")
+        play_date_expr = _legacy_expr(window_cols, "play_date", "''")
+        start_hour_expr = _legacy_expr(window_cols, "start_hour", "0")
+        end_hour_expr = _legacy_expr(window_cols, "end_hour", "0")
+        fetched_expr = _legacy_expr(window_cols, "fetched_at", "''")
+        play_count_expr = _legacy_expr(window_cols, "play_count", "0")
+        window_url_expr = _legacy_expr(window_cols, "source_url", "''")
+        success_expr = _legacy_expr(window_cols, "success", "1")
+        message_expr = _legacy_expr(window_cols, "message", "''")
+        con.execute(
+            f"""CREATE TEMP TABLE _rc_airplay_windows_backup AS
+                SELECT {window_station_expr} AS station_id,
+                       COALESCE({play_date_expr},'') AS play_date,
+                       COALESCE({start_hour_expr},0) AS start_hour,
+                       COALESCE({end_hour_expr},0) AS end_hour,
+                       COALESCE({fetched_expr},'') AS fetched_at,
+                       COALESCE({play_count_expr},0) AS play_count,
+                       COALESCE({window_url_expr},'') AS source_url,
+                       COALESCE({success_expr},1) AS success,
+                       COALESCE({message_expr},'') AS message
+                FROM airplay_windows"""
+        )
+
+        con.executescript(
+            """
+            DROP TABLE IF EXISTS airplay_windows;
+            DROP TABLE IF EXISTS airplay_plays;
+            DROP TABLE IF EXISTS airplay_stations;
+
+            CREATE TABLE airplay_stations (
+                station_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                discovered_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE airplay_plays (
+                id INTEGER PRIMARY KEY,
+                station_id INTEGER NOT NULL REFERENCES airplay_stations(station_id) ON DELETE CASCADE,
+                played_at TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                title TEXT NOT NULL,
+                artist_key TEXT NOT NULL,
+                title_key TEXT NOT NULL,
+                song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
+                source_url TEXT,
+                retrieved_at TEXT NOT NULL,
+                UNIQUE(station_id, played_at, artist_key, title_key)
+            );
+            CREATE TABLE airplay_windows (
+                station_id INTEGER NOT NULL REFERENCES airplay_stations(station_id) ON DELETE CASCADE,
+                play_date TEXT NOT NULL,
+                start_hour INTEGER NOT NULL,
+                end_hour INTEGER NOT NULL,
+                fetched_at TEXT NOT NULL,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                source_url TEXT,
+                success INTEGER NOT NULL DEFAULT 1,
+                message TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(station_id, play_date, start_hour)
+            );
+            """
+        )
+
+        con.execute(
+            """INSERT OR REPLACE INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
+               SELECT station_id,name,slug,source_url,active,discovered_at,updated_at
+               FROM _rc_airplay_stations_backup
+               WHERE station_id IS NOT NULL AND station_id<>0"""
+        )
+        # Preserve orphan child rows by creating a minimal parent rather than
+        # silently deleting their history.
+        for backup in ("_rc_airplay_plays_backup", "_rc_airplay_windows_backup"):
+            con.execute(
+                f"""INSERT OR IGNORE INTO airplay_stations(station_id,name,slug,source_url,active,discovered_at,updated_at)
+                    SELECT DISTINCT b.station_id,'Stacja ' || b.station_id,'','',1,'',''
+                    FROM {backup} b
+                    LEFT JOIN airplay_stations s ON s.station_id=b.station_id
+                    WHERE b.station_id IS NOT NULL AND b.station_id<>0 AND s.station_id IS NULL"""
+            )
+
+        con.execute(
+            """INSERT OR IGNORE INTO airplay_plays(
+                   id,station_id,played_at,artist,title,artist_key,title_key,song_id,source_url,retrieved_at
+               )
+               SELECT b.id,b.station_id,b.played_at,b.artist,b.title,b.artist_key,b.title_key,
+                      CASE WHEN sng.id IS NULL THEN NULL ELSE b.song_id END,
+                      b.source_url,b.retrieved_at
+               FROM _rc_airplay_plays_backup b
+               LEFT JOIN songs sng ON sng.id=b.song_id
+               WHERE b.station_id IS NOT NULL AND b.station_id<>0
+                 AND b.played_at<>'' AND b.artist<>'' AND b.title<>''"""
+        )
+        con.execute(
+            """INSERT OR REPLACE INTO airplay_windows(
+                   station_id,play_date,start_hour,end_hour,fetched_at,play_count,source_url,success,message
+               )
+               SELECT station_id,play_date,start_hour,end_hour,fetched_at,play_count,source_url,success,message
+               FROM _rc_airplay_windows_backup
+               WHERE station_id IS NOT NULL AND station_id<>0 AND play_date<>''"""
+        )
+        con.executescript(
+            """
+            DROP TABLE IF EXISTS temp._rc_airplay_stations_backup;
+            DROP TABLE IF EXISTS temp._rc_airplay_plays_backup;
+            DROP TABLE IF EXISTS temp._rc_airplay_windows_backup;
+            """
+        )
+        con.commit()
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+
+
+def _ensure_airplay_schema(con: sqlite3.Connection) -> None:
+    """Upgrade old/partial airplay experiments to the production schema."""
+    if not _airplay_schema_is_canonical(con):
+        _rebuild_airplay_tables(con)
+
+    # Defensive additive migration for any future/hand-edited database that is
+    # structurally close enough not to require a full rebuild.
     station_columns = {
         "station_id": "INTEGER",
         "name": "TEXT NOT NULL DEFAULT ''",
@@ -168,17 +389,6 @@ def _ensure_airplay_schema(con: sqlite3.Connection) -> None:
     }
     for column, ddl in station_columns.items():
         _ensure_column(con, "airplay_stations", column, ddl)
-
-    # If station_id had to be added to a legacy table, give legacy rows stable
-    # negative IDs.  Positive odSluchane IDs discovered later therefore cannot
-    # collide with them.
-    try:
-        con.execute(
-            "UPDATE airplay_stations SET station_id=-rowid "
-            "WHERE station_id IS NULL OR station_id=0"
-        )
-    except sqlite3.OperationalError:
-        pass
 
     play_columns = {
         "station_id": "INTEGER",
@@ -208,13 +418,50 @@ def _ensure_airplay_schema(con: sqlite3.Connection) -> None:
     for column, ddl in window_columns.items():
         _ensure_column(con, "airplay_windows", column, ddl)
 
-    # Create indexes only *after* the additive migration, otherwise a legacy
-    # table missing e.g. played_at makes executescript(SCHEMA) fail at startup.
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_stations_station_id ON airplay_stations(station_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_plays_time_station ON airplay_plays(played_at, station_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_plays_track ON airplay_plays(title_key, artist_key)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_plays_song ON airplay_plays(song_id, played_at)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_windows_date ON airplay_windows(play_date, station_id)")
 
+
+def _link_airplay_songs(con: sqlite3.Connection) -> int:
+    """Attach every stored spin to the shared ``songs`` catalogue.
+
+    Airplay is still a separate *metric* from chart positions, but the musical
+    object is shared: one song_id means one preview, note/status and chart
+    history wherever the track is encountered.
+    """
+    missing_keys = con.execute(
+        """SELECT id,artist,title FROM airplay_plays
+           WHERE artist_key='' OR title_key='' OR artist_key IS NULL OR title_key IS NULL"""
+    ).fetchall()
+    for row in missing_keys:
+        con.execute(
+            "UPDATE airplay_plays SET artist_key=?,title_key=? WHERE id=?",
+            (artist_anchor(str(row["artist"])) or normalize(str(row["artist"])), normalize(str(row["title"])), int(row["id"])),
+        )
+
+    groups = con.execute(
+        """SELECT artist_key,title_key,MAX(artist) AS artist,MAX(title) AS title
+           FROM airplay_plays
+           WHERE title_key<>''
+           GROUP BY artist_key,title_key"""
+    ).fetchall()
+    linked = 0
+    for row in groups:
+        artist = str(row["artist"] or "").strip()
+        title = str(row["title"] or "").strip()
+        if not artist or not title:
+            continue
+        song_id = get_or_create_song(con, artist, title)
+        cur = con.execute(
+            """UPDATE airplay_plays SET song_id=?
+               WHERE artist_key=? AND title_key=? AND (song_id IS NULL OR song_id<>?)""",
+            (song_id, str(row["artist_key"]), str(row["title_key"]), song_id),
+        )
+        linked += int(cur.rowcount or 0)
+    return linked
 
 def normalize(value: str) -> str:
     value = unicodedata.normalize("NFKD", value or "")
@@ -299,6 +546,12 @@ def _merge_duplicate_songs(con: sqlite3.Connection) -> int:
                     con.execute("DELETE FROM chart_entries WHERE id=?", (int(ent["id"]),))
                 else:
                     con.execute("UPDATE chart_entries SET song_id=? WHERE id=?", (cid, int(ent["id"])))
+            # Airplay and chart history share the same musical entity.  Preserve
+            # any existing spin links when consolidating aliases.
+            try:
+                con.execute("UPDATE airplay_plays SET song_id=? WHERE song_id=?", (cid, did))
+            except sqlite3.OperationalError:
+                pass
             con.execute("DELETE FROM song_notes WHERE song_id=?", (did,))
             con.execute("DELETE FROM songs WHERE id=?", (did,))
             merged += 1
@@ -331,7 +584,8 @@ def init_db() -> None:
         "billboard_metadata_reset_v2",
         "source_checks_v1",
         "airplay_schema_v2",
-        "airplay_detach_chart_v1",
+        "airplay_schema_v3",
+        "airplay_link_songs_v1",
     }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
         # Very cheap fast path. If a migration marker was deliberately removed
@@ -446,13 +700,14 @@ def init_db() -> None:
 
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v2','done')")
-                    detach = con.execute("SELECT value FROM app_meta WHERE key='airplay_detach_chart_v1'").fetchone()
-                    if not detach:
-                        # Emisje are deliberately independent from chart songs. Keep the
-                        # nullable legacy column for schema compatibility, but remove every
-                        # historical cross-link and never populate it again.
-                        con.execute("UPDATE airplay_plays SET song_id=NULL WHERE song_id IS NOT NULL")
-                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_detach_chart_v1','done')")
+                    con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v3','done')")
+                    airplay_link = con.execute("SELECT value FROM app_meta WHERE key='airplay_link_songs_v1'").fetchone()
+                    if not airplay_link:
+                        linked = _link_airplay_songs(con)
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_link_songs_v1',?)",
+                            (str(linked),),
+                        )
                 last_exc = None
                 break
             except sqlite3.OperationalError as exc:
@@ -568,9 +823,26 @@ def chart_revision() -> str:
             """SELECT
                  COALESCE((SELECT MAX(retrieved_at) FROM chart_issues),'') AS charts,
                  (SELECT COUNT(*) FROM chart_entries) AS entries,
-                 (SELECT COUNT(*) FROM songs) AS songs"""
+                 (SELECT COUNT(DISTINCT song_id) FROM chart_entries) AS chart_songs"""
         ).fetchone()
-        return f"{row['charts']}|{row['entries']}|{row['songs']}"
+        return f"{row['charts']}|{row['entries']}|{row['chart_songs']}"
+
+
+def list_songs() -> list[dict]:
+    """Shared song catalogue used by charts and airplay views."""
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+                      COALESCE(n.heard,0) AS heard,
+                      COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.note,'') AS note,
+                      n.updated_at
+               FROM songs s
+               LEFT JOIN song_notes n ON n.song_id=s.id
+               ORDER BY s.artist COLLATE NOCASE,s.title COLLATE NOCASE,s.id"""
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def load_notes() -> list[dict]:
@@ -944,7 +1216,7 @@ def store_airplay_window(
             title_key = normalize(title)
             if not title_key:
                 continue
-            song_id = None
+            song_id = get_or_create_song(con, artist, title)
             cur = con.execute(
                 """INSERT OR IGNORE INTO airplay_plays(
                        station_id,played_at,artist,title,artist_key,title_key,song_id,source_url,retrieved_at
@@ -986,7 +1258,7 @@ def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date
     with connect() as con:
         rows = con.execute(
             f"""SELECT p.artist_key,p.title_key,p.station_id,s.name AS station_name,
-                       MAX(p.artist) AS artist,MAX(p.title) AS title,
+                       MAX(p.song_id) AS song_id,MAX(p.artist) AS artist,MAX(p.title) AS title,
                        COUNT(*) AS spins,MAX(p.played_at) AS last_play
                 FROM airplay_plays p
                 JOIN airplay_stations s ON s.station_id=p.station_id
@@ -1003,6 +1275,7 @@ def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date
         g = grouped.setdefault(key, {
             "artist_key": key[0],
             "title_key": key[1],
+            "song_id": int(r["song_id"]) if r.get("song_id") is not None else None,
             "artist": str(r.get("artist") or ""),
             "title": str(r.get("title") or ""),
             "spins": 0,
@@ -1011,6 +1284,8 @@ def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date
             "top_station": "",
             "last_play": "",
         })
+        if g.get("song_id") is None and r.get("song_id") is not None:
+            g["song_id"] = int(r["song_id"])
         spins = int(r.get("spins") or 0)
         g["spins"] += spins
         g["stations_count"] += 1

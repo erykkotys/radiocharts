@@ -246,3 +246,12 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 - Nowa zakładka **Emisje**: automatyczne odkrywanie stacji z publicznego katalogu odSluchane.eu, zapis konkretnych emisji z bloków 2h, filtrowanie stacji checkboxami i agregacja dla dowolnego zapisanego zakresu dat.
 - Emisje pokazują: łączną liczbę spinów, liczbę stacji, średnią/stację, maksimum na jednej stacji, najmocniejszą stację, ostatnią emisję, status, odsłuch, Spotify i szczegóły dopasowanego utworu.
 - Worker emisji pobiera poprzedni zakończony blok 2h co dwie godziny o `:12`. Backfill jest resumable/idempotentny i ma limit 100 000 okien 2h na jeden proces.
+
+## 0.3.9 — naprawa emisji i wspólny katalog utworów
+- Naprawiona migracja starych tabel Emisji: `airplay_stations.station_id` jest ponownie prawdziwym kluczem głównym, więc znika błąd SQLite `foreign key mismatch` przy `airplay_windows`/`airplay_plays`. Migracja przebudowuje tylko tabele airplay i zachowuje dotychczasowe dane.
+- Emisje i notowania pozostają osobnymi **miarami**, ale korzystają z jednego katalogu `songs`. Ten sam utwór ma ten sam `song_id`, status, notatkę i odsłuch niezależnie od tego, czy trafiono na niego przez listę przebojów czy emisję.
+- Utwór obecny wyłącznie w emisjach także trafia do wspólnego katalogu, ale nie wpływa na `chart_revision`, Familiarity, Momentum ani Dashboard dopóki nie pojawi się w `chart_entries`.
+- Ranking Emisji pokazuje obok liczby odtworzeń bieżące pozycje RMF/ZET/OLiA/OLiS/ESKA oraz pozwala bezpośrednio odsłuchać, otworzyć kartę i edytować status.
+- Widok Utwór obsługuje także utwory znane tylko z emisji; wtedy metryki z notowań są pokazane jako brak danych, a nie jako `0%`.
+- Wyszukiwarka Utworu ponownie ignoruje polskie znaki (`meskie` → `Męskie`) przez normalizowany filtr przed natywnym wyborem Streamlita.
+- Kliknięcie `Otwórz` w tabeli przechodzi na kartę utworu i wymusza pozycję na górze strony zamiast zachowywać scroll z Dashboardu.
