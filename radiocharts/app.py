@@ -4,7 +4,6 @@ import html
 import json
 import math
 import re
-import unicodedata
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -17,7 +16,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 from radiocharts.build_info import BUILD_DATE, display_version
 from radiocharts.db import (
-    DB_PATH, airplay_coverage, airplay_summary, chart_revision, init_db,
+    DB_PATH, airplay_coverage, airplay_summary, airplay_track_detail, chart_revision, init_db,
     issue_entries, issue_entries_enriched, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes,
     update_note, upsert_issue,
@@ -297,83 +296,34 @@ def spotify_search_url(artist: str, title: str) -> str:
     return f"https://open.spotify.com/search/{query}"
 
 
-def search_key(value: object) -> str:
-    """Accent-insensitive Polish search key: ę=e, ł=l, ó=o, etc."""
-    text = str(value or "").casefold().replace("ł", "l")
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def render_live_song_search(frame: pd.DataFrame) -> None:
-    """Client-side live search: no Enter/rerun and normal browser text editing."""
-    rows = []
-    for r in frame[["song_id", "artist", "title"]].itertuples(index=False):
-        rows.append({
-            "id": int(r.song_id),
-            "artist": str(r.artist),
-            "title": str(r.title),
-            "key": search_key(f"{r.artist} {r.title}"),
-            "spotify": spotify_search_url(str(r.artist), str(r.title)),
-        })
-    payload = json.dumps(rows, ensure_ascii=False).replace("<", "\\u003c")
-    components.html(
-        f"""
-        <style>
-          body {{ margin:0; font-family:system-ui,-apple-system,Segoe UI,sans-serif; color:#e7ebf0; background:transparent; }}
-          #q {{ box-sizing:border-box; width:100%; padding:10px 12px; border-radius:7px; border:1px solid #596272; background:#202631; color:#fff; font-size:16px; outline:none; }}
-          #q:focus {{ border-color:#8995a8; }}
-          #hint {{ color:#aeb7c5; font-size:13px; margin:6px 0 8px; }}
-          #results {{ max-height:330px; overflow:auto; border-top:1px solid #343c49; }}
-          .row {{ display:flex; align-items:center; gap:10px; padding:8px 4px; border-bottom:1px solid #303744; }}
-          .song {{ flex:1; min-width:0; color:#f3f5f7; text-decoration:none; }}
-          .song:hover {{ text-decoration:underline; }}
-          .artist {{ color:#aeb7c5; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-          .spot {{ color:#dbe2ea; text-decoration:none; padding:3px 7px; border:1px solid #4d5767; border-radius:6px; }}
-          .empty {{ color:#aeb7c5; padding:10px 4px; }}
-        </style>
-        <input id="q" type="text" autocomplete="off" placeholder="Wykonawca lub tytuł — polskie znaki nie są wymagane">
-        <div id="hint">Wyniki pojawiają się podczas pisania. Ctrl+A / Delete działają normalnie. Kliknięcie utworu przechodzi do szczegółów w tym samym oknie.</div>
-        <div id="results"></div>
-        <script>
-          const songs = {payload};
-          const q = document.getElementById('q');
-          const results = document.getElementById('results');
-          function detailUrl(id) {{
-            try {{
-              const base = new URL((window.top && window.top.location) ? window.top.location.href : document.referrer);
-              base.search = '?view=song&song=' + encodeURIComponent(id);
-              return base.toString();
-            }} catch(e) {{ return '?view=song&song=' + encodeURIComponent(id); }}
-          }}
-          function openSong(id) {{
-            const url = detailUrl(id);
-            try {{ window.top.location.assign(url); }} catch(e) {{ window.location.href = url; }}
-          }}
-          function esc(s) {{ return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c])); }}
-          function render() {{
-            const query = q.value.toLowerCase().replace(/ł/g,'l').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
-            if (!query) {{ results.innerHTML = ''; return; }}
-            const tokens = query.split(/\\s+/).filter(Boolean);
-            const found = songs.filter(s => tokens.every(t => s.key.includes(t))).slice(0, 20);
-            if (!found.length) {{ results.innerHTML = '<div class="empty">Brak wyników.</div>'; return; }}
-            results.innerHTML = found.map(s => `<div class="row"><a class="song" data-song-id="${{s.id}}" href="${{detailUrl(s.id)}}"><div>${{esc(s.title)}}</div><div class="artist">${{esc(s.artist)}}</div></a><a class="spot" target="_blank" rel="noopener" href="${{esc(s.spotify)}}">▶</a></div>`).join('');
-          }}
-          q.addEventListener('input', render);
-          results.addEventListener('click', function(ev) {{
-            const a = ev.target.closest('a.song');
-            if (!a) return;
-            ev.preventDefault();
-            openSong(a.dataset.songId);
-          }});
-          q.focus();
-        </script>
-        """,
-        height=420,
-        scrolling=False,
+def render_song_picker(frame: pd.DataFrame, selected_id: int) -> int:
+    """Native searchable selector; avoids navigating inside a component iframe."""
+    rows = frame[["song_id", "artist", "title"]].copy()
+    options = [int(x) for x in rows["song_id"].tolist()]
+    labels = {
+        int(r.song_id): f"{r.artist} — {r.title}"
+        for r in rows.itertuples(index=False)
+    }
+    try:
+        index = options.index(int(selected_id))
+    except (ValueError, TypeError):
+        index = 0
+    picked = st.selectbox(
+        "Znajdź utwór",
+        options,
+        index=index,
+        format_func=lambda sid: labels.get(int(sid), str(sid)),
+        key=f"song_picker_{int(selected_id)}",
+        help="Kliknij pole i zacznij pisać wykonawcę lub tytuł. Wybór przechodzi do szczegółów bez zagnieżdżania strony.",
     )
+    return int(picked)
 
+
+def navigate_to_song(song_id: int) -> None:
+    """Server-side navigation used by AG Grid and native selectors."""
+    st.query_params["view"] = "song"
+    st.query_params["song"] = str(int(song_id))
+    st.rerun()
 
 
 
@@ -424,17 +374,9 @@ function(params) {
   const row = params && params.data ? params.data : {};
   const host = window.top || window;
 
-  if (field === 'details') {
-    const raw = String(row.details || params.value || '');
-    if (!raw) return;
-    try {
-      const url = new URL(raw, host.location.href);
-      host.location.assign(url.toString());
-    } catch(e) {
-      try { host.location.href = raw; } catch(e2) {}
-    }
-    return;
-  }
+  // Internal details navigation is handled on the Python side. Component
+  // iframes cannot reliably navigate window.top in Streamlit's sandbox.
+  if (field === 'details') return;
 
   if (field === 'spotify') {
     const raw = String(row.spotify || params.value || '');
@@ -454,6 +396,17 @@ function(params) {
       });
     }
   } catch(e) {}
+}
+""")
+
+GRID_SHOULD_RETURN = JsCode("""
+function(params) {
+  const trigger = String((params && params.streamlitRerunEventTriggerName) || '');
+  if (trigger === 'cellValueChanged') return true;
+  if (trigger !== 'cellClicked') return false;
+  const eventData = (params && params.eventData) || {};
+  const field = eventData.colDef && eventData.colDef.field ? String(eventData.colDef.field) : '';
+  return field === 'details';
 }
 """)
 
@@ -775,13 +728,34 @@ def render_song_grid(
         allow_unsafe_jscode=True,
         enable_enterprise_modules=False,
         data_return_mode="AS_INPUT",
-        update_on=["cellValueChanged"],
+        update_on=["cellValueChanged", "cellClicked"],
+        should_grid_return=GRID_SHOULD_RETURN,
         custom_css={
             ".ag-row-selected": {"background-color": "rgba(74, 126, 187, 0.34) !important"},
             ".ag-cell-focus": {"border": "none !important", "outline": "none !important"},
         },
         key=key,
     )
+    # Internal links are handled after the component returns the click event.
+    # This is reliable even when AG Grid is sandboxed in an iframe.
+    try:
+        event_data = response.event_data
+    except Exception:
+        try:
+            event_data = response.get("eventData")
+        except Exception:
+            event_data = None
+    if isinstance(event_data, dict):
+        col_def = event_data.get("colDef") if isinstance(event_data.get("colDef"), dict) else {}
+        if str(col_def.get("field") or "") == "details":
+            row_data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
+            sid = row_data.get("song_id")
+            if sid is not None and str(sid).strip() != "":
+                try:
+                    navigate_to_song(int(float(sid)))
+                except (TypeError, ValueError):
+                    pass
+
     try:
         edited = response.data
     except Exception:
@@ -996,7 +970,9 @@ elif view_key == "song":
         if selected_id not in ids:
             selected_id = ids[0]
 
-        render_live_song_search(ordered)
+        picked_id = render_song_picker(ordered, selected_id)
+        if picked_id != selected_id:
+            navigate_to_song(picked_id)
 
         song_id = selected_id
         row = df[df.song_id == song_id].iloc[0]
@@ -1150,72 +1126,58 @@ elif view_key == "archive":
 
 elif view_key == "airplay":
     st.subheader("📡 Emisje")
-    st.caption(
-        "Dane z odSluchane.eu są zapisywane jako konkretne emisje w blokach 2-godzinnych. "
-        "Możesz łączyć dowolne stacje i zakres dat, żeby zobaczyć zarówno sumę spinów, jak i zasięg między stacjami."
+    st.info(
+        "**Emisje są osobnym zbiorem danych.** Ta zakładka nie zmienia Dashboardu, Familiarity, Momentum, "
+        "statusów ani pozycji w Notowaniach. Tutaj liczymy wyłącznie faktyczne odtworzenia zapisane z odSluchane.eu."
     )
     stations = list_airplay_stations(active_only=True)
     running = active_job() is not None
 
-    top1, top2 = st.columns(2)
-    if top1.button("↻ Odkryj / odśwież wszystkie stacje", disabled=running, use_container_width=True):
-        start_job("airplay-discover")
-        st.rerun()
-    if top2.button("⬇ Pobierz ostatnie zakończone 2h", disabled=running, use_container_width=True):
-        start_job("airplay-latest")
-        st.rerun()
-
-    render_job_status_fragment("airplay", "airplay_top")
-    stations = list_airplay_stations(active_only=True)
     if not stations:
-        st.info("Nie ma jeszcze listy stacji. Kliknij „Odkryj / odśwież wszystkie stacje”. Pierwsze odkrywanie przechodzi po publicznym katalogu odSluchane.eu i może potrwać chwilę.")
+        st.warning("Nie ma jeszcze listy stacji. Najpierw uruchom odkrywanie katalogu odSluchane.eu.")
+        if st.button("↻ Odkryj / odśwież wszystkie stacje", disabled=running, type="primary"):
+            start_job("airplay-discover")
+            st.rerun()
+        render_job_status_fragment("airplay", "airplay_empty")
     else:
-        core_names = {"RMF FM", "ZET", "Eska"}
-        c_all, c_core, c_none = st.columns(3)
-        if c_all.button("✓ Wszystkie stacje", use_container_width=True, key="airplay_sel_all"):
-            for station in stations:
-                st.session_state[f"airplay_station_{int(station['station_id'])}"] = True
-            st.rerun()
-        if c_core.button("RMF + ZET + ESKA", use_container_width=True, key="airplay_sel_core"):
-            for station in stations:
-                st.session_state[f"airplay_station_{int(station['station_id'])}"] = str(station["name"]) in core_names
-            st.rerun()
-        if c_none.button("Wyczyść", use_container_width=True, key="airplay_sel_none"):
-            for station in stations:
-                st.session_state[f"airplay_station_{int(station['station_id'])}"] = False
-            st.rerun()
+        all_station_ids = [int(s["station_id"]) for s in stations]
+        station_labels = {int(s["station_id"]): str(s["name"]) for s in stations}
+        core_ids = [
+            sid for sid, name in station_labels.items()
+            if name.casefold() in {"rmf fm", "zet", "eska", "radio zet", "radio eska"}
+        ]
+        all_coverage = airplay_coverage(all_station_ids)
+        first_date = all_coverage.get("first_date")
+        last_date = all_coverage.get("last_date")
+        default_end = date.fromisoformat(str(last_date)) if last_date else date.today()
+        earliest = date.fromisoformat(str(first_date)) if first_date else default_end - timedelta(days=6)
+        default_start = max(earliest, default_end - timedelta(days=6))
 
-        selected_ids: list[int] = []
-        with st.expander(f"Stacje do zliczania · katalog: {len(stations)}", expanded=False):
-            cols = st.columns(4)
-            for idx, station in enumerate(stations):
-                station_id = int(station["station_id"])
-                key = f"airplay_station_{station_id}"
-                if key not in st.session_state:
-                    st.session_state[key] = str(station["name"]) in core_names
-                checked = cols[idx % 4].checkbox(str(station["name"]), key=key)
-                if checked:
-                    selected_ids.append(station_id)
-
-        coverage = airplay_coverage(selected_ids or None)
-        first_date = coverage.get("first_date")
-        last_date = coverage.get("last_date")
-        if last_date:
-            default_end = date.fromisoformat(str(last_date))
-        else:
-            default_end = date.today()
-        default_start = max(
-            date.fromisoformat(str(first_date)) if first_date else default_end - timedelta(days=6),
-            default_end - timedelta(days=6),
+        f1, f2 = st.columns([1, 2])
+        scope = f1.radio(
+            "Stacje",
+            ["Wszystkie stacje", "Wybrane stacje"],
+            horizontal=True,
+            key="airplay_station_scope",
         )
+        if scope == "Wszystkie stacje":
+            selected_ids = all_station_ids
+            f2.caption(f"Liczymy {len(selected_ids)} odkrytych stacji.")
+        else:
+            selected_ids = f2.multiselect(
+                "Wybierz stacje",
+                all_station_ids,
+                default=core_ids or all_station_ids[: min(3, len(all_station_ids))],
+                format_func=lambda sid: station_labels.get(int(sid), str(sid)),
+                key="airplay_station_multiselect",
+            )
+            selected_ids = [int(x) for x in selected_ids]
 
-        st.markdown("### Zbiorcze zestawienie")
-        d1, d2, d3 = st.columns([2, 1, 1])
-        selected_range = d1.date_input(
+        selected_range = st.date_input(
             "Zakres dat",
             value=(default_start, default_end),
-            key="airplay_range",
-            help="Zakres jest inkluzywny. Wynik liczymy wyłącznie z zapisanych emisji w bazie.",
+            key="airplay_range_v2",
+            help="Zakres jest inkluzywny. Ranking powstaje tylko z emisji zapisanych w tym okresie.",
         )
         if isinstance(selected_range, (list, tuple)) and len(selected_range) == 2:
             range_start, range_end = selected_range
@@ -1224,99 +1186,176 @@ elif view_key == "airplay":
         if range_end < range_start:
             range_start, range_end = range_end, range_start
 
-        min_stations_max = max(1, len(selected_ids))
-        min_station_count = d2.number_input(
-            "Min. stacji",
-            min_value=1,
-            max_value=min_stations_max,
-            value=1,
-            step=1,
-            disabled=not selected_ids,
-        )
-        sort_mode = d3.selectbox("Sortuj", ["Emisje", "Liczba stacji", "Max/stacja"], index=0)
-
-        cov1, cov2, cov3, cov4 = st.columns(4)
-        cov1.metric("Wybrane stacje", len(selected_ids))
-        cov2.metric("Zapisane emisje", int(coverage.get("plays") or 0))
-        cov3.metric("Okna 2h", f"{int(coverage.get('ok_windows') or 0)} / {int(coverage.get('windows') or 0)}")
-        cov4.metric("Zakres bazy", f"{first_date or '—'} → {last_date or '—'}")
-
         if not selected_ids:
-            st.info("Zaznacz przynajmniej jedną stację.")
+            st.info("Wybierz przynajmniej jedną stację.")
+            summary_rows = []
         else:
             summary_rows = airplay_summary(selected_ids, range_start, range_end)
-            air = pd.DataFrame(summary_rows)
-            if air.empty:
-                st.info("Brak zapisanych emisji dla wybranych stacji i dat. Użyj pobierania bieżącego albo backfillu poniżej.")
-            else:
-                air = air[air["stations_count"] >= int(min_station_count)].copy()
-                if sort_mode == "Liczba stacji":
-                    air = air.sort_values(["stations_count", "spins"], ascending=[False, False])
-                elif sort_mode == "Max/stacja":
-                    air = air.sort_values(["max_station_spins", "spins"], ascending=[False, False])
-                else:
-                    air = air.sort_values(["spins", "stations_count"], ascending=[False, False])
 
-                note_rows = {int(x["song_id"]): x for x in load_notes()}
-                air["details"] = [song_link(int(x)) if pd.notna(x) and x else "" for x in air["song_id"]]
-                air["preview"] = "▶"
-                air["spotify"] = [spotify_search_url(a, t) for a, t in zip(air["artist"], air["title"])]
-                air["heard"] = [bool(note_rows.get(int(x), {}).get("heard", False)) if pd.notna(x) and x else False for x in air["song_id"]]
-                air["status"] = [str(note_rows.get(int(x), {}).get("status", "Nie słuchałem")) if pd.notna(x) and x else "Poza bazą" for x in air["song_id"]]
-                air["last_play"] = air["last_play"].astype(str).str.replace("T", " ", regex=False)
+        air = pd.DataFrame(summary_rows)
+        period_days = max(1, (range_end - range_start).days + 1)
+        total_spins = int(air["spins"].sum()) if not air.empty else 0
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Emisje w okresie", f"{total_spins:,}".replace(",", " "))
+        m2.metric("Różne utwory", len(air))
+        m3.metric("Stacje w filtrze", len(selected_ids))
+        m4.metric("Zakres", f"{range_start} → {range_end}")
 
-                air_cols = [
-                    "song_id", "artist", "title", "details", "preview", "spotify", "heard", "status",
-                    "spins", "stations_count", "avg_per_station", "max_station_spins", "top_station", "last_play",
-                ]
-                render_song_grid(
-                    air[[c for c in air_cols if c in air.columns]],
-                    key=f"airplay_grid_{range_start}_{range_end}_{len(selected_ids)}_{int(min_station_count)}_{sort_mode}",
-                    height=720,
-                    editable_state=True,
-                    source_layout="airplay",
-                )
-                st.caption(
-                    "Emisje = łączna liczba zapisanych spinów. Stacje = na ilu wybranych stacjach utwór wystąpił. "
-                    "Max/stacja pokazuje, ile spinów pochodziło z najmocniejszej pojedynczej stacji. „Poza bazą” oznacza brak dopasowania do utworu z naszych list przebojów."
-                )
-
-        st.markdown("### Backfill emisji")
-        st.caption(
-            "Backfill jest dokładny i idempotentny: pobiera publiczne bloki 2h, a okna już zapisane pomija. "
-            "Limit jednego procesu to 100 000 okien 2h, żeby przypadkiem nie uruchomić wielomilionowego pobierania."
-        )
-        bf1, bf2 = st.columns([2, 1])
-        bf_default = default_end - timedelta(days=1)
-        bf_range = bf1.date_input(
-            "Zakres backfillu",
-            value=(bf_default, bf_default),
-            key="airplay_backfill_range",
-        )
-        if isinstance(bf_range, (list, tuple)) and len(bf_range) == 2:
-            bf_start, bf_end = bf_range
+        if air.empty:
+            st.info("Brak zapisanych emisji dla wybranych stacji i dat. Pobieranie bieżące i backfill są w sekcji technicznej na dole.")
         else:
-            bf_start = bf_end = bf_range if isinstance(bf_range, date) else bf_default
-        if bf_end < bf_start:
-            bf_start, bf_end = bf_end, bf_start
-        bf_days = (bf_end - bf_start).days + 1
-        estimated_windows = max(0, len(selected_ids) * bf_days * 12)
-        bf2.metric("Do pobrania / sprawdzenia", f"{estimated_windows:,} okien")
-        can_backfill = bool(selected_ids) and estimated_windows <= 100_000 and not running
-        if estimated_windows > 100_000:
-            st.warning("Ten zakres przekracza limit 100 000 okien. Zmniejsz liczbę stacji lub podziel daty na kilka procesów.")
-        if st.button("Backfill wybrane stacje i daty", disabled=not can_backfill, type="primary", use_container_width=True):
-            start_job(
-                "airplay-backfill",
-                params={
-                    "station_ids": selected_ids,
-                    "start_date": bf_start.isoformat(),
-                    "end_date": bf_end.isoformat(),
-                },
+            tab_rank, tab_track = st.tabs(["🔥 Najczęściej grane", "🔎 Sprawdź utwór"])
+
+            with tab_rank:
+                r1, r2, r3 = st.columns([1, 1, 1])
+                min_station_count = r1.number_input(
+                    "Min. liczba stacji",
+                    min_value=1,
+                    max_value=max(1, len(selected_ids)),
+                    value=1,
+                    step=1,
+                    key="airplay_rank_min_stations",
+                )
+                sort_mode = r2.selectbox(
+                    "Sortuj",
+                    ["Emisje", "Liczba stacji", "Max/stacja"],
+                    index=0,
+                    key="airplay_rank_sort",
+                )
+                top_n = r3.selectbox("Pokaż", [50, 100, 250, 500, "Wszystkie"], index=1, key="airplay_rank_top")
+
+                ranked = air[air["stations_count"] >= int(min_station_count)].copy()
+                if sort_mode == "Liczba stacji":
+                    ranked = ranked.sort_values(["stations_count", "spins"], ascending=[False, False])
+                elif sort_mode == "Max/stacja":
+                    ranked = ranked.sort_values(["max_station_spins", "spins"], ascending=[False, False])
+                else:
+                    ranked = ranked.sort_values(["spins", "stations_count"], ascending=[False, False])
+                if top_n != "Wszystkie":
+                    ranked = ranked.head(int(top_n))
+                ranked = ranked.reset_index(drop=True)
+                ranked.insert(0, "#", ranked.index + 1)
+                ranked["Śr./dzień"] = (ranked["spins"] / period_days).round(1)
+                ranked["last_play"] = ranked["last_play"].astype(str).str.replace("T", " ", regex=False)
+                table = ranked[[
+                    "#", "artist", "title", "spins", "stations_count", "Śr./dzień",
+                    "max_station_spins", "top_station", "last_play",
+                ]].rename(columns={
+                    "artist": "Wykonawca",
+                    "title": "Tytuł",
+                    "spins": "Emisje",
+                    "stations_count": "Stacje",
+                    "max_station_spins": "Max/stacja",
+                    "top_station": "Najmocniejsza stacja",
+                    "last_play": "Ostatnio",
+                })
+                st.dataframe(table, hide_index=True, use_container_width=True, height=650)
+                st.caption("Ranking dotyczy wyłącznie emisji. Nie jest pozycją na liście przebojów i nie zasila wskaźników Dashboardu.")
+
+            with tab_track:
+                order = air.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
+                options = list(range(len(order)))
+                picked_idx = st.selectbox(
+                    "Wykonawca / tytuł",
+                    options,
+                    format_func=lambda i: f"{order.iloc[int(i)]['artist']} — {order.iloc[int(i)]['title']}",
+                    key="airplay_track_picker",
+                    help="Kliknij i zacznij pisać. Lista obejmuje wszystkie utwory obecne w wybranym okresie i na wybranych stacjach.",
+                )
+                chosen = order.iloc[int(picked_idx)]
+                detail = airplay_track_detail(
+                    selected_ids, range_start, range_end,
+                    str(chosen["artist_key"]), str(chosen["title_key"]),
+                )
+                st.markdown(f"### {chosen['artist']} — {chosen['title']}")
+                spotify_url = spotify_search_url(str(chosen["artist"]), str(chosen["title"]))
+                d1, d2, d3, d4, d5 = st.columns([1, 1, 1, 1.25, 0.8])
+                d1.metric("Emisje", int(detail.get("total_spins") or 0))
+                d2.metric("Stacje", int(detail.get("stations_count") or 0))
+                d3.metric("Śr./dzień", f"{float(detail.get('total_spins') or 0) / period_days:.1f}")
+                d4.metric("Ostatnio", str(detail.get("last_play") or "—").replace("T", " "))
+                with d5:
+                    st.write("")
+                    st.link_button("Spotify ↗", spotify_url, use_container_width=True)
+
+                station_df = pd.DataFrame(detail.get("stations") or [])
+                if not station_df.empty:
+                    station_df["avg_active_day"] = (station_df["spins"] / station_df["active_days"].clip(lower=1)).round(1)
+                    station_df["first_play"] = station_df["first_play"].astype(str).str.replace("T", " ", regex=False)
+                    station_df["last_play"] = station_df["last_play"].astype(str).str.replace("T", " ", regex=False)
+                    station_table = station_df[["station", "spins", "active_days", "avg_active_day", "first_play", "last_play"]].rename(columns={
+                        "station": "Stacja",
+                        "spins": "Emisje",
+                        "active_days": "Dni z emisją",
+                        "avg_active_day": "Śr./aktywny dzień",
+                        "first_play": "Pierwsza emisja",
+                        "last_play": "Ostatnia emisja",
+                    })
+                    st.markdown("#### Gdzie i jak często")
+                    st.dataframe(station_table, hide_index=True, use_container_width=True)
+
+                daily_df = pd.DataFrame(detail.get("daily") or [])
+                if not daily_df.empty:
+                    daily_total = daily_df.groupby("play_date", as_index=False)["spins"].sum()
+                    daily_total["play_date"] = pd.to_datetime(daily_total["play_date"])
+                    fig = px.bar(daily_total, x="play_date", y="spins", labels={"play_date": "Dzień", "spins": "Emisje"}, title="Emisje dzień po dniu")
+                    fig.update_layout(height=360, margin=dict(t=50, b=40))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                history_df = pd.DataFrame(detail.get("plays") or [])
+                with st.expander("Dokładna historia emisji", expanded=False):
+                    if history_df.empty:
+                        st.caption("Brak zapisanych emisji.")
+                    else:
+                        history_df["played_at"] = history_df["played_at"].astype(str).str.replace("T", " ", regex=False)
+                        history_table = history_df[["played_at", "station"]].rename(columns={"played_at": "Czas", "station": "Stacja"})
+                        st.dataframe(history_table, hide_index=True, use_container_width=True, height=420)
+                        if int(detail.get("total_spins") or 0) > len(history_table):
+                            st.caption(f"Pokazuję ostatnie {len(history_table)} emisji; podsumowania powyżej liczą cały wybrany okres.")
+
+        with st.expander("⚙️ Pobieranie danych / backfill", expanded=False):
+            st.caption("To sekcja techniczna. Nie wpływa na listy przebojów — tylko uzupełnia osobną bazę emisji.")
+            top1, top2 = st.columns(2)
+            if top1.button("↻ Odkryj / odśwież wszystkie stacje", disabled=running, use_container_width=True, key="airplay_refresh_stations"):
+                start_job("airplay-discover")
+                st.rerun()
+            if top2.button("⬇ Pobierz ostatnie zakończone 2h", disabled=running, use_container_width=True, key="airplay_fetch_latest"):
+                start_job("airplay-latest")
+                st.rerun()
+            render_job_status_fragment("airplay", "airplay_top_v2")
+
+            st.markdown("#### Backfill")
+            bf_default = default_end - timedelta(days=1)
+            bf1, bf2 = st.columns([2, 1])
+            bf_range = bf1.date_input(
+                "Zakres backfillu",
+                value=(bf_default, bf_default),
+                key="airplay_backfill_range_v2",
             )
-            st.rerun()
-        st.caption("Automatyczny worker pobiera poprzedni zakończony blok 2h wszystkich odkrytych stacji co dwie godziny o :12. Dzięki temu od teraz historia rośnie sama.")
-        render_job_status_fragment("airplay", "airplay_backfill")
+            if isinstance(bf_range, (list, tuple)) and len(bf_range) == 2:
+                bf_start, bf_end = bf_range
+            else:
+                bf_start = bf_end = bf_range if isinstance(bf_range, date) else bf_default
+            if bf_end < bf_start:
+                bf_start, bf_end = bf_end, bf_start
+            bf_days = (bf_end - bf_start).days + 1
+            estimated_windows = max(0, len(selected_ids) * bf_days * 12)
+            bf2.metric("Do pobrania / sprawdzenia", f"{estimated_windows:,} okien".replace(",", " "))
+            can_backfill = bool(selected_ids) and estimated_windows <= 100_000 and not running
+            if estimated_windows > 100_000:
+                st.warning("Zakres przekracza limit 100 000 okien. Zmniejsz liczbę stacji lub podziel daty na kilka procesów.")
+            if st.button("Backfill aktualnie wybrane stacje i daty", disabled=not can_backfill, type="primary", use_container_width=True, key="airplay_backfill_v2"):
+                start_job(
+                    "airplay-backfill",
+                    params={
+                        "station_ids": selected_ids,
+                        "start_date": bf_start.isoformat(),
+                        "end_date": bf_end.isoformat(),
+                    },
+                )
+                st.rerun()
+            st.caption("Automatyczny worker pobiera poprzedni zakończony blok 2h wszystkich odkrytych stacji co dwie godziny o :12.")
+            render_job_status_fragment("airplay", "airplay_backfill_v2")
 
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
