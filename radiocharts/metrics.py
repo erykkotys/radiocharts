@@ -40,7 +40,11 @@ def _resolve_as_of(as_of: str | date | datetime | None = None) -> date:
     return date.today()
 
 
-def _load_rows(as_of: str | date | datetime | None = None, lookback_days: int | None = None) -> list[dict]:
+def _load_rows(
+    as_of: str | date | datetime | None = None,
+    lookback_days: int | None = None,
+    song_ids: list[int] | tuple[int, ...] | None = None,
+) -> list[dict]:
     init_db()
     end = _resolve_as_of(as_of)
     cutoff = None
@@ -59,10 +63,36 @@ def _load_rows(as_of: str | date | datetime | None = None, lookback_days: int | 
     if cutoff is not None:
         sql += " AND i.chart_date >= ?"
         params.append(cutoff.isoformat())
+    ids = [int(x) for x in (song_ids or [])]
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        sql += f" AND s.id IN ({placeholders})"
+        params.extend(ids)
     sql += " ORDER BY i.chart_date,e.position"
     with connect() as con:
         rows = con.execute(sql, tuple(params)).fetchall()
         return [dict(r) for r in rows]
+
+
+def _latest_source_dates(end: date, lookback_days: int | None = None) -> dict[str, str]:
+    """Latest stored issue per source in the score window.
+
+    This is separate from the song rows so single-song scoring still knows that
+    a track disappeared from a source instead of treating its own last sighting
+    as the current issue.
+    """
+    cutoff = None
+    if lookback_days:
+        cutoff = end - timedelta(days=max(1, int(lookback_days)) - 1)
+    sql = "SELECT source,MAX(chart_date) AS d FROM chart_issues WHERE chart_date<=?"
+    params: list[object] = [end.isoformat()]
+    if cutoff is not None:
+        sql += " AND chart_date>=?"
+        params.append(cutoff.isoformat())
+    sql += " GROUP BY source"
+    init_db()
+    with connect() as con:
+        return {str(r['source']): str(r['d']) for r in con.execute(sql, tuple(params)).fetchall() if r['d']}
 
 
 def _source_stats(rows: list[dict], latest_date: str, use_reported_history: bool = True) -> dict:
@@ -113,8 +143,12 @@ def _source_stats(rows: list[dict], latest_date: str, use_reported_history: bool
 
     latest_global = date.fromisoformat(str(latest_date)[:10])
     weeks_since_seen = max(0.0, (latest_global - latest_seen).days / 7.0)
-    recency = math.exp(-weeks_since_seen / 3.0)
-    current = (strengths[-1] if strengths else 0.0) * recency
+    # Current-strength is useful for trend diagnostics, but familiarity is human
+    # memory, not "how hot is the record today". Keep only a very slow memory
+    # decay (52-week time constant) so a heavily exposed hit stays familiar for
+    # months after it leaves the chart.
+    current_recency = math.exp(-weeks_since_seen / 3.0)
+    current = (strengths[-1] if strengths else 0.0) * current_recency
 
     peak_pos = min(local_peak, reported_peak) if reported_peak < 10**9 else local_peak
     chart_size = max(int(r["chart_size"]) for r in rows)
@@ -123,7 +157,8 @@ def _source_stats(rows: list[dict], latest_date: str, use_reported_history: bool
     weeks_top10 = len(top10_weeks)
     longevity = min(100.0, weeks / 10.0 * 100.0)
     persistence = min(100.0, weeks_top10 / 6.0 * 100.0)
-    familiarity = 0.40 * current + 0.20 * peak_strength + 0.25 * longevity + 0.15 * persistence
+    memory = peak_strength * math.exp(-weeks_since_seen / 52.0)
+    familiarity = 0.35 * peak_strength + 0.30 * longevity + 0.20 * persistence + 0.15 * memory
 
     # Format fit should describe source/profile affinity, not simply whether the
     # song is still high *today*.  Older builds used ``current_strength`` here,
@@ -143,6 +178,9 @@ def _source_stats(rows: list[dict], latest_date: str, use_reported_history: bool
             momentum += 5
     else:
         momentum = 0
+    # Momentum is deliberately current. If the song is no longer present in a
+    # source, the old slope rapidly loses relevance even though Familiarity stays.
+    momentum *= math.exp(-weeks_since_seen / 2.5)
     momentum = max(0.0, min(100.0, momentum))
     avg4 = sum(positions[-4:]) / max(1, len(positions[-4:])) if positions else 0.0
 
@@ -169,8 +207,9 @@ def _weekly_source_stats(g: pd.DataFrame, latest_date: str, source: str = "") ->
 def compute_scores(
     as_of: str | date | datetime | None = None,
     lookback_days: int | None = None,
+    song_ids: list[int] | tuple[int, ...] | None = None,
 ) -> pd.DataFrame:
-    """Compute all three scores.
+    """Compute chart-derived scores.
 
     ``as_of`` makes the calculation historical (used by Notowania).  When
     ``lookback_days`` is set, only observations in that recent window are used
@@ -178,7 +217,7 @@ def compute_scores(
     ignored, so 1/2/4-week and 2/4/6-month views genuinely describe that period.
     """
     end_date = _resolve_as_of(as_of)
-    rows = _load_rows(end_date, lookback_days)
+    rows = _load_rows(end_date, lookback_days, song_ids=song_ids)
     if not rows:
         return pd.DataFrame()
 
@@ -188,7 +227,7 @@ def compute_scores(
     external_sources = ["UK", "BILLBOARD"]
     use_reported_history = not bool(lookback_days)
 
-    latest: dict[str, str] = {}
+    latest: dict[str, str] = _latest_source_dates(end_date, lookback_days)
     grouped: dict[int, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
     song_meta: dict[int, dict] = {}
     for r in rows:
@@ -196,9 +235,8 @@ def compute_scores(
         src = str(r["source"])
         grouped[sid][src].append(r)
         song_meta.setdefault(sid, r)
-        d = str(r["chart_date"])
-        if src not in latest or d > latest[src]:
-            latest[src] = d
+        if src not in latest:
+            latest[src] = str(r["chart_date"])
 
     available = {s for s in latest if s in weights}
     coverage = sum(weights[s] for s in available)

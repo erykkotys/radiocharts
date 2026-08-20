@@ -37,3 +37,18 @@ def test_read_job_log_can_return_tail(tmp_path, monkeypatch):
     assert full.startswith("first line")
     assert "last line" in tail
     assert "wcześniejsze wpisy" in tail
+
+
+def test_new_job_log_filename_starts_with_date_and_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(job_manager, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(job_manager, "active_job", lambda: None)
+
+    class FakeProc:
+        pid = 4321
+
+    monkeypatch.setattr(job_manager.subprocess, "Popen", lambda *a, **k: FakeProc())
+    job = job_manager.start_job("backfill-all")
+    name = job["log_file"]
+    import re
+    assert re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_backfill-all_[0-9a-f]{12}\.log$", name)
+    assert (tmp_path / name).exists()

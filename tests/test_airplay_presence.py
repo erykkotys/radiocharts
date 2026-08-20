@@ -28,8 +28,11 @@ def test_radio_presence_is_share_of_reporting_stations(tmp_path, monkeypatch):
     snap = db.airplay_presence_summary(days=1, end_date=date(2026, 8, 20))
     assert snap["reporting_stations"] == 2
     by_title = {r["title"]: r for r in snap["rows"]}
-    assert by_title["Hit"]["radio_presence"] == 100.0
-    assert by_title["Half"]["radio_presence"] == 50.0
+    assert by_title["Hit"]["radio_reach"] == 100.0
+    assert by_title["Hit"]["radio_rotation"] == 16.7
+    assert by_title["Hit"]["radio_presence"] == 75.0
+    assert by_title["Half"]["radio_reach"] == 50.0
+    assert by_title["Half"]["radio_presence"] == 40.0
     assert by_title["Hit"]["airplay_spins_per_day"] == 2.0
     assert by_title["Hit"]["airplay_spins_per_station_day"] == 1.0
 

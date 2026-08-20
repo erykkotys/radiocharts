@@ -169,11 +169,12 @@ def main() -> int:
 
     JOB_DIR.mkdir(parents=True, exist_ok=True)
     _PATH = JOB_DIR / f"{args.job_id}.json"
-    _LOG_PATH = JOB_DIR / f"{args.job_id}.log"
     try:
         _CURRENT = json.loads(_PATH.read_text(encoding="utf-8"))
     except Exception:
         _CURRENT = {"job_id": args.job_id}
+    configured_log = str(_CURRENT.get("log_file") or "").strip()
+    _LOG_PATH = JOB_DIR / Path(configured_log).name if configured_log else JOB_DIR / f"{args.job_id}.log"
     _write(
         pid=os.getpid(), state="running", message="Pracuję…",
         log_file=_LOG_PATH.name, log_path=str(_LOG_PATH),

@@ -8,6 +8,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from radiocharts.db import DB_PATH
@@ -21,7 +22,16 @@ def _path(job_id: str) -> Path:
 
 
 def log_path(job_id: str) -> Path:
-    return JOB_DIR / f"{job_id}.log"
+    """Resolve a job log, supporting both dated 0.3.14+ and legacy names."""
+    meta = _read(_path(job_id)) if _path(job_id).exists() else {}
+    name = str(meta.get("log_file") or "").strip()
+    if name:
+        return JOB_DIR / Path(name).name
+    legacy = JOB_DIR / f"{job_id}.log"
+    if legacy.exists():
+        return legacy
+    matches = sorted(JOB_DIR.glob(f"*_{job_id}.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0] if matches else legacy
 
 
 def _read(path: Path) -> dict:
@@ -102,8 +112,13 @@ def start_job(kind: str, source: str | None = None, count: int | None = None, pa
     if params:
         cmd += ["--params-json", json.dumps(params, separators=(",", ":"))]
 
-    job_log = log_path(job_id)
-    created_stamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    started_local = datetime.now(ZoneInfo("Europe/Warsaw"))
+    # The filename uses the same local clock as the application/operator, so a
+    # log can be matched to a clicked process without converting from UTC.
+    file_stamp = started_local.strftime("%Y-%m-%d_%H-%M-%S")
+    safe_kind = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(kind))
+    job_log = JOB_DIR / f"{file_stamp}_{safe_kind}_{job_id}.log"
+    created_stamp = started_local.isoformat(timespec="seconds")
     job_log.write_text(
         f"{created_stamp} [MANAGER] utworzono job {job_id} kind={kind}\n",
         encoding="utf-8",

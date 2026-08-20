@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS song_notes (
 CREATE INDEX IF NOT EXISTS idx_issue_source_date ON chart_issues(source, chart_date);
 CREATE INDEX IF NOT EXISTS idx_entry_song ON chart_entries(song_id);
 CREATE INDEX IF NOT EXISTS idx_song_title_key ON songs(title_key);
+CREATE INDEX IF NOT EXISTS idx_song_artist_key ON songs(artist_key);
+CREATE INDEX IF NOT EXISTS idx_entry_issue_song ON chart_entries(issue_id, song_id);
 
 CREATE TABLE IF NOT EXISTS app_meta (
     key TEXT PRIMARY KEY,
@@ -465,12 +467,93 @@ def _link_airplay_songs(con: sqlite3.Connection) -> int:
         linked += int(cur.rowcount or 0)
     return linked
 
+
+def _relink_airplay_unique_chart_titles(con: sqlite3.Connection) -> int:
+    """Relink safe RDS/title aliases to one chart-backed song.
+
+    Besides exact normalized titles this handles common RDS suffixes such as
+    ``Nareszcie (Męskie Granie 2026)``.  The fallback is deliberately
+    conservative: an anchored title must point to exactly one chart-backed song
+    and must be reasonably distinctive.  We never merge ambiguous chart titles.
+    """
+    chart_rows = con.execute(
+        """SELECT DISTINCT s.id,s.title,s.title_key
+           FROM songs s JOIN chart_entries e ON e.song_id=s.id
+           WHERE s.title_key<>''"""
+    ).fetchall()
+    exact_map: dict[str, set[int]] = {}
+    anchor_map: dict[str, set[int]] = {}
+    for row in chart_rows:
+        sid = int(row["id"])
+        tkey = str(row["title_key"] or "")
+        exact_map.setdefault(tkey, set()).add(sid)
+        anchor = title_anchor(str(row["title"] or ""))
+        if anchor:
+            anchor_map.setdefault(anchor, set()).add(sid)
+
+    aliases = con.execute(
+        """SELECT DISTINCT title,title_key FROM airplay_plays
+           WHERE title_key<>'' AND song_id IS NOT NULL"""
+    ).fetchall()
+    changed = 0
+    for alias in aliases:
+        raw_title = str(alias["title"] or "")
+        tkey = str(alias["title_key"] or "")
+        target: int | None = None
+        exact = exact_map.get(tkey, set())
+        if len(exact) == 1 and (len(tkey) >= 8 or len(tkey.split()) >= 2):
+            target = next(iter(exact))
+        if target is None:
+            anchor = title_anchor(raw_title)
+            anchored = anchor_map.get(anchor, set()) if anchor else set()
+            # For a stripped RDS suffix we can safely accept a slightly shorter
+            # base title, but only when the chart ownership is unique.
+            suffix_was_removed = bool(anchor and anchor != tkey)
+            distinctive = len(anchor) >= (6 if suffix_was_removed else 8) or len(anchor.split()) >= 2
+            if len(anchored) == 1 and distinctive:
+                target = next(iter(anchored))
+        if target is None:
+            continue
+        cur = con.execute(
+            "UPDATE airplay_plays SET song_id=? WHERE title_key=? AND song_id<>?",
+            (target, tkey, target),
+        )
+        changed += int(cur.rowcount or 0)
+
+    # Remove only completely orphaned catalogue rows. Notes are preserved even
+    # when they refer to an old alias, so user work is never discarded.
+    con.execute(
+        """DELETE FROM songs
+           WHERE id NOT IN (SELECT DISTINCT song_id FROM chart_entries)
+             AND id NOT IN (SELECT DISTINCT song_id FROM airplay_plays WHERE song_id IS NOT NULL)
+             AND id NOT IN (SELECT song_id FROM song_notes)"""
+    )
+    return changed
+
+
 def normalize(value: str) -> str:
     value = unicodedata.normalize("NFKD", value or "")
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    value = value.lower().replace("&", " and ").replace("`", "'")
+    value = value.lower().replace("ł", "l").replace("&", " and ").replace("`", "'")
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def title_anchor(value: str) -> str:
+    """Normalize a title while removing common non-title RDS suffixes."""
+    raw = str(value or "").strip()
+    # Parenthetical/bracket suffixes with a year/project/version are metadata in
+    # many playlists, not part of the recording title.
+    raw = re.sub(
+        r"\s*[\(\[][^\)\]]*(?:19|20)\d{2}[^\)\]]*[\)\]]\s*$",
+        "", raw, flags=re.IGNORECASE,
+    )
+    raw = re.sub(
+        r"\s*[\(\[][^\)\]]*(?:meskie\s+granie|męskie\s+granie|radio\s+edit|single\s+edit|remaster(?:ed)?)[^\)\]]*[\)\]]\s*$",
+        "", raw, flags=re.IGNORECASE,
+    )
+    raw = re.sub(r"\s+[-–—]\s*(?:radio\s+edit|single\s+edit|remaster(?:ed)?).*?$", "", raw, flags=re.IGNORECASE)
+    return normalize(raw)
 
 
 def artist_anchor(value: str) -> str:
@@ -588,22 +671,14 @@ def init_db() -> None:
         "airplay_schema_v2",
         "airplay_schema_v3",
         "airplay_link_songs_v1",
+        "airplay_chart_title_relink_v1",
+        "airplay_chart_title_relink_v2",
     }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
-        # Very cheap fast path. If a migration marker was deliberately removed
-        # (tests/maintenance), fall through and run migrations again.
-        try:
-            con0 = sqlite3.connect(DB_PATH, timeout=2)
-            placeholders = ",".join("?" for _ in required_markers)
-            keys = {r[0] for r in con0.execute(
-                f"SELECT key FROM app_meta WHERE key IN ({placeholders})",
-                tuple(sorted(required_markers)),
-            ).fetchall()}
-            con0.close()
-            if required_markers.issubset(keys):
-                return
-        except Exception:
-            pass
+        # Hot-path for a running web/worker process. Migrations are checked once
+        # per process at startup; repeatedly opening SQLite here used to add
+        # measurable latency because nearly every read helper calls init_db().
+        return
 
     # web + worker start together and share the same SQLite file.  Serialize
     # schema/migration work across processes so a simultaneous deploy cannot
@@ -709,6 +784,20 @@ def init_db() -> None:
                         con.execute(
                             "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_link_songs_v1',?)",
                             (str(linked),),
+                        )
+                    alias_link = con.execute("SELECT value FROM app_meta WHERE key='airplay_chart_title_relink_v1'").fetchone()
+                    if not alias_link:
+                        relinked = _relink_airplay_unique_chart_titles(con)
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_chart_title_relink_v1',?)",
+                            (str(relinked),),
+                        )
+                    alias_link_v2 = con.execute("SELECT value FROM app_meta WHERE key='airplay_chart_title_relink_v2'").fetchone()
+                    if not alias_link_v2:
+                        relinked_v2 = _relink_airplay_unique_chart_titles(con)
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_chart_title_relink_v2',?)",
+                            (str(relinked_v2),),
                         )
                 last_exc = None
                 break
@@ -824,10 +913,10 @@ def chart_revision() -> str:
         row = con.execute(
             """SELECT
                  COALESCE((SELECT MAX(retrieved_at) FROM chart_issues),'') AS charts,
-                 (SELECT COUNT(*) FROM chart_entries) AS entries,
-                 (SELECT COUNT(DISTINCT song_id) FROM chart_entries) AS chart_songs"""
+                 COALESCE((SELECT MAX(id) FROM chart_entries),0) AS max_entry_id,
+                 COALESCE((SELECT MAX(id) FROM chart_issues),0) AS max_issue_id"""
         ).fetchone()
-        return f"{row['charts']}|{row['entries']}|{row['chart_songs']}"
+        return f"{row['charts']}|{row['max_entry_id']}|{row['max_issue_id']}"
 
 
 def list_songs() -> list[dict]:
@@ -845,6 +934,90 @@ def list_songs() -> list[dict]:
                ORDER BY s.artist COLLATE NOCASE,s.title COLLATE NOCASE,s.id"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_song(song_id: int) -> dict | None:
+    """Fetch one shared song row with live user state."""
+    init_db()
+    with connect() as con:
+        row = con.execute(
+            """SELECT s.id AS song_id,s.artist,s.title,s.release_date,s.artist_key,s.title_key,
+                      COALESCE(n.heard,0) AS heard,COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.note,'') AS note,n.updated_at
+               FROM songs s LEFT JOIN song_notes n ON n.song_id=s.id WHERE s.id=?""",
+            (int(song_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def song_catalog_revision() -> str:
+    """Small cache key for the useful song picker catalogue.
+
+    The airplay scraper can discover tens of thousands of raw RDS credits.  They
+    should not make every Utwór page serialize a 50k-option selector.  The picker
+    therefore contains chart-backed songs plus anything the user has manually
+    rated/noted; an airplay-only song opened directly is added to the selector by
+    the UI for that request.
+    """
+    init_db()
+    with connect() as con:
+        row = con.execute(
+            """SELECT
+                 COALESCE((SELECT MAX(id) FROM chart_entries),0) AS e,
+                 COALESCE((SELECT MAX(updated_at) FROM song_notes),'') AS n"""
+        ).fetchone()
+    return f"{int(row['e'] or 0)}|{row['n'] or ''}"
+
+
+def song_catalog() -> list[dict]:
+    """Compact catalogue used by the native searchable Utwór selector.
+
+    Airplay-only raw credits remain accessible from Emisje and by direct song
+    URL.  Once a user rates/notes one, it automatically joins this picker too.
+    """
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """SELECT s.id AS song_id,s.artist,s.title
+               FROM songs s
+               WHERE EXISTS (SELECT 1 FROM chart_entries e WHERE e.song_id=s.id)
+                  OR EXISTS (SELECT 1 FROM song_notes n WHERE n.song_id=s.id)
+               ORDER BY s.artist COLLATE NOCASE,s.title COLLATE NOCASE,s.id"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def canonical_song_id(song_id: int) -> int:
+    """Resolve a safe chart-backed alias for one song, if one exists."""
+    init_db()
+    with connect() as con:
+        row = con.execute("SELECT id,title,title_key FROM songs WHERE id=?", (int(song_id),)).fetchone()
+        if not row:
+            return int(song_id)
+        has_chart = con.execute("SELECT 1 FROM chart_entries WHERE song_id=? LIMIT 1", (int(song_id),)).fetchone()
+        if has_chart:
+            return int(song_id)
+
+        tkey = str(row['title_key'] or '')
+        if len(tkey) >= 8 or len(tkey.split()) >= 2:
+            candidates = con.execute(
+                """SELECT DISTINCT e.song_id FROM chart_entries e JOIN songs s ON s.id=e.song_id
+                   WHERE s.title_key=? LIMIT 2""", (tkey,),
+            ).fetchall()
+            if len(candidates) == 1:
+                return int(candidates[0]['song_id'])
+
+        anchor = title_anchor(str(row['title'] or ''))
+        suffix_was_removed = bool(anchor and anchor != tkey)
+        distinctive = bool(anchor) and (len(anchor) >= (6 if suffix_was_removed else 8) or len(anchor.split()) >= 2)
+        if distinctive:
+            matches = con.execute(
+                """SELECT DISTINCT e.song_id FROM chart_entries e JOIN songs s ON s.id=e.song_id
+                   WHERE s.title_key=? LIMIT 2""", (anchor,),
+            ).fetchall()
+            if len(matches) == 1:
+                return int(matches[0]['song_id'])
+        return int(song_id)
 
 
 def load_notes() -> list[dict]:
@@ -1305,9 +1478,16 @@ def airplay_presence_summary(
         item = dict(row)
         st_count = int(item.get("stations_count") or 0)
         spins = int(item.get("spins") or 0)
-        item["radio_presence"] = round(100.0 * st_count / reporting_stations, 1) if reporting_stations else 0.0
+        reach = (100.0 * st_count / reporting_stations) if reporting_stations else 0.0
+        per_station_day = spins / max(1, st_count) / days
+        # Rotation intensity distinguishes a daily gold (~1/station/day) from a
+        # hot recurrent/current (~6+ plays/station/day). Breadth remains dominant.
+        rotation = min(100.0, 100.0 * per_station_day / 6.0)
+        item["radio_reach"] = round(reach, 1)
+        item["radio_rotation"] = round(rotation, 1)
+        item["radio_presence"] = round(0.70 * reach + 0.30 * rotation, 1)
         item["airplay_spins_per_day"] = round(spins / days, 1)
-        item["airplay_spins_per_station_day"] = round(spins / max(1, st_count) / days, 2)
+        item["airplay_spins_per_station_day"] = round(per_station_day, 2)
         out.append(item)
     return {
         "start_date": start.isoformat(),
@@ -1318,8 +1498,72 @@ def airplay_presence_summary(
     }
 
 
+def airplay_song_presence(
+    song_id: int,
+    station_ids: Iterable[int] | None = None,
+    *,
+    days: int = 7,
+    end_date: date | str | None = None,
+) -> dict:
+    """Efficient recent radio signal for one song.
+
+    Unlike :func:`airplay_presence_summary`, this does not group every discovered
+    airplay title, so the Utwór page stays fast on a large database.
+    """
+    init_db()
+    ids = sorted({int(x) for x in station_ids or []})
+    days = max(1, int(days))
+    sid = canonical_song_id(int(song_id))
+    with connect() as con:
+        if end_date is None:
+            row = con.execute("SELECT MAX(substr(played_at,1,10)) AS d FROM airplay_plays").fetchone()
+            if not row or not row["d"]:
+                return {"song_id": sid, "days": days, "reporting_stations": 0}
+            end = date.fromisoformat(str(row["d"]))
+        else:
+            end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+        start = end - timedelta(days=days - 1)
+        start_ts = datetime.combine(start, dt_time.min).isoformat(timespec="minutes")
+        end_ts = datetime.combine(end + timedelta(days=1), dt_time.min).isoformat(timespec="minutes")
+        clauses = ["p.played_at>=?", "p.played_at<?"]
+        params: list[object] = [start_ts, end_ts]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"p.station_id IN ({placeholders})")
+            params.extend(ids)
+        else:
+            clauses.append("s.active=1")
+        where = " AND ".join(clauses)
+        rep = con.execute(
+            f"""SELECT COUNT(DISTINCT p.station_id) AS n
+                 FROM airplay_plays p JOIN airplay_stations s ON s.station_id=p.station_id
+                 WHERE {where}""", tuple(params)
+        ).fetchone()
+        reporting = int(rep["n"] or 0) if rep else 0
+        row = con.execute(
+            f"""SELECT COUNT(*) AS spins,COUNT(DISTINCT p.station_id) AS stations_count,
+                       MAX(p.played_at) AS last_play
+                 FROM airplay_plays p JOIN airplay_stations s ON s.station_id=p.station_id
+                 WHERE {where} AND p.song_id=?""", (*params, sid)
+        ).fetchone()
+    spins = int(row["spins"] or 0) if row else 0
+    stations = int(row["stations_count"] or 0) if row else 0
+    reach = 100.0 * stations / reporting if reporting else 0.0
+    per_station_day = spins / max(1, stations) / days
+    rotation = min(100.0, 100.0 * per_station_day / 6.0)
+    return {
+        "song_id": sid, "start_date": start.isoformat(), "end_date": end.isoformat(), "days": days,
+        "reporting_stations": reporting, "stations_count": stations, "spins": spins,
+        "radio_reach": round(reach, 1), "radio_rotation": round(rotation, 1),
+        "radio_presence": round(0.70 * reach + 0.30 * rotation, 1),
+        "airplay_spins_per_day": round(spins / days, 1),
+        "airplay_spins_per_station_day": round(per_station_day, 2),
+        "last_play": row["last_play"] if row else None,
+    }
+
+
 def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | None:
-    """Best-effort match of an airplay credit to an existing chart song."""
+    """Best-effort match of an airplay credit to an existing chart/shared song."""
     akey = normalize(artist)
     tkey = normalize(title)
     if not tkey:
@@ -1330,16 +1574,43 @@ def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | No
     ).fetchone()
     if exact:
         return int(exact["id"])
-    anchor = artist_anchor(artist)
-    if not anchor:
-        return None
+
+    anchor_artist = artist_anchor(artist)
     candidates = con.execute(
-        "SELECT id,artist FROM songs WHERE title_key=? ORDER BY id",
-        (tkey,),
+        "SELECT id,artist FROM songs WHERE title_key=? ORDER BY id", (tkey,),
     ).fetchall()
-    for row in candidates:
-        if artist_anchor(str(row["artist"])) == anchor:
-            return int(row["id"])
+    if anchor_artist:
+        for row in candidates:
+            if artist_anchor(str(row["artist"])) == anchor_artist:
+                return int(row["id"])
+
+    # Exact title-only fallback when exactly one chart-backed recording owns a
+    # reasonably distinctive title.
+    if len(tkey) >= 8 or len(tkey.split()) >= 2:
+        chart_candidates = con.execute(
+            """SELECT DISTINCT e.song_id FROM chart_entries e JOIN songs s ON s.id=e.song_id
+               WHERE s.title_key=? LIMIT 2""", (tkey,),
+        ).fetchall()
+        if len(chart_candidates) == 1:
+            return int(chart_candidates[0]["song_id"])
+
+    # RDS often appends a project/version suffix to the title. Match the stripped
+    # title only when it uniquely identifies one chart song.
+    tanchor = title_anchor(title)
+    suffix_was_removed = bool(tanchor and tanchor != tkey)
+    distinctive = bool(tanchor) and (len(tanchor) >= (6 if suffix_was_removed else 8) or len(tanchor.split()) >= 2)
+    if distinctive:
+        matches = con.execute(
+            """SELECT DISTINCT s.id,s.artist FROM songs s JOIN chart_entries e ON e.song_id=s.id
+               WHERE s.title_key=? LIMIT 3""", (tanchor,),
+        ).fetchall()
+        if anchor_artist:
+            artist_matches = [r for r in matches if artist_anchor(str(r["artist"] or "")) == anchor_artist]
+            if len({int(r['id']) for r in artist_matches}) == 1:
+                return int(artist_matches[0]['id'])
+        ids = {int(r['id']) for r in matches}
+        if len(ids) == 1:
+            return next(iter(ids))
     return None
 
 
@@ -1438,7 +1709,7 @@ def store_airplay_window(
             title_key = normalize(title)
             if not title_key:
                 continue
-            song_id = get_or_create_song(con, artist, title)
+            song_id = _match_song_id(con, artist, title) or get_or_create_song(con, artist, title)
             cur = con.execute(
                 """INSERT OR IGNORE INTO airplay_plays(
                        station_id,played_at,artist,title,artist_key,title_key,song_id,source_url,retrieved_at
@@ -1465,7 +1736,13 @@ def store_airplay_window(
 
 
 def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date: date | str) -> list[dict]:
-    """Aggregate exact stored spins independently from chart/notowania data."""
+    """Aggregate stored spins by canonical song_id.
+
+    Aggregation is kept inside SQLite. Older builds returned one Python row per
+    song *per station* and grouped those in Python; on a 300k-play database that
+    made the Emisje page noticeably slower and allocated a large intermediate
+    object.
+    """
     init_db()
     ids = sorted({int(x) for x in station_ids})
     if not ids:
@@ -1479,53 +1756,34 @@ def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date
     placeholders = ",".join("?" for _ in ids)
     with connect() as con:
         rows = con.execute(
-            f"""SELECT p.artist_key,p.title_key,p.station_id,s.name AS station_name,
-                       MAX(p.song_id) AS song_id,MAX(p.artist) AS artist,MAX(p.title) AS title,
-                       COUNT(*) AS spins,MAX(p.played_at) AS last_play
-                FROM airplay_plays p
-                JOIN airplay_stations s ON s.station_id=p.station_id
-                WHERE p.station_id IN ({placeholders}) AND p.played_at>=? AND p.played_at<?
-                GROUP BY p.artist_key,p.title_key,p.station_id
-                ORDER BY spins DESC""",
+            f"""WITH per_station AS (
+                    SELECT p.song_id,p.station_id,st.name AS station_name,
+                           COUNT(*) AS station_spins,MAX(p.played_at) AS station_last
+                    FROM airplay_plays p
+                    JOIN airplay_stations st ON st.station_id=p.station_id
+                    WHERE p.station_id IN ({placeholders})
+                      AND p.played_at>=? AND p.played_at<? AND p.song_id IS NOT NULL
+                    GROUP BY p.song_id,p.station_id
+                ), ranked AS (
+                    SELECT *,ROW_NUMBER() OVER(
+                        PARTITION BY song_id ORDER BY station_spins DESC,station_name COLLATE NOCASE
+                    ) AS rn
+                    FROM per_station
+                ), totals AS (
+                    SELECT song_id,SUM(station_spins) AS spins,COUNT(*) AS stations_count,
+                           MAX(station_spins) AS max_station_spins,MAX(station_last) AS last_play
+                    FROM per_station GROUP BY song_id
+                )
+                SELECT t.song_id,s.artist,s.title,s.artist_key,s.title_key,
+                       t.spins,t.stations_count,t.max_station_spins,
+                       COALESCE(r.station_name,'') AS top_station,t.last_play,
+                       ROUND(1.0*t.spins/CASE WHEN t.stations_count>0 THEN t.stations_count ELSE 1 END,1) AS avg_per_station
+                FROM totals t JOIN songs s ON s.id=t.song_id
+                LEFT JOIN ranked r ON r.song_id=t.song_id AND r.rn=1
+                ORDER BY t.spins DESC,t.stations_count DESC,s.artist COLLATE NOCASE,s.title COLLATE NOCASE""",
             (*ids, start_ts, end_ts),
         ).fetchall()
-        station_rows = [dict(r) for r in rows]
-
-    grouped: dict[tuple[str, str], dict] = {}
-    for r in station_rows:
-        key = (str(r["artist_key"]), str(r["title_key"]))
-        g = grouped.setdefault(key, {
-            "artist_key": key[0],
-            "title_key": key[1],
-            "song_id": int(r["song_id"]) if r.get("song_id") is not None else None,
-            "artist": str(r.get("artist") or ""),
-            "title": str(r.get("title") or ""),
-            "spins": 0,
-            "stations_count": 0,
-            "max_station_spins": 0,
-            "top_station": "",
-            "last_play": "",
-        })
-        if g.get("song_id") is None and r.get("song_id") is not None:
-            g["song_id"] = int(r["song_id"])
-        spins = int(r.get("spins") or 0)
-        g["spins"] += spins
-        g["stations_count"] += 1
-        if spins > int(g["max_station_spins"]):
-            g["max_station_spins"] = spins
-            g["top_station"] = str(r.get("station_name") or "")
-            g["artist"] = str(r.get("artist") or g["artist"])
-            g["title"] = str(r.get("title") or g["title"])
-        last_play = str(r.get("last_play") or "")
-        if last_play > str(g["last_play"] or ""):
-            g["last_play"] = last_play
-    out = []
-    for g in grouped.values():
-        stations = max(1, int(g["stations_count"]))
-        g["avg_per_station"] = round(float(g["spins"]) / stations, 1)
-        out.append(g)
-    out.sort(key=lambda r: (-int(r["spins"]), -int(r["stations_count"]), str(r["artist"]).casefold(), str(r["title"]).casefold()))
-    return out
+        return [dict(r) for r in rows]
 
 
 def airplay_track_detail(
@@ -1591,6 +1849,56 @@ def airplay_track_detail(
         "daily": daily_rows,
         "plays": play_rows,
     }
+
+
+def airplay_track_detail_by_song(
+    station_ids: Iterable[int],
+    start_date: date | str,
+    end_date: date | str,
+    song_id: int,
+    *,
+    history_limit: int = 2000,
+) -> dict:
+    """Break one canonical song down by station/day.
+
+    Grouping by song_id avoids fragmented results when different stations use
+    different artist-credit strings for the same recording.
+    """
+    init_db()
+    ids = sorted({int(x) for x in station_ids})
+    if not ids:
+        return {"total_spins":0,"stations_count":0,"first_play":None,"last_play":None,"stations":[],"daily":[],"plays":[]}
+    sid = canonical_song_id(int(song_id))
+    start = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    if end < start:
+        start, end = end, start
+    start_ts = datetime.combine(start, dt_time.min).isoformat(timespec="minutes")
+    end_ts = datetime.combine(end + timedelta(days=1), dt_time.min).isoformat(timespec="minutes")
+    placeholders = ",".join("?" for _ in ids)
+    where = f"p.station_id IN ({placeholders}) AND p.played_at>=? AND p.played_at<? AND p.song_id=?"
+    params = (*ids, start_ts, end_ts, sid)
+    with connect() as con:
+        station_rows = [dict(r) for r in con.execute(
+            f"""SELECT s.name AS station,COUNT(*) AS spins,COUNT(DISTINCT substr(p.played_at,1,10)) AS active_days,
+                       MIN(p.played_at) AS first_play,MAX(p.played_at) AS last_play
+                FROM airplay_plays p JOIN airplay_stations s ON s.station_id=p.station_id
+                WHERE {where} GROUP BY p.station_id,s.name ORDER BY spins DESC,s.name COLLATE NOCASE""", params
+        ).fetchall()]
+        daily_rows = [dict(r) for r in con.execute(
+            f"""SELECT substr(p.played_at,1,10) AS play_date,s.name AS station,COUNT(*) AS spins
+                FROM airplay_plays p JOIN airplay_stations s ON s.station_id=p.station_id
+                WHERE {where} GROUP BY play_date,p.station_id,s.name ORDER BY play_date,s.name COLLATE NOCASE""", params
+        ).fetchall()]
+        play_rows = [dict(r) for r in con.execute(
+            f"""SELECT p.played_at,s.name AS station FROM airplay_plays p
+                JOIN airplay_stations s ON s.station_id=p.station_id WHERE {where}
+                ORDER BY p.played_at DESC,p.station_id LIMIT ?""", (*params, max(1,int(history_limit)))
+        ).fetchall()]
+    total = sum(int(r.get('spins') or 0) for r in station_rows)
+    first_play = min((str(r.get('first_play') or '') for r in station_rows if r.get('first_play')), default=None)
+    last_play = max((str(r.get('last_play') or '') for r in station_rows if r.get('last_play')), default=None)
+    return {"total_spins":total,"stations_count":len(station_rows),"first_play":first_play,"last_play":last_play,"stations":station_rows,"daily":daily_rows,"plays":play_rows,"song_id":sid}
 
 
 def airplay_coverage(

@@ -50,6 +50,9 @@ def test_existing_alias_rows_are_merged_by_migration(tmp_path: Path):
             i2 = con.execute("SELECT last_insert_rowid() id").fetchone()["id"]
             con.execute("INSERT INTO chart_entries(issue_id,song_id,position) VALUES(?,?,1)", (i1, a))
             con.execute("INSERT INTO chart_entries(issue_id,song_id,position) VALUES(?,?,1)", (i2, b))
+        # init_db migrations are intentionally cached per process; force a new
+        # startup cycle after manually deleting a marker in this migration test.
+        db._INITIALIZED_DB_PATH = None
         db.init_db()
         with db.connect() as con:
             songs = con.execute("SELECT id FROM songs WHERE title_key=?", (db.normalize("Nareszcie"),)).fetchall()
