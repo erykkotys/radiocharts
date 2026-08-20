@@ -157,6 +157,47 @@ def _airplay_fk_points_to_station_id(con: sqlite3.Connection, table: str) -> boo
     )
 
 
+def _quarantine_legacy_airplay_daily(con: sqlite3.Connection) -> int:
+    """Preserve and remove the obsolete ``airplay_daily`` table.
+
+    Pre-0.3.x experimental databases could contain ``airplay_daily`` with a
+    foreign key to ``airplay_stations(id)``.  The production station table uses
+    ``station_id`` as its primary key, so once that parent is rebuilt SQLite can
+    raise ``foreign key mismatch`` even while deleting an unrelated song (the
+    delete cascades through the legacy child table).
+
+    Current RadioCharts never reads ``airplay_daily``; daily statistics are
+    derived from ``airplay_plays``.  To avoid throwing user data away we copy
+    the table verbatim to a constraint-free legacy backup and then drop only the
+    obsolete constrained table.
+    """
+    row = con.execute(
+        "SELECT type FROM sqlite_master WHERE name='airplay_daily'"
+    ).fetchone()
+    if not row or str(row["type"]) != "table":
+        return 0
+
+    try:
+        count = int(con.execute("SELECT COUNT(*) FROM airplay_daily").fetchone()[0])
+    except Exception:
+        count = 0
+
+    # PRAGMA foreign_keys can be changed only outside an active transaction.
+    con.commit()
+    con.execute("PRAGMA foreign_keys=OFF")
+    try:
+        backup = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='airplay_daily_legacy_0315'"
+        ).fetchone()
+        if not backup:
+            con.execute("CREATE TABLE airplay_daily_legacy_0315 AS SELECT * FROM airplay_daily")
+        con.execute("DROP TABLE airplay_daily")
+        con.commit()
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+    return count
+
+
 def _airplay_schema_is_canonical(con: sqlite3.Connection) -> bool:
     """Return True only when the parent key really satisfies SQLite FK rules.
 
@@ -373,8 +414,13 @@ def _rebuild_airplay_tables(con: sqlite3.Connection) -> None:
         con.execute("PRAGMA foreign_keys=ON")
 
 
-def _ensure_airplay_schema(con: sqlite3.Connection) -> None:
-    """Upgrade old/partial airplay experiments to the production schema."""
+def _ensure_airplay_schema(con: sqlite3.Connection) -> int:
+    """Upgrade old/partial airplay experiments to the production schema.
+
+    Returns the number of rows preserved from the obsolete ``airplay_daily``
+    table, if such a table existed.
+    """
+    quarantined_daily = _quarantine_legacy_airplay_daily(con)
     if not _airplay_schema_is_canonical(con):
         _rebuild_airplay_tables(con)
 
@@ -427,6 +473,7 @@ def _ensure_airplay_schema(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_plays_song ON airplay_plays(song_id, played_at)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_windows_date ON airplay_windows(play_date, station_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_windows_station_date ON airplay_windows(station_id, play_date)")
+    return quarantined_daily
 
 
 def _link_airplay_songs(con: sqlite3.Connection) -> int:
@@ -471,10 +518,10 @@ def _link_airplay_songs(con: sqlite3.Connection) -> int:
 def _relink_airplay_unique_chart_titles(con: sqlite3.Connection) -> int:
     """Relink safe RDS/title aliases to one chart-backed song.
 
-    Besides exact normalized titles this handles common RDS suffixes such as
-    ``Nareszcie (Męskie Granie 2026)``.  The fallback is deliberately
-    conservative: an anchored title must point to exactly one chart-backed song
-    and must be reasonably distinctive.  We never merge ambiguous chart titles.
+    The 0.3.14 implementation scanned every distinct airplay title (tens of
+    thousands on a populated database) and was accidentally executed twice on
+    first startup.  This version works from the much smaller chart-title set
+    and inspects only airplay titles that look like metadata-suffixed aliases.
     """
     chart_rows = con.execute(
         """SELECT DISTINCT s.id,s.title,s.title_key
@@ -491,43 +538,52 @@ def _relink_airplay_unique_chart_titles(con: sqlite3.Connection) -> int:
         if anchor:
             anchor_map.setdefault(anchor, set()).add(sid)
 
-    aliases = con.execute(
-        """SELECT DISTINCT title,title_key FROM airplay_plays
-           WHERE title_key<>'' AND song_id IS NOT NULL"""
-    ).fetchall()
     changed = 0
-    for alias in aliases:
-        raw_title = str(alias["title"] or "")
-        tkey = str(alias["title_key"] or "")
-        target: int | None = None
-        exact = exact_map.get(tkey, set())
-        if len(exact) == 1 and (len(tkey) >= 8 or len(tkey.split()) >= 2):
-            target = next(iter(exact))
-        if target is None:
-            anchor = title_anchor(raw_title)
-            anchored = anchor_map.get(anchor, set()) if anchor else set()
-            # For a stripped RDS suffix we can safely accept a slightly shorter
-            # base title, but only when the chart ownership is unique.
-            suffix_was_removed = bool(anchor and anchor != tkey)
-            distinctive = len(anchor) >= (6 if suffix_was_removed else 8) or len(anchor.split()) >= 2
-            if len(anchored) == 1 and distinctive:
-                target = next(iter(anchored))
-        if target is None:
+
+    # Exact normalized titles: iterate chart titles, not the whole airplay
+    # catalogue. This keeps first startup fast even with hundreds of thousands
+    # of stored spins.
+    for tkey, ids in exact_map.items():
+        if len(ids) != 1 or not (len(tkey) >= 8 or len(tkey.split()) >= 2):
             continue
+        target = next(iter(ids))
         cur = con.execute(
-            "UPDATE airplay_plays SET song_id=? WHERE title_key=? AND song_id<>?",
+            "UPDATE airplay_plays SET song_id=? WHERE title_key=? AND (song_id IS NULL OR song_id<>?)",
             (target, tkey, target),
         )
         changed += int(cur.rowcount or 0)
 
-    # Remove only completely orphaned catalogue rows. Notes are preserved even
-    # when they refer to an old alias, so user work is never discarded.
-    con.execute(
-        """DELETE FROM songs
-           WHERE id NOT IN (SELECT DISTINCT song_id FROM chart_entries)
-             AND id NOT IN (SELECT DISTINCT song_id FROM airplay_plays WHERE song_id IS NOT NULL)
-             AND id NOT IN (SELECT song_id FROM song_notes)"""
-    )
+    # Non-exact aliases only need Python anchoring when the displayed RDS title
+    # contains a suffix that title_anchor() can actually strip.
+    aliases = con.execute(
+        """SELECT DISTINCT title,title_key FROM airplay_plays
+           WHERE title_key<>'' AND (
+               title LIKE '%(%' OR title LIKE '%[%' OR
+               lower(title) LIKE '%radio edit%' OR
+               lower(title) LIKE '%single edit%' OR
+               lower(title) LIKE '%remaster%'
+           )"""
+    ).fetchall()
+    for alias in aliases:
+        raw_title = str(alias["title"] or "")
+        tkey = str(alias["title_key"] or "")
+        anchor = title_anchor(raw_title)
+        if not anchor or anchor == tkey:
+            continue
+        anchored = anchor_map.get(anchor, set())
+        distinctive = len(anchor) >= 6 or len(anchor.split()) >= 2
+        if len(anchored) != 1 or not distinctive:
+            continue
+        target = next(iter(anchored))
+        cur = con.execute(
+            "UPDATE airplay_plays SET song_id=? WHERE title_key=? AND (song_id IS NULL OR song_id<>?)",
+            (target, tkey, target),
+        )
+        changed += int(cur.rowcount or 0)
+
+    # Do not delete catalogue rows here.  Apart from being unnecessary for the
+    # relink itself, that cleanup can trigger cascades through obsolete tables
+    # in pre-production databases and made startup both slower and fragile.
     return changed
 
 
@@ -670,6 +726,7 @@ def init_db() -> None:
         "source_checks_v1",
         "airplay_schema_v2",
         "airplay_schema_v3",
+        "airplay_daily_legacy_v1",
         "airplay_link_songs_v1",
         "airplay_chart_title_relink_v1",
         "airplay_chart_title_relink_v2",
@@ -727,7 +784,7 @@ def init_db() -> None:
                         if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                             raise
                     con.executescript(SCHEMA)
-                    _ensure_airplay_schema(con)
+                    quarantined_daily = _ensure_airplay_schema(con)
 
                     # Lightweight migrations for existing MVP databases.
                     cols = {row["name"] for row in con.execute("PRAGMA table_info(chart_entries)").fetchall()}
@@ -778,6 +835,10 @@ def init_db() -> None:
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v2','done')")
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v3','done')")
+                    con.execute(
+                        "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_daily_legacy_v1',?)",
+                        (str(quarantined_daily),),
+                    )
                     airplay_link = con.execute("SELECT value FROM app_meta WHERE key='airplay_link_songs_v1'").fetchone()
                     if not airplay_link:
                         linked = _link_airplay_songs(con)
@@ -786,18 +847,20 @@ def init_db() -> None:
                             (str(linked),),
                         )
                     alias_link = con.execute("SELECT value FROM app_meta WHERE key='airplay_chart_title_relink_v1'").fetchone()
-                    if not alias_link:
+                    alias_link_v2 = con.execute("SELECT value FROM app_meta WHERE key='airplay_chart_title_relink_v2'").fetchone()
+                    if not alias_link or not alias_link_v2:
+                        # Run the current relinker exactly once. 0.3.14 could run
+                        # the same expensive pass twice when both markers were
+                        # absent on an upgraded database.
                         relinked = _relink_airplay_unique_chart_titles(con)
+                        value = str(relinked)
                         con.execute(
                             "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_chart_title_relink_v1',?)",
-                            (str(relinked),),
+                            (value,),
                         )
-                    alias_link_v2 = con.execute("SELECT value FROM app_meta WHERE key='airplay_chart_title_relink_v2'").fetchone()
-                    if not alias_link_v2:
-                        relinked_v2 = _relink_airplay_unique_chart_titles(con)
                         con.execute(
                             "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_chart_title_relink_v2',?)",
-                            (str(relinked_v2),),
+                            (value,),
                         )
                 last_exc = None
                 break
