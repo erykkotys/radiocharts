@@ -37,7 +37,6 @@ Wynik jest normalizowany do źródeł, które są już obecne w bazie. Dashboard
 - SQLite z pełną historią notowań (nie tylko bieżącą pozycją)
 - automatyczny collector bieżącej Poplisty RMF
 - eksperymentalny backfill RMF po numerach notowań
-- import CSV/JSON/XLSX dla ZET, OLiA, OLiS, ESKA i RMF
 - Familiarity / Momentum / Format Fit
 - liczba tygodni, peak i tygodnie Top 10
 - ręczne statusy: Ignore / Watch / Candidate / Current / Current Familiar / Recurrent
@@ -47,11 +46,11 @@ Wynik jest normalizowany do źródeł, które są już obecne w bazie. Dashboard
 
 ## Radio ZET
 
-Od 0.2.8 aplikacja potrafi automatycznie pobierać bieżące Top 20 ZET oraz ma eksperymentalny backfill publicznych stron archiwalnych. Ręczny import pozostaje jako fallback. Właściciel serwisu publikuje zastrzeżenie dotyczące eksploracji tekstów i danych; automatyzacja nie omija logowania, CAPTCHA ani innych technicznych zabezpieczeń.
+Od 0.2.8 aplikacja automatycznie pobiera bieżące Top 20 ZET oraz ma eksperymentalny backfill publicznych stron archiwalnych. Ręczna zakładka Import została usunięta w 0.3.13 — bieżące dane i backfille obsługuje zakładka **Dane**. Automatyzacja nie omija logowania, CAPTCHA ani innych technicznych zabezpieczeń.
 
 ## OLiA / OLiS
 
-Serwis OLiS oficjalnie oferuje eksporty CSV/JSON (a dla Single w streamie także Excel), ale bieżące tabele są renderowane dynamicznie. W 0.1 można pobrany eksport po prostu wrzucić w zakładce **Import**. Następny krok to ustalenie stabilnego, oficjalnego URL eksportu i automatyzacja tych dwóch źródeł.
+Serwis OLiS oficjalnie oferuje eksporty CSV/JSON (a dla Single w streamie także Excel), a RadioCharts pobiera OLiA/OLiS automatycznie w zakładce **Dane**. Ręczna zakładka Import nie jest już używana.
 
 ## Lokalny test bez Dockera
 
@@ -117,24 +116,6 @@ python -m radiocharts.collector --rmf-backfill 30
 
 Na początek użyj 20–30 notowań. Jeżeli archiwalny parametr RMF okaże się stabilny, można potem zrobić np. 130 notowań (~6 miesięcy dni roboczych). Collector sprawdza, czy zwrócony numer notowania jest tym, o który prosił, żeby przypadkiem nie zapisać wielokrotnie bieżącej listy.
 
-## Import OLiA / OLiS / ZET
-
-Dashboard → **Import**. Minimalne kolumny:
-
-```csv
-position,artist,title
-1,Artist,Song
-2,Artist 2,Song 2
-```
-
-Opcjonalnie:
-
-```csv
-release_date
-```
-
-Datę i źródło wybierasz w UI.
-
 ## Znane ograniczenia 0.1
 
 1. Matching utworów jest celowo konserwatywny: artist + title po normalizacji. Wariant „JENNIE Remix” i wersja oryginalna mogą zostać uznane za osobne utwory.
@@ -173,14 +154,14 @@ Potem podmień obraz w `compose.truenas.example.yml` i wklej YAML jako Custom Ap
 ## Zmiany 0.1.4
 
 - naprawione publikowanie `latest`: workflow buduje tylko z `main`, jawnie przypina `latest`, a `concurrency` anuluje starszy build gdy wpada nowszy push;
-- wersja obrazu nadal jest czytelna w sidebarze jako `VERSION · git SHA`;
+- wersja obrazu jest widoczna dyskretnie w prawym górnym rogu jako `VERSION · git SHA`;
 - score'y są prezentowane jako procenty 0–100 (`65%`, nie `6.5%` ani `65/100`);
 - brak pozycji na źródle jest prezentowany jako `—` i przy sortowaniu rosnącym pozycji trafia pod prawdziwe numery;
-- większa typografia i lekko jaśniejsze tło;
+- kompaktowa typografia i lekko jaśniejsze tło;
 - backfill RMF jest dostępny z UI, domyślnie 130 notowań (~pół roku dni roboczych); wynik można kopiować;
 - `Pobierz dane teraz` próbuje automatycznie pobrać RMF, OLiA, OLiS Single w streamie i ESKĘ; błąd jednego źródła nie zatrzymuje pozostałych;
 - OLiA/OLiS/ESKA mają diagnostykę z przyciskiem kopiowania; parsery OLiA/OLiS są oznaczone jako eksperymentalne, bo serwis może zmieniać markup;
-- ZET: automatyczny bieżący collector + eksperymentalny backfill; ręczny import pozostaje fallbackiem.
+- ZET: automatyczny bieżący collector + eksperymentalny backfill; ręczny import usunięty z UI.
 
 ### Tagi obrazu w GHCR
 

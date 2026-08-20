@@ -17,41 +17,78 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from radiocharts.build_info import BUILD_DATE, display_version
 from radiocharts.airplay import completed_windows_in_range
 from radiocharts.db import (
-    DB_PATH, airplay_coverage, airplay_presence_summary, airplay_revision, airplay_station_coverage,
+    airplay_coverage, airplay_presence_summary, airplay_revision, airplay_station_coverage,
     airplay_summary, airplay_track_detail, chart_archive_summary, chart_revision, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, list_songs, load_notes, normalize,
-    set_airplay_station_active, update_note, upsert_issue,
+    set_airplay_station_active, update_note,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.eska import probe_eska
 from radiocharts.sources.uk import probe_uk
 from radiocharts.sources.billboard import probe_billboard
-from radiocharts.sources.zet import parse_zet_text, probe_zet
-from radiocharts.sources.imports import dataframe_to_issue, parse_tabular
+from radiocharts.sources.zet import probe_zet
 from radiocharts.sources.olis import probe_olis
 from radiocharts.sources.rmf import probe_rmf
 
 st.set_page_config(page_title="RadioCharts Research", page_icon="📻", layout="wide")
 
-# Czytelniejsza typografia oraz delikatnie jaśniejszy dark mode.
+# Compact UI: the app is primarily a dense research/table tool, not a dashboard
+# made of large presentation cards.
 st.markdown(
     """
     <style>
-      html { font-size: 20px; }
+      html { font-size: 16px; }
       [data-testid="stAppViewContainer"] { background: #1b2028; }
-      .block-container, [data-testid="stMainBlockContainer"] { padding-top: 0.65rem !important; }
+      .block-container, [data-testid="stMainBlockContainer"] {
+        padding-top: 0.35rem !important;
+        padding-bottom: 1.2rem !important;
+        max-width: 100% !important;
+      }
       [data-testid="stHeader"] { background: rgba(27, 32, 40, 0.94); }
-      [data-testid="stSidebar"] { background: #222832; font-size: 1.02rem; }
-      [data-testid="stMetricValue"] { font-size: 2.05rem; }
-      [data-testid="stDataFrame"] { font-size: 1rem; }
-      .stButton button, .stDownloadButton button { font-size: 1rem; }
-      label, p, li { line-height: 1.42; }
-      .rc-tabs { display:flex; gap:0; border-bottom:1px solid #4a5260; margin:0.2rem 0 1.1rem 0; overflow-x:auto; }
-      .rc-tabs a { color:#cfd5df; text-decoration:none; padding:0.62rem 1.05rem; border:1px solid transparent; border-bottom:none; border-radius:8px 8px 0 0; white-space:nowrap; }
+      [data-testid="stSidebar"] { display:none !important; }
+      h1 { font-size: 2rem !important; margin: .15rem 0 .15rem !important; }
+      h2 { font-size: 1.35rem !important; margin: .45rem 0 .25rem !important; }
+      h3 { font-size: 1.05rem !important; margin: .45rem 0 .2rem !important; }
+      p, li, label { line-height: 1.3; }
+      [data-testid="stCaptionContainer"] { margin-bottom: .15rem; }
+      [data-testid="stMetric"] { padding: .2rem .35rem !important; }
+      [data-testid="stMetricLabel"] { font-size: .76rem !important; }
+      [data-testid="stMetricValue"] { font-size: 1.35rem !important; line-height: 1.08 !important; }
+      [data-testid="stDataFrame"] { font-size: .88rem; }
+      .stButton button, .stDownloadButton button, .stLinkButton a {
+        min-height: 2rem !important;
+        padding: .22rem .55rem !important;
+        font-size: .84rem !important;
+      }
+      div[data-baseweb="select"] > div { min-height: 2.1rem !important; }
+      input { min-height: 2rem !important; }
+      [data-testid="stWidgetLabel"] p { font-size: .78rem !important; margin-bottom: .05rem !important; }
+      [data-testid="stVerticalBlock"] { gap: .58rem !important; }
+      [data-testid="stHorizontalBlock"] { gap: .6rem !important; }
+      iframe[title="st.iframe"] { min-height: 0 !important; }
+      .rc-app-title { display:flex; align-items:center; gap:.55rem; font-size:2rem; font-weight:760; line-height:1.05; margin:.18rem 0 .2rem; }
+      .rc-app-subtitle { color:#9aa3af; font-size:.83rem; margin-bottom:.55rem; }
+      .rc-build-badge {
+        position:fixed; top:.5rem; right:4.2rem; z-index:100000;
+        color:#9aa3af; background:rgba(27,32,40,.92); border:1px solid rgba(120,130,145,.28);
+        border-radius:5px; padding:.18rem .42rem; font-size:.7rem; line-height:1.15;
+      }
+      .rc-tabs { display:flex; gap:0; border-bottom:1px solid #4a5260; margin:0 0 .6rem 0; overflow-x:auto; }
+      .rc-tabs a { color:#cfd5df; text-decoration:none; padding:.43rem .78rem; border:1px solid transparent; border-bottom:none; border-radius:6px 6px 0 0; white-space:nowrap; font-size:.9rem; }
       .rc-tabs a:hover { background:#2a313d; color:#fff; }
       .rc-tabs a.active { background:#2b323e; color:#fff; border-color:#4a5260; border-bottom:1px solid #2b323e; margin-bottom:-1px; font-weight:650; }
+      .rc-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.45rem; margin:.15rem 0 .35rem; }
+      .rc-metric { border:1px solid #3e4653; border-radius:7px; padding:.38rem .52rem; background:#1d232c; min-width:0; }
+      .rc-metric-label { color:#aeb6c2; font-size:.72rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .rc-metric-value { color:#f7f8fa; font-size:1.28rem; font-weight:700; line-height:1.1; margin-top:.05rem; }
+      .rc-song-title { font-size:1.18rem; font-weight:720; line-height:1.2; margin:.05rem 0 .08rem; }
+      .rc-song-meta { color:#9fa8b5; font-size:.78rem; }
+      @media (max-width: 900px) {
+        .rc-build-badge { display:none; }
+        .rc-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -142,6 +179,26 @@ def position_styler(value) -> str:
         return "-" if v >= 999 else f"{v:02d}"
     except Exception:
         return "-"
+
+
+def render_compact_metrics(items: list[tuple[str, object]], columns: int | None = None) -> None:
+    """Dense metric strip used instead of tall st.metric cards."""
+    if not items:
+        return
+    cols = int(columns or len(items) or 1)
+    cards = []
+    for label, value in items:
+        cards.append(
+            '<div class="rc-metric">'
+            f'<div class="rc-metric-label">{html.escape(str(label))}</div>'
+            f'<div class="rc-metric-value">{html.escape(str(value))}</div>'
+            '</div>'
+        )
+    st.markdown(
+        f'<div class="rc-metrics" style="grid-template-columns:repeat({max(1, cols)},minmax(0,1fr))">'
+        + ''.join(cards) + '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def song_link(song_id: int, title: str | None = None) -> str:
@@ -274,7 +331,6 @@ def render_nav_tabs(current: str) -> None:
         ("archive", "Notowania"),
         ("airplay", "Emisje"),
         ("data", "Dane"),
-        ("import", "Import"),
         ("methodology", "Metodologia"),
     ]
     links = []
@@ -291,18 +347,13 @@ def render_nav_tabs(current: str) -> None:
 
 
 
-st.title("📻 RadioCharts Research")
-st.caption("Familiarity, momentum i format fit. Narzędzie wspiera odsłuch i ręczną decyzję — nie zastępuje jej.")
-
-with st.sidebar:
-    st.caption(f"Build: **{display_version()}**")
-    if BUILD_DATE != "unknown":
-        st.caption(f"Zbudowano: {BUILD_DATE}")
-    st.caption(f"DB: {DB_PATH}")
-    st.divider()
-    st.markdown("**Wagi Familiarity**")
-    st.text("OLiA 30%\nRMF 25%\nZET 20%\nOLiS 15%\nESKA 10%")
-    st.caption("Pobieranie, backfille i diagnostyka są w zakładce **Dane**.")
+st.markdown('<div class="rc-app-title">📻 <span>RadioCharts Research</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="rc-app-subtitle">Familiarity, momentum i format fit · wsparcie odsłuchu i ręcznej decyzji</div>', unsafe_allow_html=True)
+_build_tip = f" · {BUILD_DATE}" if BUILD_DATE != "unknown" else ""
+st.markdown(
+    f'<div class="rc-build-badge" title="Build{html.escape(_build_tip)}">{html.escape(display_version())}</div>',
+    unsafe_allow_html=True,
+)
 
 
 
@@ -418,34 +469,15 @@ def scroll_song_to_top_once() -> None:
           setTimeout(rcTop, 160);
         </script>
         """,
-        height=0,
+        height=1,
         scrolling=False,
     )
 
 
 
-DETAIL_CELL_RENDERER = JsCode("""
+OPEN_LABEL_FORMATTER = JsCode("""
 function(params) {
-  const row = (params && params.data) || {};
-  const sid = String(row.song_id || '');
-  if (!sid) return '-';
-  const a = document.createElement('a');
-  a.textContent = 'Otwórz';
-  a.style.color = '#cfe4ff';
-  a.style.fontWeight = '650';
-  a.style.textDecoration = 'none';
-  try {
-    const host = window.top || window;
-    const base = host.location.origin + host.location.pathname;
-    a.href = base + '?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
-    // Native link semantics: normal click -> same tab; Ctrl/Cmd-click,
-    // middle-click or browser context menu can open a new tab/window.
-    a.target = '_top';
-  } catch(e) {
-    a.href = '?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
-    a.target = '_top';
-  }
-  return a;
+  return 'Otwórz';
 }
 """)
 
@@ -489,9 +521,21 @@ function(params) {
   const row = params && params.data ? params.data : {};
   const host = window.top || window;
 
-  // Details are a real <a> element rendered by AG Grid; leave browser
-  // click/modifier semantics alone.
-  if (field === 'details') return;
+  if (field === 'details') {
+    const sid = String(row.song_id || '');
+    if (!sid) return;
+    let href = '?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
+    try { href = host.location.origin + host.location.pathname + href; } catch(e) {}
+    const ev = (params && params.event) || {};
+    // Default: same tab. Ctrl/Cmd/Shift click: new tab/window.  This keeps
+    // modifier-click behaviour without returning DOM nodes through React.
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
+      try { host.open(href, '_blank', 'noopener,noreferrer'); } catch(e) {}
+    } else {
+      try { host.location.assign(href); } catch(e) { host.location.href = href; }
+    }
+    return;
+  }
 
   if (field === 'spotify') {
     const raw = String(row.spotify || params.value || '');
@@ -668,7 +712,7 @@ def install_client_helpers() -> None:
         })();
         </script>
         """,
-        height=0,
+        height=1,
         scrolling=False,
     )
 
@@ -743,7 +787,8 @@ def render_song_grid(
     if "details" in show.columns:
         gb.configure_column(
             "details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False,
-            cellRenderer=DETAIL_CELL_RENDERER,
+            valueFormatter=OPEN_LABEL_FORMATTER,
+            headerTooltip="Klik: ta karta · Ctrl/Cmd/Shift+klik: nowa karta/okno",
             cellStyle={"cursor": "pointer", "color": "#cfe4ff", "fontWeight": "650"},
         )
     if "spotify" in show.columns:
@@ -965,7 +1010,7 @@ def render_job_status_fragment(group: str = "all", key_suffix: str = "main") -> 
 
 
 view_key = str(st.query_params.get("view", "dashboard"))
-if view_key not in {"dashboard", "song", "archive", "airplay", "data", "import", "methodology"}:
+if view_key not in {"dashboard", "song", "archive", "airplay", "data", "methodology"}:
     view_key = "dashboard"
 render_nav_tabs(view_key)
 install_client_helpers()
@@ -1009,10 +1054,10 @@ if view_key == "dashboard":
             "6 mies.": 183,
             "Całość": 0,
         }
-        period_label = st.radio(
-            "Okres obliczeń wskaźników",
+        ctl_period, ctl_scope, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns([1.05, 1.35, .9, 1.1, 1.1, 1.0])
+        period_label = ctl_period.selectbox(
+            "Okres wskaźników",
             list(period_map),
-            horizontal=True,
             index=len(period_map) - 1,
             help="Familiarity, Momentum i Format Fit są liczone ponownie tylko z obserwacji z wybranego okresu. W widokach okresowych nie używamy lifetime weeks/peak raportowanych przez źródła.",
         )
@@ -1021,13 +1066,25 @@ if view_key == "dashboard":
         if period_df.empty:
             st.info("Brak danych w wybranym okresie.")
         else:
-            scope = st.radio(
-                "Zakres Dashboardu",
+            scope = ctl_scope.selectbox(
+                "Zakres",
                 ["Wszystkie aktywne", "Polskie aktywne", "Zagraniczne aktywne", "Cała historia"],
-                horizontal=True,
                 index=0,
                 help="Aktywne = utwór obecny w najnowszym notowaniu przynajmniej jednego wybranego źródła w tym okresie.",
             )
+            table_layout_label = ctl_layout.selectbox(
+                "Tabela",
+                ["Auto", "Pełny", "Kompaktowy"],
+                index=0,
+                help="Auto: poniżej ok. 2050 px tygodnie są składane do kolumny źródła; na szerokim ekranie wracają jako osobne kolumny.",
+            )
+            min_fam = ctl_fam.slider("Min. Familiarity", 0, 100, 0, format="%d%%")
+            min_mom = ctl_mom.slider("Min. Momentum", 0, 100, 0, format="%d%%")
+            with ctl_unheard:
+                st.caption("Filtr")
+                only_unheard = st.checkbox("Nieprzesłuchane", key="dashboard_only_unheard")
+            source_layout = {"Auto": "auto", "Pełny": "full", "Kompaktowy": "compact"}[table_layout_label]
+
             base = period_df.copy()
             core_pos = [c for c in ["OLIA_pos", "RMF_pos", "ZET_pos", "OLIS_pos", "ESKA_pos"] if c in base.columns]
             foreign_pos = [c for c in ["UK_pos", "BILLBOARD_pos"] if c in base.columns]
@@ -1038,30 +1095,17 @@ if view_key == "dashboard":
                 base = base[base[foreign_pos].notna().any(axis=1)]
             elif scope == "Wszystkie aktywne" and all_pos:
                 base = base[base[all_pos].notna().any(axis=1)]
-
-            table_layout_label = st.radio(
-                "Układ tabeli",
-                ["Auto", "Pełny", "Kompaktowy"],
-                horizontal=True,
-                index=0,
-                help="Auto: poniżej ok. 2050 px tygodnie są składane do kolumny źródła; na szerokim ekranie wracają jako osobne kolumny.",
-            )
-            source_layout = {"Auto": "auto", "Pełny": "full", "Kompaktowy": "compact"}[table_layout_label]
-
-            colf1, colf2, colf3 = st.columns(3)
-            min_fam = colf1.slider("Min. Familiarity", 0, 100, 0, format="%d%%")
-            min_mom = colf2.slider("Min. Momentum", 0, 100, 0, format="%d%%")
-            only_unheard = colf3.checkbox("Tylko nieprzesłuchane")
             view = base[(base.familiarity >= min_fam) & (base.momentum >= min_mom)].copy()
             if only_unheard:
                 view = view[~view.heard]
             view = view.reset_index(drop=True)
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Utwory (filtr / okres)", f"{len(view)} / {len(period_df)}")
-            c2.metric("Current Familiar ≥70%", f"{int((view.familiarity >= 70).sum())} / {int((period_df.familiarity >= 70).sum())}")
-            c3.metric("Rising ≥65%", f"{int((view.momentum >= 65).sum())} / {int((period_df.momentum >= 65).sum())}")
-            c4.metric("Pokrycie źródeł", f"{period_df.coverage.max():.0f}%")
+            render_compact_metrics([
+                ("Utwory (filtr / okres)", f"{len(view)} / {len(period_df)}"),
+                ("Current Familiar ≥70%", f"{int((view.familiarity >= 70).sum())} / {int((period_df.familiarity >= 70).sum())}"),
+                ("Rising ≥65%", f"{int((view.momentum >= 65).sum())} / {int((period_df.momentum >= 65).sum())}"),
+                ("Pokrycie źródeł", f"{period_df.coverage.max():.0f}%"),
+            ])
             st.caption(f"Okres wskaźników: {period_label}. Cała baza zawiera obecnie {len(df)} utworów. Rising nie ma już osobnej tabeli — wystarczy sortować Momentum albo ustawić jego minimum.")
 
             view["details"] = [song_link(sid) for sid in view.song_id]
@@ -1135,38 +1179,42 @@ elif view_key == "song":
 
         spotify_url = spotify_search_url(str(row.artist), str(row.title))
         with st.container(border=True):
-            head1, head2, head3 = st.columns([5, 1.35, 1.35])
+            head1, head2, head3 = st.columns([6, 1.15, 1.0])
             with head1:
-                st.subheader(f"{row.artist} — {row.title}")
-                st.caption(f"Status: {row.status} · {'przesłuchany' if bool(row.heard) else 'nieprzesłuchany'}")
+                st.markdown(
+                    f'<div id="rc-song-top" class="rc-song-title">{html.escape(str(row.artist))} — {html.escape(str(row.title))}</div>'
+                    f'<div class="rc-song-meta">{html.escape(str(row.status))} · {"przesłuchany" if bool(row.heard) else "nieprzesłuchany"}</div>',
+                    unsafe_allow_html=True,
+                )
             with head2:
                 render_preview_button(song_id, row.artist, row.title, spotify_url)
             with head3:
                 st.link_button("Spotify ↗", spotify_url, use_container_width=True)
 
-            a, b, c, d = st.columns(4)
             if has_chart_data:
-                a.metric("Familiarity", f"{float(row.familiarity):.0f}%")
-                b.metric("Momentum", f"{float(row.momentum):.0f}%")
-                c.metric("Format Fit", f"{float(row.format_fit):.0f}%")
+                fam_label = f"{float(row.familiarity):.0f}%"
+                mom_label = f"{float(row.momentum):.0f}%"
+                fit_label = f"{float(row.format_fit):.0f}%"
             else:
-                a.metric("Familiarity", "—")
-                b.metric("Momentum", "—")
-                c.metric("Format Fit", "—")
+                fam_label = mom_label = fit_label = "—"
             radio_value = row.get("radio_presence")
             try:
                 radio_label = f"{float(radio_value):.0f}%" if radio_value is not None and not pd.isna(radio_value) else "—"
             except Exception:
                 radio_label = "—"
-            d.metric("Radio Presence 7d", radio_label)
+            render_compact_metrics([
+                ("Familiarity", fam_label),
+                ("Momentum", mom_label),
+                ("Format Fit", fit_label),
+                ("Radio Presence 7d", radio_label),
+            ])
             if has_chart_data:
-                st.markdown(f"**Rekomendacja:** {row.recommendation}")
+                st.caption(f"Rekomendacja: {row.recommendation}")
             else:
-                st.markdown("**Rekomendacja:** —")
-                st.caption("Utwór jest we wspólnym katalogu, ale nie ma jeszcze zapisanej pozycji w źródłach notowań. Emisje pozostają osobnym sygnałem i nie są automatycznie dodawane do Familiarity ani Momentum.")
+                st.caption("Rekomendacja: — · brak zapisanej pozycji w źródłach notowań; emisje są osobnym sygnałem.")
             if int(presence_meta.get("reporting_stations") or 0):
                 st.caption(
-                    f"Radio Presence: {int(row.get('airplay_stations_count') or 0)}/{int(presence_meta.get('reporting_stations') or 0)} raportujących stacji · "
+                    f"Radio: {int(row.get('airplay_stations_count') or 0)}/{int(presence_meta.get('reporting_stations') or 0)} stacji · "
                     f"{float(row.get('airplay_spins_per_day') or 0):.1f} emisji/dzień łącznie · "
                     f"{float(row.get('airplay_spins_per_station_day') or 0):.2f} na grającą stację/dzień."
                 )
@@ -1188,7 +1236,7 @@ elif view_key == "song":
             _source_frame(["UK", "BILLBOARD"]).assign(Rola="Sygnał międzynarodowy"),
         ], ignore_index=True)
         source_table = source_table[["Źródło", "Rola", "Pozycja", "Tygodnie", "Peak"]]
-        render_info_grid(source_table, key=f"song_sources_{song_id}", height=292)
+        render_info_grid(source_table, key=f"song_sources_{song_id}", height=258)
         st.caption("UK/Billboard są sygnałami pomocniczymi i nie zmieniają wag Familiarity. W 0.2.1 stare błędnie przypisane metadane Billboardu są jednorazowo czyszczone i odbudowywane z poprawionego parsera.")
 
         h = song_history(song_id)
@@ -1197,16 +1245,16 @@ elif view_key == "song":
             default_sources = [x for x in ["RMF", "ZET", "OLIA", "OLIS", "ESKA"] if x in available_sources]
             if not default_sources:
                 default_sources = available_sources[:4]
-            selected_sources = st.multiselect("Źródła na wykresie", available_sources, default=default_sources, key=f"history_sources_{song_id}")
+            hist_src_col, hist_scale_col = st.columns([3, 1])
+            selected_sources = hist_src_col.multiselect("Źródła na wykresie", available_sources, default=default_sources, key=f"history_sources_{song_id}")
+            scale_mode = hist_scale_col.selectbox(
+                "Skala",
+                ["Nieliniowa — Top 20", "Liniowa"],
+                index=0,
+                key=f"history_scale_{song_id}",
+            )
             hp = h[h["source"].isin(selected_sources)] if selected_sources else h.iloc[0:0]
             if not hp.empty:
-                scale_mode = st.radio(
-                    "Skala pozycji",
-                    ["Nieliniowa — więcej miejsca dla Top 20", "Liniowa"],
-                    horizontal=True,
-                    index=0,
-                    key=f"history_scale_{song_id}",
-                )
                 plot_df = hp.copy()
                 maxpos = max(20, int(plot_df.position.max()))
                 if scale_mode.startswith("Nieliniowa"):
@@ -1227,22 +1275,26 @@ elif view_key == "song":
                 else:
                     fig = px.line(plot_df, x="chart_date", y="position", color="source", markers=True, title="Historia pozycji")
                     fig.update_yaxes(autorange="reversed", range=[maxpos + 3, 1], dtick=5, title="Pozycja")
-                fig.update_layout(height=690, legend=dict(orientation="h", yanchor="top", y=-0.12, x=0), margin=dict(t=55,b=90))
+                fig.update_layout(height=520, legend=dict(orientation="h", yanchor="top", y=-0.12, x=0), margin=dict(t=42,b=72,l=35,r=20))
                 st.plotly_chart(fig, use_container_width=True)
 
         with st.container(border=True):
-            st.markdown("### Moja ocena")
             with st.form("note_form"):
-                n1, n2 = st.columns([1, 2])
+                n1, n2, n3, n4 = st.columns([1.05, 1.65, 4.5, .9])
                 with n1:
+                    st.caption("Moja ocena")
                     heard = st.checkbox("Przesłuchany", value=bool(row.heard))
                 with n2:
                     idx = STATUSES.index(row.status) if row.status in STATUSES else 0
                     status = st.selectbox("Status", STATUSES, index=idx)
-                note = st.text_area("Notatka", value=row.note or "")
-                if st.form_submit_button("Zapisz", use_container_width=True):
+                with n3:
+                    note = st.text_input("Notatka", value=row.note or "")
+                with n4:
+                    st.caption("Zapis")
+                    save_note = st.form_submit_button("Zapisz", use_container_width=True)
+                if save_note:
                     update_note(song_id, heard, status, note)
-                    st.success("Zapisano")
+                    st.toast("Zapisano")
                     st.rerun()
 
 
@@ -1392,11 +1444,12 @@ elif view_key == "airplay":
         air = pd.DataFrame(summary_rows)
         period_days = max(1, (range_end - range_start).days + 1)
         total_spins = int(air["spins"].sum()) if not air.empty else 0
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Emisje w okresie", f"{total_spins:,}".replace(",", " "))
-        m2.metric("Różne utwory", len(air))
-        m3.metric("Stacje w filtrze", len(selected_ids))
-        m4.metric("Pokrycie bloków 2h", f"{ok_windows}/{expected_windows}" if expected_windows else "—")
+        render_compact_metrics([
+            ("Emisje w okresie", f"{total_spins:,}".replace(",", " ")),
+            ("Różne utwory", len(air)),
+            ("Stacje w filtrze", len(selected_ids)),
+            ("Pokrycie bloków 2h", f"{ok_windows}/{expected_windows}" if expected_windows else "—"),
+        ])
         st.caption(f"Zakres: {range_start} → {range_end}. Pełna zakończona doba = **12 bloków po 2h na każdą stację**.")
         if expected_windows and ok_windows < expected_windows:
             st.warning(
@@ -1528,12 +1581,13 @@ elif view_key == "airplay":
                 total_track_spins = int(detail.get("total_spins") or 0)
                 track_station_count = int(detail.get("stations_count") or 0)
                 track_reach = (100.0 * track_station_count / reporting_station_count) if reporting_station_count else None
-                d1, d2, d3, d4, d5 = st.columns([1, 1, 1, 1.25, 1.45])
-                d1.metric("Emisje", total_track_spins)
-                d2.metric("Stacje", track_station_count)
-                d3.metric("Zasięg stacji", f"{track_reach:.0f}%" if track_reach is not None else "—")
-                d4.metric("Emisje/dzień łącznie", f"{total_track_spins / period_days:.1f}")
-                d5.metric("Śr./grającą stację/dzień", f"{total_track_spins / period_days / max(1, track_station_count):.2f}")
+                render_compact_metrics([
+                    ("Emisje", total_track_spins),
+                    ("Stacje", track_station_count),
+                    ("Zasięg stacji", f"{track_reach:.0f}%" if track_reach is not None else "—"),
+                    ("Emisje/dzień łącznie", f"{total_track_spins / period_days:.1f}"),
+                    ("Śr./grającą stację/dzień", f"{total_track_spins / period_days / max(1, track_station_count):.2f}"),
+                ], columns=5)
                 st.caption(f"Ostatnia zapisana emisja: {str(detail.get('last_play') or '—').replace('T', ' ')}")
 
                 chart_match = chart_latest[chart_latest.song_id.astype(int) == chosen_song_id] if not chart_latest.empty else pd.DataFrame()
@@ -1709,26 +1763,14 @@ elif view_key == "data":
         st.rerun()
 
     auto_sources = ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"]
-    cols = st.columns(3)
+    cols = st.columns(4)
     for idx, src in enumerate(auto_sources):
-        if cols[idx % 3].button(f"Pobierz {src}", disabled=running, use_container_width=True, key=f"fetch_{src}"):
+        if cols[idx % 4].button(f"Pobierz {src}", disabled=running, use_container_width=True, key=f"fetch_{src}"):
             start_job("collect-source", source=src)
             st.rerun()
 
     render_job_status_fragment("collect", "collect")
 
-    with st.expander("Radio ZET — ręczny fallback", expanded=False):
-        st.caption("ZET pobiera się teraz automatycznie. To pole zostaje jako awaryjny ręczny import, gdyby collector zawiódł.")
-        st.link_button("Otwórz bieżącą Listę Radia ZET", "https://player.radiozet.pl/Lista-przebojow", use_container_width=True)
-        zet_quick = st.text_area("Wklej tekst bieżącej listy ZET", height=150, key="zet_quick_paste")
-        if st.button("Zapisz bieżący ZET", disabled=running, use_container_width=True, key="zet_quick_save"):
-            try:
-                issue = parse_zet_text(zet_quick, fallback_date=date.today())
-                upsert_issue(issue["source"], issue["chart_date"], issue["issue_key"], issue["chart_size"], issue["entries"], issue.get("source_url"))
-                st.success(f"Zaimportowano ZET: {len(issue['entries'])} pozycji z {issue['chart_date']}.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"ZET: {type(exc).__name__}: {exc}")
 
     st.divider()
     st.markdown("### Backfille")
@@ -1797,53 +1839,20 @@ elif view_key == "data":
         for item in latest_issues():
             st.caption(f"**{item['source']}** · {item['chart_date']} · {item['entries']} pozycji")
 
-elif view_key == "import":
-    st.subheader("Import notowania")
-    st.write("Format minimalny: `position, artist, title`. Może też zawierać `release_date`.")
-    source = st.selectbox("Źródło", ["ZET", "OLIA", "OLIS", "ESKA", "RMF", "UK", "BILLBOARD"])
-    chart_date = st.date_input("Data notowania", value=date.today())
-    issue_key = st.text_input("Id/notowanie (opcjonalne)", value="")
-    chart_size = st.number_input("Rozmiar listy", min_value=1, max_value=500, value=100 if source in ("OLIA", "OLIS", "UK", "BILLBOARD") else 20)
-    uploaded = st.file_uploader("CSV / JSON / XLSX", type=["csv", "json", "xlsx", "xls"])
-    if uploaded:
-        try:
-            imp = parse_tabular(uploaded.getvalue(), uploaded.name)
-            st.dataframe(imp.head(20), hide_index=True, use_container_width=True)
-            if st.button("Importuj to notowanie"):
-                issue = dataframe_to_issue(imp, source, chart_date.isoformat(), issue_key or None, int(chart_size))
-                upsert_issue(issue["source"], issue["chart_date"], issue["issue_key"], issue["chart_size"], issue["entries"], f"manual:{uploaded.name}")
-                st.success(f"Zaimportowano {len(issue['entries'])} pozycji.")
-                st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
-    st.download_button(
-        "Pobierz szablon CSV",
-        "position,artist,title,release_date\n1,Artist,Song,2026-01-01\n",
-        "chart_template.csv",
-        "text/csv",
-    )
-
-    st.divider()
-    st.subheader("Radio ZET — ręczne wklejenie")
-    st.info("ZET pobiera się automatycznie; ręczne wklejenie zostaje jako fallback/import historyczny.")
-    st.link_button("Otwórz Listę Przebojów Radia ZET", "https://player.radiozet.pl/Lista-przebojow")
-    st.caption("Skopiuj tekst notowania ze strony ZET i wklej poniżej; parser wyciągnie Top 20 lokalnie.")
-    zet_text = st.text_area("Tekst strony/listy ZET", height=180, key="zet_paste")
-    if st.button("Parsuj i zapisz ZET", use_container_width=True):
-        try:
-            issue = parse_zet_text(zet_text, fallback_date=chart_date)
-            upsert_issue(issue["source"], issue["chart_date"], issue["issue_key"], issue["chart_size"], issue["entries"], issue.get("source_url"))
-            st.success(f"Zaimportowano ZET: {len(issue['entries'])} pozycji z {issue['chart_date']}.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"ZET: {type(exc).__name__}: {exc}")
-
 
 else:
     st.markdown(
         """
 ### Wskaźniki
-**Familiarity** jest nadal wskaźnikiem *chartowym*. Dla każdego źródła składa się z: 40% bieżącej siły pozycji (z wygaszaniem po zejściu z listy), 20% najlepszego peaku, 25% długości obecności i 15% liczby tygodni w Top 10. Następnie łączymy źródła wagami: OLiA 30% / RMF 25% / ZET 20% / OLiS 15% / ESKA 10%. Brak utworu w danym źródle daje w tej części 0 — dlatego Familiarity może spaść mimo dalszego grania w eterze.
+**Familiarity** jest nadal wskaźnikiem *chartowym*. Dla każdego źródła składa się z: 40% bieżącej siły pozycji (z wygaszaniem po zejściu z listy), 20% najlepszego peaku, 25% długości obecności i 15% liczby tygodni w Top 10. Brak utworu w danym źródle daje w tej części 0 — dlatego Familiarity może spaść mimo dalszego grania w eterze.
+
+| Źródło | Waga Familiarity |
+|---|---:|
+| OLiA | 30% |
+| RMF | 25% |
+| ZET | 20% |
+| OLiS | 15% |
+| ESKA | 10% |
 
 **Momentum** patrzy na zmianę znormalizowanej siły pozycji między maksymalnie czterema ostatnimi tygodniowymi punktami, w których utwór był obecny w danym źródle. 50% ≈ stabilnie, >65% = wyraźny wzrost, <40% = spadek. Emisje radiowe nie są tu jeszcze mieszane z trendem list przebojów.
 
@@ -1864,7 +1873,7 @@ Worker sprawdza automatyczne źródła dwa razy dziennie, o 07:30 i 20:30 czasu 
 RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboard Hot 100 mają tygodniowy backfill po stabilnych adresach archiwalnych. `weeks/peak` dla UK i Billboard bierzemy z oficjalnych bieżących notowań, a backfill buduje przede wszystkim historię pozycji do Momentum. OLiA/OLiS mają eksperymentalny backfill przez przycisk poprzedniego tygodnia i oficjalny eksport CSV; nieudane tygodnie są pomijane. ZET ma automatyczny bieżący collector oraz eksperymentalny backfill po publicznych adresach archiwalnych. ESKA nadal wymaga osobnego mechanizmu archiwum.
 
 ### Wydajność
-SQLite zostaje. Przy tej skali danych nie jest wąskim gardłem. Kosztowne score'y są cache'owane i od 0.3.12 nie są w ogóle ładowane przy wejściu do Emisji / Dane / Import / Metodologia; Emisje pobierają tylko lekką tabelę bieżących pozycji. Tabele nie używają Pandas Styler.
+SQLite zostaje. Przy tej skali danych nie jest wąskim gardłem. Kosztowne score'y są cache'owane i od 0.3.12 nie są w ogóle ładowane przy wejściu do Emisji / Dane / Metodologia; Emisje pobierają tylko lekką tabelę bieżących pozycji. Tabele nie używają Pandas Styler.
 
 ### Spotify
 Aplikacja tworzy link do wyszukiwania `wykonawca + tytuł` w Spotify. Podgląd w tabeli korzysta z 30-sekundowego preview Apple/iTunes i ma własny pasek z przewijaniem. Pełne odtwarzanie wewnątrz aplikacji wymagałoby osobnej integracji streamingowej (np. Spotify Web Playback SDK + autoryzacja).
