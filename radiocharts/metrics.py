@@ -125,6 +125,14 @@ def _source_stats(rows: list[dict], latest_date: str, use_reported_history: bool
     persistence = min(100.0, weeks_top10 / 6.0 * 100.0)
     familiarity = 0.40 * current + 0.20 * peak_strength + 0.25 * longevity + 0.15 * persistence
 
+    # Format fit should describe source/profile affinity, not simply whether the
+    # song is still high *today*.  Older builds used ``current_strength`` here,
+    # so a song that clearly belonged to RMF/ZET but had just left the charts
+    # could collapse to a nonsensical few percent.  Historical fit intentionally
+    # has no recency decay: peak + longevity + repeated Top-10 presence are a
+    # better proxy for "this is the kind of hit these stations play".
+    format_affinity = 0.55 * peak_strength + 0.25 * longevity + 0.20 * persistence
+
     last4 = strengths[-4:]
     if len(last4) == 1:
         momentum = 50 + 0.35 * last4[-1]
@@ -148,6 +156,7 @@ def _source_stats(rows: list[dict], latest_date: str, use_reported_history: bool
         "familiarity": round(familiarity, 1),
         "momentum": round(momentum, 1),
         "current_strength": round(current, 1),
+        "format_affinity": round(format_affinity, 1),
     }
 
 
@@ -210,7 +219,7 @@ def compute_scores(
         mom_num = sum(weights[src] * (per.get(src, {}).get("momentum", 0.0)) for src in available)
         familiarity = fam_num / weight_den
         momentum = mom_num / weight_den
-        fit = sum(fit_weights[src] * per.get(src, {}).get("current_strength", 0.0) for src in fit_available) / fit_den
+        fit = sum(fit_weights[src] * per.get(src, {}).get("format_affinity", 0.0) for src in fit_available) / fit_den
 
         first = song_meta[sid]
         rel = first.get("release_date") or ""

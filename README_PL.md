@@ -259,3 +259,7 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 ## 0.3.10 — kompletność emisji w blokach 2h
 
 odSluchane.eu udostępnia dobę w 12 blokach po 2 godziny. RadioCharts pokazuje teraz pokrycie tych bloków dla wybranego zakresu. Bieżące uzupełnienie sprawdza ostatnie 24h i pobiera brakujące bloki, a backfill nie zapisuje bloków, które jeszcze się nie zakończyły.
+
+## 0.3.11 — pełne logi procesów
+
+Każdy collector i backfill dostaje trwały log `/app/data/jobs/<job_id>.log`. Log nie jest limitowany do ostatnich 50 komunikatów: zapisuje cały progres, stdout/stderr collectorów, tracebacki i końcowe podsumowanie. Po zakończeniu joba również jego plik JSON zachowuje pełne `messages`, a backfill dodaje `source_summary` per źródło (`requested`, `ok`, `errors`, `reported_messages`). W UI można podejrzeć końcówkę logu w sekcji **Log procesu**.

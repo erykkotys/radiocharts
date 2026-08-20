@@ -17,12 +17,13 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from radiocharts.build_info import BUILD_DATE, display_version
 from radiocharts.airplay import completed_windows_in_range
 from radiocharts.db import (
-    DB_PATH, airplay_coverage, airplay_summary, airplay_track_detail, chart_revision, init_db,
-    issue_entries, issue_entries_enriched, latest_issues, latest_source_checks,
+    DB_PATH, airplay_coverage, airplay_presence_summary, airplay_revision, airplay_station_coverage,
+    airplay_summary, airplay_track_detail, chart_archive_summary, chart_revision, init_db,
+    issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, list_songs, load_notes, normalize,
-    update_note, upsert_issue,
+    set_airplay_station_active, update_note, upsert_issue,
 )
-from radiocharts.job_manager import active_job, latest_job, start_job, stop_job
+from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
 from radiocharts.sources.eska import probe_eska
 from radiocharts.sources.uk import probe_uk
@@ -111,7 +112,7 @@ def score_columns() -> dict:
             "Momentum", help="Trend: 50 ≈ stabilnie, >65 = wzrost.", format="%.0f%%", min_value=0.0, max_value=100.0
         ),
         "format_fit": st.column_config.ProgressColumn(
-            "Format Fit", help="Dopasowanie do profilu z mocniejszą wagą RMF/ZET.", format="%.0f%%", min_value=0.0, max_value=100.0
+            "Format Fit", help="Historyczne dopasowanie do profilu: peak + długość obecności + Top 10, z mocniejszą wagą RMF/ZET.", format="%.0f%%", min_value=0.0, max_value=100.0
         ),
     }
 
@@ -157,6 +158,48 @@ def cached_scores(revision: str, as_of: str = "", lookback_days: int = 0) -> pd.
 
 def clear_score_cache() -> None:
     cached_scores.clear()
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def cached_airplay_presence(revision: str, days: int = 7) -> dict:
+    return airplay_presence_summary(days=days)
+
+
+def radio_presence_frame(days: int = 7) -> tuple[pd.DataFrame, dict]:
+    snapshot = cached_airplay_presence(airplay_revision(), days)
+    rows = pd.DataFrame(snapshot.get("rows") or [])
+    return rows, snapshot
+
+
+def with_radio_presence(frame: pd.DataFrame, days: int = 7) -> pd.DataFrame:
+    out = frame.copy()
+    if out.empty or "song_id" not in out.columns:
+        return out
+    presence, meta = radio_presence_frame(days)
+    reporting = int(meta.get("reporting_stations") or 0)
+    cols = [
+        "song_id", "radio_presence", "stations_count", "airplay_spins_per_day",
+        "airplay_spins_per_station_day", "last_play",
+    ]
+    if not presence.empty:
+        ref = presence[[c for c in cols if c in presence.columns]].drop_duplicates("song_id")
+        ref = ref.rename(columns={
+            "stations_count": "airplay_stations_count",
+            "last_play": "airplay_last_play",
+        })
+        out = out.merge(ref, on="song_id", how="left")
+    for col in ["radio_presence", "airplay_spins_per_day", "airplay_spins_per_station_day"]:
+        if col not in out.columns:
+            out[col] = 0.0 if reporting else float("nan")
+        elif reporting:
+            out[col] = out[col].fillna(0.0)
+    if "airplay_stations_count" not in out.columns:
+        out["airplay_stations_count"] = 0
+    elif reporting:
+        out["airplay_stations_count"] = out["airplay_stations_count"].fillna(0).astype(int)
+    out["airplay_reporting_stations"] = reporting
+    out["airplay_presence_days"] = int(meta.get("days") or days)
+    return out
 
 
 def source_health_frame() -> tuple[pd.DataFrame, list[str]]:
@@ -288,10 +331,6 @@ def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-REVISION = chart_revision()
-df = with_notes(cached_scores(REVISION))
-
-
 def spotify_search_url(artist: str, title: str) -> str:
     query = quote(f"{artist} {title}", safe="")
     return f"https://open.spotify.com/search/{query}"
@@ -385,10 +424,28 @@ def scroll_song_to_top_once() -> None:
 
 
 
-DETAIL_LABEL_FORMATTER = JsCode("""
+DETAIL_CELL_RENDERER = JsCode("""
 function(params) {
-  const url = String(params.value || '');
-  return url ? 'Otwórz ↗' : '-';
+  const row = (params && params.data) || {};
+  const sid = String(row.song_id || '');
+  if (!sid) return '-';
+  const a = document.createElement('a');
+  a.textContent = 'Otwórz';
+  a.style.color = '#cfe4ff';
+  a.style.fontWeight = '650';
+  a.style.textDecoration = 'none';
+  try {
+    const host = window.top || window;
+    const base = host.location.origin + host.location.pathname;
+    a.href = base + '?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
+    // Native link semantics: normal click -> same tab; Ctrl/Cmd-click,
+    // middle-click or browser context menu can open a new tab/window.
+    a.target = '_top';
+  } catch(e) {
+    a.href = '?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
+    a.target = '_top';
+  }
+  return a;
 }
 """)
 
@@ -432,8 +489,8 @@ function(params) {
   const row = params && params.data ? params.data : {};
   const host = window.top || window;
 
-  // Internal details navigation is handled on the Python side. Component
-  // iframes cannot reliably navigate window.top in Streamlit's sandbox.
+  // Details are a real <a> element rendered by AG Grid; leave browser
+  // click/modifier semantics alone.
   if (field === 'details') return;
 
   if (field === 'spotify') {
@@ -460,11 +517,7 @@ function(params) {
 GRID_SHOULD_RETURN = JsCode("""
 function(params) {
   const trigger = String((params && params.streamlitRerunEventTriggerName) || '');
-  if (trigger === 'cellValueChanged') return true;
-  if (trigger !== 'cellClicked') return false;
-  const eventData = (params && params.eventData) || {};
-  const field = eventData.colDef && eventData.colDef.field ? String(eventData.colDef.field) : '';
-  return field === 'details';
+  return trigger === 'cellValueChanged';
 }
 """)
 
@@ -690,7 +743,7 @@ def render_song_grid(
     if "details" in show.columns:
         gb.configure_column(
             "details", "Szczegóły", minWidth=95, width=105, sortable=False, filter=False,
-            valueFormatter=DETAIL_LABEL_FORMATTER,
+            cellRenderer=DETAIL_CELL_RENDERER,
             cellStyle={"cursor": "pointer", "color": "#cfe4ff", "fontWeight": "650"},
         )
     if "spotify" in show.columns:
@@ -716,6 +769,11 @@ def render_song_grid(
     for col, label in [("familiarity", "Familiarity"), ("momentum", "Momentum"), ("format_fit", "Format Fit")]:
         if col in show.columns:
             gb.configure_column(col, label, width=115, minWidth=105, valueFormatter=PERCENT_FORMATTER)
+    if "radio_presence" in show.columns:
+        gb.configure_column(
+            "radio_presence", "Radio Presence 7d", width=145, minWidth=132,
+            valueFormatter=PERCENT_FORMATTER,
+        )
     if "recommendation" in show.columns:
         gb.configure_column("recommendation", "Rekomendacja", minWidth=190, width=220)
 
@@ -766,7 +824,11 @@ def render_song_grid(
     if "stations_count" in show.columns:
         gb.configure_column("stations_count", "Stacje", width=82, minWidth=76)
     if "avg_per_day" in show.columns:
-        gb.configure_column("avg_per_day", "Śr./dzień", width=105, minWidth=96)
+        gb.configure_column("avg_per_day", "Emisje/dzień łącznie", width=150, minWidth=138)
+    if "avg_station_day" in show.columns:
+        gb.configure_column("avg_station_day", "Śr./grającą stację/dzień", width=185, minWidth=170)
+    if "station_reach" in show.columns:
+        gb.configure_column("station_reach", "Zasięg stacji", width=120, minWidth=110, valueFormatter=PERCENT_FORMATTER)
     if "avg_per_station" in show.columns:
         gb.configure_column("avg_per_station", "Śr./stację", width=105, minWidth=96)
     if "max_station_spins" in show.columns:
@@ -788,7 +850,7 @@ def render_song_grid(
         allow_unsafe_jscode=True,
         enable_enterprise_modules=False,
         data_return_mode="AS_INPUT",
-        update_on=["cellValueChanged", "cellClicked"],
+        update_on=["cellValueChanged"],
         should_grid_return=GRID_SHOULD_RETURN,
         custom_css={
             ".ag-row-selected": {"background-color": "rgba(74, 126, 187, 0.34) !important"},
@@ -796,26 +858,6 @@ def render_song_grid(
         },
         key=key,
     )
-    # Internal links are handled after the component returns the click event.
-    # This is reliable even when AG Grid is sandboxed in an iframe.
-    try:
-        event_data = response.event_data
-    except Exception:
-        try:
-            event_data = response.get("eventData")
-        except Exception:
-            event_data = None
-    if isinstance(event_data, dict):
-        col_def = event_data.get("colDef") if isinstance(event_data.get("colDef"), dict) else {}
-        if str(col_def.get("field") or "") == "details":
-            row_data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
-            sid = row_data.get("song_id")
-            if sid is not None and str(sid).strip() != "":
-                try:
-                    navigate_to_song(int(float(sid)))
-                except (TypeError, ValueError):
-                    pass
-
     try:
         edited = response.data
     except Exception:
@@ -897,6 +939,20 @@ def render_job_status_fragment(group: str = "all", key_suffix: str = "main") -> 
         st.caption(job.get("message") or "")
     if job.get("messages"):
         st.code("\n".join(job["messages"][-10:]), language=None)
+    if job.get("log_file"):
+        with st.expander("📄 Log procesu"):
+            st.caption(f"Pełny log: /app/data/jobs/{job.get('log_file')}")
+            tail = read_job_log(str(job.get("job_id")), max_bytes=80_000)
+            if tail:
+                st.code(tail, language=None)
+            if job.get("source_summary"):
+                st.caption("Podsumowanie backfillu per źródło")
+                summary_rows = [
+                    {"Źródło": src, **stats}
+                    for src, stats in job.get("source_summary", {}).items()
+                ]
+                if summary_rows:
+                    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
     if running_now and st.button("⏹ Zatrzymaj proces", use_container_width=True, key=f"stop_{key_suffix}_{job.get('job_id')}"):
         stop_job(str(job["job_id"]))
         st.rerun()
@@ -913,6 +969,18 @@ if view_key not in {"dashboard", "song", "archive", "airplay", "data", "import",
     view_key = "dashboard"
 render_nav_tabs(view_key)
 install_client_helpers()
+
+# Full score calculation is only needed by score-centric views.  Emisje use a
+# cheap latest-position query instead of rebuilding/deserializing the whole
+# score frame on every tab switch.
+if view_key in {"dashboard", "song", "archive"}:
+    REVISION = chart_revision()
+    df = with_notes(cached_scores(REVISION))
+    if view_key in {"dashboard", "song"}:
+        df = with_radio_presence(df, days=7)
+else:
+    REVISION = ""
+    df = pd.DataFrame()
 
 
 if view_key == "dashboard":
@@ -949,7 +1017,7 @@ if view_key == "dashboard":
             help="Familiarity, Momentum i Format Fit są liczone ponownie tylko z obserwacji z wybranego okresu. W widokach okresowych nie używamy lifetime weeks/peak raportowanych przez źródła.",
         )
         lookback = int(period_map[period_label])
-        period_df = df if lookback == 0 else with_notes(cached_scores(REVISION, lookback_days=lookback))
+        period_df = df if lookback == 0 else with_radio_presence(with_notes(cached_scores(REVISION, lookback_days=lookback)), days=7)
         if period_df.empty:
             st.info("Brak danych w wybranym okresie.")
         else:
@@ -1004,7 +1072,7 @@ if view_key == "dashboard":
 
             cols = [
                 "song_id", "artist", "title", "details", "preview", "spotify", "heard", "status",
-                "familiarity", "momentum", "format_fit", "recommendation",
+                "familiarity", "momentum", "format_fit", "radio_presence", "recommendation",
                 "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
                 "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
                 "UK_pos", "UK_weeks", "BILLBOARD_pos", "BILLBOARD_weeks",
@@ -1015,9 +1083,10 @@ if view_key == "dashboard":
                 show[col] = show[col].map(position_sort_value).astype(int)
             show = show.rename(columns={c: c.replace("_pos", "") for c in pos_cols})
             render_song_grid(show, key=f"dashboard_grid_{lookback}_{scope}_{source_layout}", height=660, editable_state=True, source_layout=source_layout)
-            st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7 · 5w. ▶ 30s otwiera player przyklejony do dołu całego ekranu. Spotify pozostaje linkiem do pełnego utworu.")
+            st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7 · 5w. Radio Presence 7d = odsetek raportujących stacji odSluchane, które zagrały utwór w ostatnich 7 dniach. ▶ 30s otwiera player przyklejony do dołu ekranu.")
 
 elif view_key == "song":
+    st.markdown('<span id="rc-song-top"></span>', unsafe_allow_html=True)
     catalog = pd.DataFrame(list_songs())
     if catalog.empty:
         st.info("Najpierw dodaj dane z notowań albo emisji.")
@@ -1039,6 +1108,9 @@ elif view_key == "song":
 
         song_id = selected_id
         song_meta = catalog[catalog.song_id.astype(int) == song_id].iloc[0]
+        presence_rows, presence_meta = radio_presence_frame(days=7)
+        presence_match = presence_rows[presence_rows.song_id.astype(int) == song_id] if not presence_rows.empty else pd.DataFrame()
+        presence_row = presence_match.iloc[0] if not presence_match.empty else None
         chart_match = df[df.song_id.astype(int) == song_id] if not df.empty else pd.DataFrame()
         has_chart_data = not chart_match.empty
         if has_chart_data:
@@ -1052,6 +1124,10 @@ elif view_key == "song":
             row["momentum"] = None
             row["format_fit"] = None
             row["recommendation"] = "Brak danych z notowań"
+            row["radio_presence"] = float(presence_row.get("radio_presence") or 0) if presence_row is not None else (0.0 if int(presence_meta.get("reporting_stations") or 0) else None)
+            row["airplay_stations_count"] = int(presence_row.get("stations_count") or 0) if presence_row is not None else 0
+            row["airplay_spins_per_day"] = float(presence_row.get("airplay_spins_per_day") or 0) if presence_row is not None else 0.0
+            row["airplay_spins_per_station_day"] = float(presence_row.get("airplay_spins_per_station_day") or 0) if presence_row is not None else 0.0
             for src in ["OLIA", "RMF", "ZET", "OLIS", "ESKA", "UK", "BILLBOARD"]:
                 row[f"{src}_pos"] = None
                 row[f"{src}_weeks"] = 0
@@ -1068,18 +1144,32 @@ elif view_key == "song":
             with head3:
                 st.link_button("Spotify ↗", spotify_url, use_container_width=True)
 
-            a, b, c = st.columns(3)
+            a, b, c, d = st.columns(4)
             if has_chart_data:
                 a.metric("Familiarity", f"{float(row.familiarity):.0f}%")
                 b.metric("Momentum", f"{float(row.momentum):.0f}%")
                 c.metric("Format Fit", f"{float(row.format_fit):.0f}%")
-                st.markdown(f"**Rekomendacja:** {row.recommendation}")
             else:
                 a.metric("Familiarity", "—")
                 b.metric("Momentum", "—")
                 c.metric("Format Fit", "—")
+            radio_value = row.get("radio_presence")
+            try:
+                radio_label = f"{float(radio_value):.0f}%" if radio_value is not None and not pd.isna(radio_value) else "—"
+            except Exception:
+                radio_label = "—"
+            d.metric("Radio Presence 7d", radio_label)
+            if has_chart_data:
+                st.markdown(f"**Rekomendacja:** {row.recommendation}")
+            else:
                 st.markdown("**Rekomendacja:** —")
-                st.caption("Utwór jest we wspólnym katalogu, ale nie ma jeszcze zapisanej pozycji w źródłach notowań. Emisje nie są przeliczane na Familiarity ani Momentum.")
+                st.caption("Utwór jest we wspólnym katalogu, ale nie ma jeszcze zapisanej pozycji w źródłach notowań. Emisje pozostają osobnym sygnałem i nie są automatycznie dodawane do Familiarity ani Momentum.")
+            if int(presence_meta.get("reporting_stations") or 0):
+                st.caption(
+                    f"Radio Presence: {int(row.get('airplay_stations_count') or 0)}/{int(presence_meta.get('reporting_stations') or 0)} raportujących stacji · "
+                    f"{float(row.get('airplay_spins_per_day') or 0):.1f} emisji/dzień łącznie · "
+                    f"{float(row.get('airplay_spins_per_station_day') or 0):.2f} na grającą stację/dzień."
+                )
 
         def _source_frame(sources: list[str]) -> pd.DataFrame:
             rows = []
@@ -1219,7 +1309,18 @@ elif view_key == "airplay":
         "rekord, ten sam odsłuch/status/notatkę, a w Emisjach możemy obok pokazać jego bieżące pozycje z RMF/ZET/OLiA/OLiS/ESKA."
     )
     stations = list_airplay_stations(active_only=True)
+    all_known_stations = list_airplay_stations(active_only=False)
     running = active_job() is not None
+
+    latest_pos_rows = pd.DataFrame(latest_chart_positions())
+    if not latest_pos_rows.empty:
+        chart_latest = latest_pos_rows.pivot_table(
+            index="song_id", columns="source", values="position", aggfunc="first"
+        ).reset_index()
+        chart_latest.columns.name = None
+        chart_latest = chart_latest.rename(columns={src: f"{src}_pos" for src in ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"] if src in chart_latest.columns})
+    else:
+        chart_latest = pd.DataFrame(columns=["song_id"])
 
     if not stations:
         st.warning("Nie ma jeszcze listy stacji. Najpierw uruchom odkrywanie katalogu odSluchane.eu.")
@@ -1278,6 +1379,9 @@ elif view_key == "airplay":
         range_coverage = airplay_coverage(selected_ids, range_start, range_end) if selected_ids else {}
         ok_windows = int(range_coverage.get("ok_windows") or 0)
         coverage_pct = (100.0 * ok_windows / expected_windows) if expected_windows else 0.0
+        per_station_expected = len(completed_windows_in_range(range_start, range_end)) if selected_ids else 0
+        station_cov_rows = airplay_station_coverage(selected_ids, range_start, range_end) if selected_ids else []
+        reporting_station_count = sum(1 for r in station_cov_rows if int(r.get("plays") or 0) > 0)
 
         if not selected_ids:
             st.info("Wybierz przynajmniej jedną stację.")
@@ -1300,6 +1404,32 @@ elif view_key == "airplay":
                 f"({coverage_pct:.0f}%). Ranking liczy tylko zapisane emisje. Około 20–30 utworów na stację/dzień "
                 "zwykle oznacza, że mamy tylko jeden blok 2h, a nie całą dobę. Użyj uzupełnienia 24h albo backfillu poniżej."
             )
+        if selected_ids:
+            st.caption(
+                f"Raportujące stacje w tym zakresie: **{reporting_station_count}/{len(selected_ids)}**. "
+                "Raportująca = mamy z niej przynajmniej jedną zapisaną emisję w wybranym okresie."
+            )
+            with st.expander("🔎 Co dokładnie zostało pobrane — pokrycie per stacja", expanded=False):
+                cov_df = pd.DataFrame(station_cov_rows)
+                if not cov_df.empty:
+                    cov_df["expected"] = per_station_expected
+                    cov_df["missing"] = (cov_df["expected"] - cov_df["ok_windows"].fillna(0).astype(int)).clip(lower=0)
+                    cov_df["coverage_pct"] = [
+                        round(100.0 * int(ok or 0) / per_station_expected, 1) if per_station_expected else 0.0
+                        for ok in cov_df["ok_windows"]
+                    ]
+                    cov_df["status"] = [
+                        ("✅ komplet" if int(ok or 0) >= per_station_expected and int(plays or 0) > 0
+                         else "⚪ komplet, 0 emisji" if int(ok or 0) >= per_station_expected and per_station_expected > 0
+                         else "⚠️ braki")
+                        for ok, plays in zip(cov_df["ok_windows"], cov_df["plays"])
+                    ]
+                    shown_cov = cov_df[["name", "status", "ok_windows", "expected", "missing", "zero_windows", "plays"]].rename(columns={
+                        "name": "Stacja", "status": "Stan", "ok_windows": "Bloki OK", "expected": "Oczekiwane",
+                        "missing": "Brakuje", "zero_windows": "Puste bloki", "plays": "Emisje",
+                    })
+                    st.dataframe(shown_cov, hide_index=True, use_container_width=True, height=min(600, 44 + 35 * len(shown_cov)))
+                    st.caption("Pusty blok = strona odSluchane odpowiedziała poprawnie, ale parser nie znalazł żadnej emisji. To odróżnia brak pobrania od stacji, która nie zwraca playlisty/RDS.")
 
         if air.empty:
             st.info("Brak zapisanych emisji dla wybranych stacji i dat. Pobieranie bieżące i backfill są w sekcji technicznej na dole.")
@@ -1337,16 +1467,19 @@ elif view_key == "airplay":
                 ranked = ranked[ranked["song_id"].notna()].copy()
                 ranked["song_id"] = ranked["song_id"].astype(int)
                 ranked["avg_per_day"] = (ranked["spins"] / period_days).round(1)
+                ranked["avg_station_day"] = (ranked["spins"] / period_days / ranked["stations_count"].clip(lower=1)).round(2)
+                ranked["station_reach"] = (
+                    100.0 * ranked["stations_count"] / reporting_station_count
+                ).clip(upper=100).round(1) if reporting_station_count else float("nan")
                 ranked["last_play"] = ranked["last_play"].astype(str).str.replace("T", " ", regex=False)
                 ranked = with_notes(ranked)
 
-                # Join only chart-derived *positions*.  Spin counts stay a separate
-                # dimension and never enter compute_scores/Familiarity/Momentum.
+                # Join only latest chart-derived positions.  This avoids loading
+                # the expensive full score frame merely to render Emisje.
                 source_cols = ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]
-                if not df.empty:
-                    chart_cols = ["song_id"] + [f"{src}_pos" for src in source_cols if f"{src}_pos" in df.columns]
-                    chart_ref = df[chart_cols].drop_duplicates("song_id")
-                    ranked = ranked.merge(chart_ref, on="song_id", how="left")
+                if not chart_latest.empty:
+                    chart_cols = ["song_id"] + [f"{src}_pos" for src in source_cols if f"{src}_pos" in chart_latest.columns]
+                    ranked = ranked.merge(chart_latest[chart_cols].drop_duplicates("song_id"), on="song_id", how="left")
                 for src in source_cols:
                     pos_col = f"{src}_pos"
                     ranked[src] = ranked[pos_col].map(position_sort_value).astype(int) if pos_col in ranked.columns else 999
@@ -1356,7 +1489,7 @@ elif view_key == "airplay":
                 ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
                 air_cols = [
                     "song_id", "spins", "artist", "title", "details", "preview", "spotify", "heard", "status",
-                    "stations_count", "avg_per_day", "max_station_spins", "top_station", "last_play",
+                    "stations_count", "station_reach", "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
                     "RMF", "ZET", "OLIA", "OLIS", "ESKA",
                 ]
                 air_show = ranked[[c for c in air_cols if c in ranked.columns]].copy()
@@ -1369,8 +1502,9 @@ elif view_key == "airplay":
                     source_layout="airplay",
                 )
                 st.caption(
-                    "Emisje decydują wyłącznie o kolejności tej tabeli. Kolumny RMF/ZET/OLiA/OLiS/ESKA są tylko podglądem "
-                    "bieżących pozycji tego samego utworu; nie przeliczamy emisji na wynik Dashboardu. Status i ✓ są wspólne z kartą Utwór."
+                    "**Emisje/dzień łącznie** = suma odtworzeń ze wszystkich wybranych stacji podzielona przez liczbę dni — "
+                    "to NIE jest średnia na jedną stację. **Śr./grającą stację/dzień** dzieli dodatkowo przez liczbę stacji, które faktycznie zagrały utwór. "
+                    "**Zasięg stacji** = odsetek raportujących stacji z tego filtra, które zagrały utwór. Pozycje RMF/ZET/OLiA/OLiS/ESKA są tylko podglądem."
                 )
 
             with tab_track:
@@ -1391,13 +1525,18 @@ elif view_key == "airplay":
                 )
                 st.markdown(f"### {chosen['artist']} — {chosen['title']}")
                 spotify_url = spotify_search_url(str(chosen["artist"]), str(chosen["title"]))
-                d1, d2, d3, d4 = st.columns([1, 1, 1, 1.35])
-                d1.metric("Emisje", int(detail.get("total_spins") or 0))
-                d2.metric("Stacje", int(detail.get("stations_count") or 0))
-                d3.metric("Śr./dzień", f"{float(detail.get('total_spins') or 0) / period_days:.1f}")
-                d4.metric("Ostatnio", str(detail.get("last_play") or "—").replace("T", " "))
+                total_track_spins = int(detail.get("total_spins") or 0)
+                track_station_count = int(detail.get("stations_count") or 0)
+                track_reach = (100.0 * track_station_count / reporting_station_count) if reporting_station_count else None
+                d1, d2, d3, d4, d5 = st.columns([1, 1, 1, 1.25, 1.45])
+                d1.metric("Emisje", total_track_spins)
+                d2.metric("Stacje", track_station_count)
+                d3.metric("Zasięg stacji", f"{track_reach:.0f}%" if track_reach is not None else "—")
+                d4.metric("Emisje/dzień łącznie", f"{total_track_spins / period_days:.1f}")
+                d5.metric("Śr./grającą stację/dzień", f"{total_track_spins / period_days / max(1, track_station_count):.2f}")
+                st.caption(f"Ostatnia zapisana emisja: {str(detail.get('last_play') or '—').replace('T', ' ')}")
 
-                chart_match = df[df.song_id.astype(int) == chosen_song_id] if not df.empty else pd.DataFrame()
+                chart_match = chart_latest[chart_latest.song_id.astype(int) == chosen_song_id] if not chart_latest.empty else pd.DataFrame()
                 if not chart_match.empty:
                     chart_row = chart_match.iloc[0]
                     pos_bits = []
@@ -1407,7 +1546,7 @@ elif view_key == "airplay":
                             pos_bits.append(f"{src} #{pos}")
                     st.markdown("**Bieżące pozycje z notowań:** " + (" · ".join(pos_bits) if pos_bits else "brak w najnowszych notowaniach"))
                 else:
-                    st.caption("Ten utwór nie ma jeszcze zapisanej historii w źródłach notowań. To nie przeszkadza w śledzeniu jego emisji i nadaniu mu statusu.")
+                    st.caption("Brak tego utworu w najnowszych zapisanych notowaniach. Może nadal mieć starszą historię na karcie Utwór.")
 
                 act1, act2, act3 = st.columns(3)
                 with act1:
@@ -1502,10 +1641,67 @@ elif view_key == "airplay":
             )
             render_job_status_fragment("airplay", "airplay_backfill_v2")
 
+            st.markdown("#### Stacje bez użytecznych danych")
+            probe_date = min(default_end, date.today() - timedelta(days=1))
+            probe_expected = len(completed_windows_in_range(probe_date, probe_date))
+            probe_rows = airplay_station_coverage(all_station_ids, probe_date, probe_date) if all_station_ids else []
+            dead_rows = [
+                r for r in probe_rows
+                if probe_expected >= 12 and int(r.get("ok_windows") or 0) >= probe_expected and int(r.get("plays") or 0) == 0
+            ]
+            if dead_rows:
+                dead_df = pd.DataFrame(dead_rows)[["station_id", "name", "ok_windows", "zero_windows", "plays"]].rename(columns={
+                    "station_id": "ID", "name": "Stacja", "ok_windows": "Bloki OK", "zero_windows": "Puste bloki", "plays": "Emisje",
+                })
+                st.warning(
+                    f"{len(dead_rows)} stacji ma pełne {probe_expected} bloków za {probe_date}, ale 0 emisji. "
+                    "To zwykle oznacza, że odSluchane ich nie zlicza / nie ma użytecznej playlisty."
+                )
+                st.dataframe(dead_df, hide_index=True, use_container_width=True)
+                if st.button(
+                    f"Wyłącz te stacje z Emisji ({len(dead_rows)})",
+                    disabled=running,
+                    use_container_width=True,
+                    key="airplay_disable_dead",
+                ):
+                    set_airplay_station_active([int(r["station_id"]) for r in dead_rows], False)
+                    st.success("Wyłączono stacje bez danych. Ich stare dane nie zostały usunięte.")
+                    st.rerun()
+            else:
+                st.caption(f"Brak stacji spełniających bezpieczne kryterium: pełna doba ({probe_expected} bloków) i 0 emisji za {probe_date}.")
+
+            inactive = [s for s in all_known_stations if not bool(s.get("active"))]
+            if inactive:
+                inactive_map = {int(x["station_id"]): str(x["name"]) for x in inactive}
+                to_enable = st.multiselect(
+                    "Wyłączone stacje",
+                    list(inactive_map),
+                    format_func=lambda sid: inactive_map.get(int(sid), str(sid)),
+                    key="airplay_reenable_stations",
+                )
+                if st.button("Włącz zaznaczone ponownie", disabled=running or not to_enable, use_container_width=True, key="airplay_reenable_btn"):
+                    set_airplay_station_active([int(x) for x in to_enable], True)
+                    st.rerun()
+
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
     st.caption("Pobieranie działa w tle i można je zatrzymać. OLiA/OLiS wróciły do starszego, sprawdzonego mechanizmu renderowania/eksportu; UI pozostaje responsywne.")
     running = active_job() is not None
+
+    with st.expander("🗃️ Co jest już zapisane w bazie notowań", expanded=False):
+        archive_rows = chart_archive_summary()
+        if archive_rows:
+            archive_df = pd.DataFrame(archive_rows).rename(columns={
+                "source": "Źródło", "issues": "Notowania", "first_date": "Najstarsze",
+                "last_date": "Najnowsze", "entries": "Pozycje", "songs": "Różne utwory",
+            })
+            st.dataframe(archive_df, hide_index=True, use_container_width=True)
+            st.caption(
+                "Ta tabela pokazuje to, co fizycznie znajduje się w chart_issues/chart_entries. Dokładne luki da się wskazać tylko tam, "
+                "gdzie źródło ma jednoznaczną kadencję/klucze archiwum; dla nowych backfilli pełny log 0.3.11 zapisuje każdą udaną i nieudaną próbę."
+            )
+        else:
+            st.caption("Archiwum notowań jest puste.")
 
     st.markdown("### Bieżące notowania")
     if st.button("Pobierz wszystkie automatyczne źródła", disabled=running, type="primary", use_container_width=True):
@@ -1647,11 +1843,16 @@ else:
     st.markdown(
         """
 ### Wskaźniki
-**Familiarity** łączy bieżącą siłę pozycji, peak, liczbę tygodni na liście i liczbę tygodni w Top 10. Źródła: OLiA 30% / RMF 25% / ZET 20% / OLiS 15% / ESKA 10%.
+**Familiarity** jest nadal wskaźnikiem *chartowym*. Dla każdego źródła składa się z: 40% bieżącej siły pozycji (z wygaszaniem po zejściu z listy), 20% najlepszego peaku, 25% długości obecności i 15% liczby tygodni w Top 10. Następnie łączymy źródła wagami: OLiA 30% / RMF 25% / ZET 20% / OLiS 15% / ESKA 10%. Brak utworu w danym źródle daje w tej części 0 — dlatego Familiarity może spaść mimo dalszego grania w eterze.
 
-**Momentum** patrzy na zmianę znormalizowanej siły pozycji w ostatnich czterech tygodniach. 50% ≈ stabilnie, >65% = wyraźny wzrost, <40% = spadek.
+**Momentum** patrzy na zmianę znormalizowanej siły pozycji między maksymalnie czterema ostatnimi tygodniowymi punktami, w których utwór był obecny w danym źródle. 50% ≈ stabilnie, >65% = wyraźny wzrost, <40% = spadek. Emisje radiowe nie są tu jeszcze mieszane z trendem list przebojów.
 
-**Format Fit** ma większy nacisk na RMF i ZET (40/35), bo odpowiada raczej na pytanie „czy ten hit przypomina nasz format?” niż „czy jest popularny wszędzie?”.
+**Format Fit** od 0.3.12 nie używa bieżącej pozycji z wygaszaniem. To historyczny proxy dopasowania do profilu: w każdym źródle 55% peak, 25% długość obecności i 20% tygodnie w Top 10, a źródła mają wagi RMF 40 / ZET 35 / OLiA 15 / OLiS 5 / ESKA 5. Dzięki temu utwór nie spada z np. 80% do 3% tylko dlatego, że właśnie zszedł z listy.
+
+**Radio Presence 7d** jest osobnym sygnałem z Emisji: procent raportujących stacji odSluchane.eu, które zagrały utwór przynajmniej raz w ostatnich 7 dniach. Nie podbija automatycznie Familiarity ani Momentum — najpierw chcemy zebrać stabilne pokrycie i dopiero potem ewentualnie skalibrować wspólny wynik.
+
+### Co znaczą liczby w Emisjach
+**Emisje** = wszystkie zapisane odtworzenia ze wszystkich wybranych stacji w wybranym okresie. **Emisje/dzień łącznie** = ta suma / liczba dni, więc np. 17 oznacza 17 odtworzeń dziennie łącznie we wszystkich wybranych stacjach, a nie 17 na każdej stacji. **Śr./grającą stację/dzień** dzieli jeszcze przez liczbę stacji, które faktycznie zagrały utwór. **Zasięg stacji** = odsetek raportujących stacji z filtra, które zagrały dany utwór.
 
 ### Bieżąca pozycja a historia
 Kolumny `*_pos` pokazują wyłącznie najnowsze **poprawnie zapisane** notowanie danego źródła. Jeżeli utworu w nim nie ma, widzisz `—`. Dashboard osobno pokazuje, czy każde źródło zostało faktycznie sprawdzone dzisiaj; nieudane pobranie nie podmienia ostatnich dobrych danych. Starsze notowania pozostają w bazie i nadal są używane do obliczania tygodni, peaków, momentum i Familiarity.
@@ -1663,7 +1864,7 @@ Worker sprawdza automatyczne źródła dwa razy dziennie, o 07:30 i 20:30 czasu 
 RMF ma pełny backfill po numerach notowań. UK Official Singles Chart i Billboard Hot 100 mają tygodniowy backfill po stabilnych adresach archiwalnych. `weeks/peak` dla UK i Billboard bierzemy z oficjalnych bieżących notowań, a backfill buduje przede wszystkim historię pozycji do Momentum. OLiA/OLiS mają eksperymentalny backfill przez przycisk poprzedniego tygodnia i oficjalny eksport CSV; nieudane tygodnie są pomijane. ZET ma automatyczny bieżący collector oraz eksperymentalny backfill po publicznych adresach archiwalnych. ESKA nadal wymaga osobnego mechanizmu archiwum.
 
 ### Wydajność
-SQLite zostaje. Przy tej skali danych nie jest wąskim gardłem; dashboard cache'uje kosztowne agregacje do czasu zmiany bazy, a tabele nie używają już Pandas Styler.
+SQLite zostaje. Przy tej skali danych nie jest wąskim gardłem. Kosztowne score'y są cache'owane i od 0.3.12 nie są w ogóle ładowane przy wejściu do Emisji / Dane / Import / Metodologia; Emisje pobierają tylko lekką tabelę bieżących pozycji. Tabele nie używają Pandas Styler.
 
 ### Spotify
 Aplikacja tworzy link do wyszukiwania `wykonawca + tytuł` w Spotify. Podgląd w tabeli korzysta z 30-sekundowego preview Apple/iTunes i ma własny pasek z przewijaniem. Pełne odtwarzanie wewnątrz aplikacji wymagałoby osobnej integracji streamingowej (np. Spotify Web Playback SDK + autoryzacja).

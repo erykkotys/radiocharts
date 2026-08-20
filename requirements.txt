@@ -9,5 +9,3 @@ PyYAML==6.0.2
 filelock==3.18.0
 playwright==1.54.0
 streamlit-aggrid==1.2.1.post2
-
-streamlit-searchbox==0.1.24

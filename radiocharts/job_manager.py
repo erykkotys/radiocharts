@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from radiocharts.db import DB_PATH
@@ -17,6 +18,10 @@ JOB_DIR.mkdir(parents=True, exist_ok=True)
 
 def _path(job_id: str) -> Path:
     return JOB_DIR / f"{job_id}.json"
+
+
+def log_path(job_id: str) -> Path:
+    return JOB_DIR / f"{job_id}.log"
 
 
 def _read(path: Path) -> dict:
@@ -30,6 +35,27 @@ def _write(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def read_job_log(job_id: str, *, max_bytes: int | None = None) -> str:
+    """Read a persisted human-readable job log.
+
+    ``max_bytes`` reads only the tail, which keeps the Streamlit status fragment
+    cheap even for long backfills. The complete file remains on disk.
+    """
+    path = log_path(job_id)
+    if not path.exists():
+        return ""
+    if not max_bytes or path.stat().st_size <= max_bytes:
+        return path.read_text(encoding="utf-8", errors="replace")
+    with path.open("rb") as fh:
+        fh.seek(-max_bytes, os.SEEK_END)
+        data = fh.read()
+    text = data.decode("utf-8", errors="replace")
+    # The seek can start in the middle of a line; omit that partial line.
+    if "\n" in text:
+        text = text.split("\n", 1)[1]
+    return "… wcześniejsze wpisy są w pełnym pliku .log …\n" + text
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -76,6 +102,12 @@ def start_job(kind: str, source: str | None = None, count: int | None = None, pa
     if params:
         cmd += ["--params-json", json.dumps(params, separators=(",", ":"))]
 
+    job_log = log_path(job_id)
+    created_stamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    job_log.write_text(
+        f"{created_stamp} [MANAGER] utworzono job {job_id} kind={kind}\n",
+        encoding="utf-8",
+    )
     data = {
         "job_id": job_id,
         "kind": kind,
@@ -89,16 +121,23 @@ def start_job(kind: str, source: str | None = None, count: int | None = None, pa
         "total": 0,
         "messages": [],
         "params": params or {},
+        "log_file": job_log.name,
+        "log_path": str(job_log),
     }
     path = _path(job_id)
     _write(path, data)
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        cwd=str(Path(__file__).resolve().parent.parent),
-    )
+
+    # Keep stdout/stderr as a last-resort diagnostic channel. The runner also
+    # appends structured entries to the same file, so even import/startup errors
+    # are not silently lost in /dev/null.
+    with job_log.open("a", encoding="utf-8") as log_stream:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
     data["pid"] = proc.pid
     data["state"] = "running"
     _write(path, data)
@@ -119,8 +158,10 @@ def stop_job(job_id: str) -> dict:
         try:
             os.killpg(int(child_pid), signal.SIGTERM)
         except Exception:
-            try: os.kill(int(child_pid), signal.SIGTERM)
-            except Exception: pass
+            try:
+                os.kill(int(child_pid), signal.SIGTERM)
+            except Exception:
+                pass
     if pid:
         try:
             os.killpg(int(pid), signal.SIGTERM)
