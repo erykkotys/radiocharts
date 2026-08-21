@@ -3,10 +3,11 @@ from pathlib import Path
 APP = (Path(__file__).resolve().parents[1] / "radiocharts" / "app.py").read_text(encoding="utf-8")
 
 
-def test_details_column_uses_click_handler_not_raw_html_renderer():
+def test_details_column_routes_same_tab_via_hidden_grid_event():
     assert 'DETAILS_LABEL_FORMATTER' in APP
-    assert 'field === \'details\'' in APP
-    assert 'OPEN_LINK_RENDERER' not in APP
+    assert "params.node.setDataValue('_open_request', sid)" in APP
+    assert "window.location.origin + '/?view=song&song='" in APP
+    assert 'navigate_to_song(int(requested[-1]))' in APP
 
 
 def test_dashboard_has_normalized_search_before_grid():

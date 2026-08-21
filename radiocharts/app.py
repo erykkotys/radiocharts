@@ -15,6 +15,7 @@ import streamlit.components.v1 as components
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 from radiocharts.build_info import BUILD_DATE, display_version
+from radiocharts.freshness import source_cadence_info
 from radiocharts.airplay import completed_windows_in_range
 from radiocharts.db import (
     airplay_coverage, airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
@@ -68,9 +69,12 @@ st.markdown(
       .rc-app-title { display:flex; align-items:center; gap:.42rem; font-size:1.48rem; font-weight:760; line-height:1.1; margin:0 0 .12rem; min-height:1.75rem; }
       .rc-app-subtitle { color:#9aa3af; font-size:.78rem; margin-bottom:.35rem; }
       .rc-build-badge {
-        position:fixed; top:.38rem; right:4.2rem; z-index:100000;
-        color:#9aa3af; background:rgba(27,32,40,.92); border:1px solid rgba(120,130,145,.28);
-        border-radius:5px; padding:.18rem .42rem; font-size:.7rem; line-height:1.15;
+        /* Small release marker immediately to the left of Streamlit's ⋮ menu. */
+        position:fixed; top:.56rem; right:3.25rem; z-index:100000;
+        color:#aeb6c2; background:rgba(27,32,40,.86);
+        border-radius:4px; padding:.10rem .28rem;
+        font-size:.68rem; font-weight:550; line-height:1.05; white-space:nowrap;
+        pointer-events:none;
       }
       .rc-tabs { display:flex; gap:0; border-bottom:1px solid #4a5260; margin:0 0 .6rem 0; overflow-x:auto; }
       .rc-tabs a { color:#cfd5df; text-decoration:none; padding:.43rem .78rem; border:1px solid transparent; border-bottom:none; border-radius:6px 6px 0 0; white-space:nowrap; font-size:.9rem; }
@@ -82,7 +86,7 @@ st.markdown(
       .rc-metric-value { color:#f7f8fa; font-size:1.28rem; font-weight:700; line-height:1.1; margin-top:.05rem; }
       .rc-song-title { font-size:1.18rem; font-weight:720; line-height:1.2; margin:.05rem 0 .08rem; }
       .rc-song-meta { color:#9fa8b5; font-size:.78rem; }
-      @media (max-width: 900px) {
+      @media (max-width: 640px) {
         .rc-build-badge { display:none; }
         .rc-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
       }
@@ -436,66 +440,6 @@ def filter_song_rows(frame: pd.DataFrame, query: str) -> pd.DataFrame:
     return frame[mask]
 
 
-def _latest_weekday_on_or_before(day: date, weekday: int) -> date:
-    return day - timedelta(days=(day.weekday() - int(weekday)) % 7)
-
-
-def _latest_business_day(day: date) -> date:
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day
-
-
-def source_cadence_info(source: str, when: date | datetime | None = None) -> tuple[str, date]:
-    """Human cadence label plus a conservative newest-issue expectation.
-
-    The expected date takes typical publication time into account so a morning
-    refresh does not mark an evening chart as stale before today's edition exists.
-    """
-    tz = ZoneInfo("Europe/Warsaw")
-    if when is None:
-        now = datetime.now(tz)
-    elif isinstance(when, datetime):
-        now = when.astimezone(tz) if when.tzinfo else when.replace(tzinfo=tz)
-    else:
-        now = datetime.combine(when, datetime.max.time()).replace(tzinfo=tz)
-    today = now.date()
-
-    def previous_business(d: date) -> date:
-        return _latest_business_day(d - timedelta(days=1))
-
-    source = str(source).upper()
-    if source == "RMF":
-        expected = _latest_business_day(today)
-        if today.weekday() < 5 and now.hour < 20:
-            expected = previous_business(today)
-        return "pn–pt · ok. 19:00", expected
-    if source == "ZET":
-        expected = today if now.hour >= 20 else today - timedelta(days=1)
-        return "codziennie · wieczorem", expected
-    if source == "OLIA":
-        base = today - timedelta(days=1) if today.weekday() == 4 else today
-        return "tygodniowo · okres do pt", _latest_weekday_on_or_before(base, 4)
-    if source == "OLIS":
-        base = today - timedelta(days=1) if today.weekday() == 3 else today
-        return "tygodniowo · okres do czw", _latest_weekday_on_or_before(base, 3)
-    if source == "ESKA":
-        expected = _latest_business_day(today)
-        if today.weekday() < 5 and now.hour < 19:
-            expected = previous_business(today)
-        return "pn–pt · ok. 18:00", expected
-    if source == "UK":
-        # Official Charts week ends on Thursday; Friday's new edition is not
-        # assumed available in the morning.
-        base = today
-        if today.weekday() == 4 and now.hour < 18:
-            base = today - timedelta(days=7)
-        return "tygodniowo · okres do czw", _latest_weekday_on_or_before(base, 3)
-    if source == "BILLBOARD":
-        return "tygodniowo · data sobotnia", _latest_weekday_on_or_before(today, 5)
-    return "—", today
-
-
 def _accent_alias_tokens(text: str) -> str:
     """Short ASCII aliases so native selectbox search finds Polish spelling."""
     aliases: list[str] = []
@@ -617,14 +561,14 @@ function(params) {
   if (field === 'details') {
     const sid = String(row.song_id || '');
     if (!sid) return;
-    const url = '?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
-    try {
-      if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
-        host.open(url, '_blank', 'noopener,noreferrer');
-      } else {
-        host.location.assign(url);
-      }
-    } catch(e) {}
+    const url = window.location.origin + '/?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
+      try { window.open(url, '_blank', 'noopener,noreferrer'); } catch(e) {}
+      return;
+    }
+    // Same-tab navigation is returned to Streamlit through a hidden editable
+    // field. This avoids trying to navigate the component iframe itself.
+    try { params.node.setDataValue('_open_request', sid); } catch(e) {}
     return;
   }
 
@@ -884,6 +828,8 @@ def render_song_grid(
         return show
     if "preview" not in show.columns:
         show["preview"] = "▶"
+    if "details" in show.columns:
+        show["_open_request"] = ""
 
     gb = GridOptionsBuilder.from_dataframe(show)
     gb.configure_default_column(resizable=True, sortable=True, filter=True, editable=False)
@@ -892,6 +838,8 @@ def render_song_grid(
 
     if "song_id" in show.columns:
         gb.configure_column("song_id", hide=True)
+    if "_open_request" in show.columns:
+        gb.configure_column("_open_request", hide=True, editable=False)
     pin_identity = source_layout in {"auto", "compact", "airplay"}
     if "artist" in show.columns:
         gb.configure_column("artist", "Wykonawca", minWidth=170 if pin_identity else 190, width=205 if pin_identity else 220, pinned="left" if pin_identity else None)
@@ -1037,6 +985,14 @@ def render_song_grid(
         except Exception:
             edited = show
     edited = pd.DataFrame(edited)
+
+    if "_open_request" in edited.columns:
+        requested = [str(x).strip() for x in edited["_open_request"].tolist() if str(x).strip()]
+        if requested:
+            try:
+                navigate_to_song(int(requested[-1]))
+            except (TypeError, ValueError):
+                pass
 
     if editable_state and {"song_id", "heard", "status"}.issubset(edited.columns) and not original.empty:
         before = original.set_index("song_id")
@@ -1272,7 +1228,7 @@ if view_key == "dashboard":
             st.success("Wszystkie źródła zostały sprawdzone dzisiaj.")
         with st.expander("Stan źródeł / świeżość danych", expanded=bool(health_problems)):
             st.dataframe(health_df, hide_index=True, use_container_width=True, height=285)
-            st.caption("Publikacja = typowa kadencja źródła. „Powinno być ≥” to najstarsza data, którą uznajemy dziś za świeżą; nowsza lub przyszłościowo datowana lista też jest poprawna. Status pobrania i data samego notowania są rozdzielone.")
+            st.caption("Publikacja = typowa kadencja źródła. „Powinno być ≥” jest liczone w tej samej semantyce daty, którą zwraca dane źródło (np. koniec okresu UK/OLiS, sobotnia data wydania Billboard; ESKA = dzień odczytu). Status pobrania i data notowania są rozdzielone.")
 
         period_map = {
             "1 tydz.": 7,
@@ -1951,7 +1907,7 @@ elif view_key == "data":
     health_df, health_problems = source_health_frame()
     with st.expander("Stan źródeł / świeżość danych", expanded=bool(health_problems)):
         st.dataframe(health_df, hide_index=True, use_container_width=True, height=285)
-        st.caption("„Publikacja” opisuje typową kadencję źródła. Kolumna „Powinno być ≥” pozwala od razu zobaczyć, czy zapisane najnowsze notowanie jest aktualne.")
+        st.caption("„Publikacja” opisuje typową kadencję źródła. „Powinno być ≥” używa semantyki daty danego źródła (okres / issue date / dzień odczytu), żeby nie porównywać różnych typów dat jak zwykłych dat publikacji.")
 
     with st.expander("🗃️ Co jest już zapisane w bazie notowań", expanded=False):
         archive_rows = chart_archive_summary()
