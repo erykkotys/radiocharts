@@ -95,6 +95,37 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# The Streamlit header forms its own stacking context. A fixed element rendered
+# from the main app can therefore sit *behind* the header even with a huge
+# z-index. Render the release marker as a pseudo-element of the header itself,
+# so it is guaranteed to be in the same top layer as the ⋮ menu.
+_rc_version_css = display_version().replace("\\", "\\\\").replace('"', '\\"')
+st.markdown(
+    f"""
+    <style>
+      [data-testid="stHeader"] {{ position: relative !important; }}
+      [data-testid="stHeader"]::after {{
+        content: "{_rc_version_css}";
+        position: fixed;
+        top: .72rem;
+        right: 3.35rem;
+        z-index: 2147483647;
+        color: #aeb6c2;
+        background: rgba(27,32,40,.94);
+        border: 1px solid rgba(174,182,194,.15);
+        border-radius: 4px;
+        padding: .10rem .30rem;
+        font-size: .68rem;
+        font-weight: 550;
+        line-height: 1.05;
+        white-space: nowrap;
+        pointer-events: none;
+      }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 init_db()
 
 
@@ -387,13 +418,6 @@ def render_nav_tabs(current: str) -> None:
 
 st.markdown('<div class="rc-app-title">📻 <span>RadioCharts Research</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="rc-app-subtitle">Familiarity, momentum i radio presence · wsparcie odsłuchu i ręcznej decyzji</div>', unsafe_allow_html=True)
-_build_tip = f" · {BUILD_DATE}" if BUILD_DATE != "unknown" else ""
-st.markdown(
-    f'<div class="rc-build-badge" title="Build{html.escape(_build_tip)}">{html.escape(display_version())}</div>',
-    unsafe_allow_html=True,
-)
-
-
 
 STATUSES = [
     "Nie słuchałem", "Ignore", "Watch", "Candidate", "Current", "Current Familiar", "Recurrent",
