@@ -716,6 +716,57 @@ def connect():
         con.close()
 
 
+def _purge_eska_jingles(con: sqlite3.Connection) -> dict:
+    """Delete RDS/jingle rows where artist or title contains the standalone token ``eska``.
+
+    We intentionally match the normalized *word* rather than substring, so names
+    such as ``Kreska`` are not removed. Window play_count is repaired only for
+    affected 2h windows.
+    """
+    token_sql = "(" \
+        "artist_key='eska' OR artist_key LIKE 'eska %' OR artist_key LIKE '% eska' OR artist_key LIKE '% eska %' " \
+        "OR title_key='eska' OR title_key LIKE 'eska %' OR title_key LIKE '% eska' OR title_key LIKE '% eska %'" \
+        ")"
+    con.execute("DROP TABLE IF EXISTS temp._rc_eska_windows")
+    con.execute(
+        f"""CREATE TEMP TABLE _rc_eska_windows AS
+            SELECT DISTINCT station_id,substr(played_at,1,10) AS play_date,
+                   CAST(CAST(substr(played_at,12,2) AS INTEGER)/2 AS INTEGER)*2 AS start_hour
+            FROM airplay_plays WHERE {token_sql}"""
+    )
+    plays_before = int(con.execute(f"SELECT COUNT(*) FROM airplay_plays WHERE {token_sql}").fetchone()[0] or 0)
+    con.execute(f"DELETE FROM airplay_plays WHERE {token_sql}")
+
+    # Recalculate only windows touched by the purge so diagnostics stay honest.
+    con.execute(
+        """UPDATE airplay_windows
+           SET play_count=(
+             SELECT COUNT(*) FROM airplay_plays p
+             WHERE p.station_id=airplay_windows.station_id
+               AND substr(p.played_at,1,10)=airplay_windows.play_date
+               AND CAST(CAST(substr(p.played_at,12,2) AS INTEGER)/2 AS INTEGER)*2=airplay_windows.start_hour
+           )
+           WHERE EXISTS (
+             SELECT 1 FROM _rc_eska_windows x
+             WHERE x.station_id=airplay_windows.station_id
+               AND x.play_date=airplay_windows.play_date
+               AND x.start_hour=airplay_windows.start_hour
+           )"""
+    )
+    songs_before = int(con.execute(
+        """SELECT COUNT(*) FROM songs
+           WHERE artist_key='eska' OR artist_key LIKE 'eska %' OR artist_key LIKE '% eska' OR artist_key LIKE '% eska %'
+              OR title_key='eska' OR title_key LIKE 'eska %' OR title_key LIKE '% eska' OR title_key LIKE '% eska %'"""
+    ).fetchone()[0] or 0)
+    con.execute(
+        """DELETE FROM songs
+           WHERE artist_key='eska' OR artist_key LIKE 'eska %' OR artist_key LIKE '% eska' OR artist_key LIKE '% eska %'
+              OR title_key='eska' OR title_key LIKE 'eska %' OR title_key LIKE '% eska' OR title_key LIKE '% eska %'"""
+    )
+    con.execute("DROP TABLE IF EXISTS temp._rc_eska_windows")
+    return {"plays": plays_before, "songs": songs_before}
+
+
 def init_db() -> None:
     global _INITIALIZED_DB_PATH
     current_path = str(DB_PATH)
@@ -732,6 +783,7 @@ def init_db() -> None:
         "airplay_chart_title_relink_v2",
         "status_taxonomy_v2",
         "airplay_dead_station_cleanup_v1",
+        "airplay_eska_jingle_cleanup_v1",
     }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
         # Hot-path for a running web/worker process. Migrations are checked once
@@ -863,6 +915,14 @@ def init_db() -> None:
                         )
                         con.execute(
                             "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_dead_station_cleanup_v1','done')"
+                        )
+
+                    eska_cleanup = con.execute("SELECT value FROM app_meta WHERE key='airplay_eska_jingle_cleanup_v1'").fetchone()
+                    if not eska_cleanup:
+                        removed = _purge_eska_jingles(con)
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_eska_jingle_cleanup_v1',?)",
+                            (f"plays={removed['plays']};songs={removed['songs']}",),
                         )
 
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
@@ -1801,8 +1861,12 @@ def store_airplay_window(
             played_at = str(play.get("played_at") or "").strip()
             if not artist or not title or not played_at:
                 continue
-            artist_key = artist_anchor(artist) or normalize(artist)
-            title_key = normalize(title)
+            artist_norm = normalize(artist)
+            title_norm = normalize(title)
+            if "eska" in artist_norm.split() or "eska" in title_norm.split():
+                continue
+            artist_key = artist_anchor(artist) or artist_norm
+            title_key = title_norm
             if not title_key:
                 continue
             song_id = _match_song_id(con, artist, title) or get_or_create_song(con, artist, title)

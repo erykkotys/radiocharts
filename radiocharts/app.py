@@ -37,7 +37,7 @@ st.markdown(
       html { font-size: 16px; }
       [data-testid="stAppViewContainer"] { background: #1b2028; }
       .block-container, [data-testid="stMainBlockContainer"] {
-        padding-top: 3.35rem !important;
+        padding-top: .85rem !important;
         padding-bottom: 1.2rem !important;
         max-width: 100% !important;
       }
@@ -66,8 +66,8 @@ st.markdown(
       [data-testid="stVerticalBlock"] { gap: .58rem !important; }
       [data-testid="stHorizontalBlock"] { gap: .6rem !important; }
       iframe[title="st.iframe"] { min-height: 0 !important; }
-      .rc-app-title { display:flex; align-items:center; gap:.42rem; font-size:1.48rem; font-weight:760; line-height:1.1; margin:0 0 .12rem; min-height:1.75rem; }
-      .rc-app-subtitle { color:#9aa3af; font-size:.78rem; margin-bottom:.35rem; }
+      .rc-app-title { display:flex; align-items:center; gap:.46rem; font-size:1.92rem; font-weight:760; line-height:1.05; margin:0 0 .06rem; min-height:2.05rem; }
+      .rc-app-subtitle { color:#9aa3af; font-size:.76rem; margin-bottom:.24rem; }
       .rc-build-badge {
         /* Small release marker immediately to the left of Streamlit's ⋮ menu. */
         position:fixed; top:.56rem; right:3.25rem; z-index:100000;
@@ -287,41 +287,75 @@ def render_airplay_range_picker(
     earliest: date | None = None,
     default_preset: str = "Ostatni tydzień",
 ) -> tuple[date, date]:
-    """Compact preset dropdown; exact date picker appears only for custom range."""
-    try:
-        default_idx = AIRPLAY_QUICK_RANGES.index(default_preset)
-    except ValueError:
-        default_idx = 0
-    c1, c2 = st.columns([1.05, 2.2])
-    preset = c1.selectbox(
-        "Zakres dat",
-        AIRPLAY_QUICK_RANGES,
-        index=default_idx,
-        key=f"{key_prefix}_preset",
-    )
-    if preset == "Własny zakres":
-        default_start, _ = airplay_quick_range("Ostatni tydzień", default_end, earliest)
-        selected = c2.date_input(
-            "Daty",
-            value=(default_start, default_end),
-            key=f"{key_prefix}_custom",
-            help="Zakres jest inkluzywny.",
-        )
-        if isinstance(selected, (list, tuple)) and len(selected) == 2:
-            start, end = selected
+    """Preset dropdown + always-visible exact dates. Manual edits switch preset to Custom."""
+    preset_key = f"{key_prefix}_preset"
+    dates_key = f"{key_prefix}_dates"
+    anchor_key = f"{key_prefix}_anchor"
+
+    if default_preset not in AIRPLAY_QUICK_RANGES:
+        default_preset = "Ostatni tydzień"
+    if preset_key not in st.session_state:
+        st.session_state[preset_key] = default_preset
+    if dates_key not in st.session_state:
+        st.session_state[dates_key] = airplay_quick_range(default_preset, default_end, earliest)
+
+    # If new airplay arrived and the user is still on a quick preset, move the
+    # range forward with the data. A manually edited Custom range stays put.
+    previous_anchor = st.session_state.get(anchor_key)
+    if previous_anchor != default_end.isoformat():
+        if st.session_state.get(preset_key) != "Własny zakres":
+            st.session_state[dates_key] = airplay_quick_range(str(st.session_state[preset_key]), default_end, earliest)
+        st.session_state[anchor_key] = default_end.isoformat()
+
+    def _preset_changed() -> None:
+        preset = str(st.session_state.get(preset_key) or default_preset)
+        if preset != "Własny zakres":
+            st.session_state[dates_key] = airplay_quick_range(preset, default_end, earliest)
+
+    def _dates_changed() -> None:
+        value = st.session_state.get(dates_key)
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            start, end = value
+        elif isinstance(value, date):
+            start = end = value
         else:
-            start = end = selected if isinstance(selected, date) else default_end
+            return
         if end < start:
             start, end = end, start
-        if earliest is not None and start < earliest:
-            start = earliest
-        return start, end
-    start, end = airplay_quick_range(preset, default_end, earliest)
-    c2.markdown(
-        f'<div style="padding-top:1.45rem;color:#aeb6c2;font-size:.78rem">'
-        f'{html.escape(start.isoformat())} → {html.escape(end.isoformat())}</div>',
-        unsafe_allow_html=True,
+        preset = str(st.session_state.get(preset_key) or default_preset)
+        if preset != "Własny zakres":
+            expected = airplay_quick_range(preset, default_end, earliest)
+            if (start, end) != expected:
+                st.session_state[preset_key] = "Własny zakres"
+
+    c1, c2 = st.columns([1.05, 2.2])
+    c1.selectbox(
+        "Zakres dat",
+        AIRPLAY_QUICK_RANGES,
+        key=preset_key,
+        on_change=_preset_changed,
+        help="Preset tylko ustawia daty po prawej. Możesz je potem ręcznie zmienić — zakres automatycznie przejdzie na Własny zakres.",
     )
+    selected = c2.date_input(
+        "Daty",
+        key=dates_key,
+        min_value=earliest,
+        max_value=default_end,
+        on_change=_dates_changed,
+        help="Zakres jest inkluzywny i zawsze można go edytować ręcznie.",
+    )
+    if isinstance(selected, (list, tuple)) and len(selected) == 2:
+        start, end = selected
+    else:
+        start = end = selected if isinstance(selected, date) else default_end
+    if end < start:
+        start, end = end, start
+    if earliest is not None and start < earliest:
+        start = earliest
+    if end > default_end:
+        end = default_end
+    if start > end:
+        start = end
     return start, end
 
 
@@ -348,6 +382,33 @@ def cached_song_score(revision: str, song_id: int) -> pd.DataFrame:
     return compute_scores(song_ids=[int(song_id)])
 
 
+@st.cache_resource(show_spinner=False, max_entries=48)
+def cached_basic_song_metrics(chart_rev: str, air_rev: str, song_key: tuple[int, ...]) -> pd.DataFrame:
+    """Standard table metrics for a bounded set of songs.
+
+    Keeps Emisje fast: score only rows that are actually displayed, while
+    Zasięg 7d is one cached aggregate over all active/reporting stations.
+    """
+    ids = sorted({int(x) for x in song_key})
+    base = pd.DataFrame({"song_id": ids})
+    if not ids:
+        return base
+    scored = compute_scores(song_ids=ids)
+    score_cols = [
+        "song_id", "familiarity", "momentum",
+        "RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos",
+    ]
+    if not scored.empty:
+        base = base.merge(scored[[c for c in score_cols if c in scored.columns]].drop_duplicates("song_id"), on="song_id", how="left")
+    presence = pd.DataFrame(cached_airplay_presence(air_rev, 7).get("rows") or [])
+    if not presence.empty:
+        keep = [c for c in ["song_id", "radio_reach"] if c in presence.columns]
+        base = base.merge(presence[keep].drop_duplicates("song_id"), on="song_id", how="left")
+    core = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in base.columns]
+    base["avg_position"] = base[core].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if core else float("nan")
+    return base
+
+
 @st.cache_resource(show_spinner=False, max_entries=256)
 def cached_song_history(revision: str, song_id: int) -> pd.DataFrame:
     return song_history(int(song_id))
@@ -371,6 +432,11 @@ def cached_airplay_track_detail(revision: str, station_key: tuple[int, ...], sta
 @st.cache_resource(show_spinner=False, max_entries=8)
 def cached_airplay_presence(revision: str, days: int = 7) -> dict:
     return airplay_presence_summary(days=days)
+
+
+@st.cache_resource(show_spinner=False, max_entries=48)
+def cached_airplay_presence_at(revision: str, days: int, end_iso: str) -> dict:
+    return airplay_presence_summary(days=days, end_date=end_iso)
 
 
 @st.cache_resource(show_spinner=False, max_entries=128)
@@ -827,7 +893,7 @@ def install_client_helpers() -> None:
             wrap = doc.createElement('div');
             wrap.id = '__rcFloatingPlayer';
             wrap.style.cssText = [
-              'display:none','position:fixed','left:50%','bottom:24px','transform:translateX(-50%)',
+              'display:none','position:fixed','left:50%','bottom:125px','transform:translateX(-50%)',
               'z-index:2147483000','width:min(760px,calc(100vw - 36px))','box-sizing:border-box',
               'background:rgba(22,27,35,.985)','border:1px solid rgba(160,175,195,.42)',
               'border-radius:11px','box-shadow:0 -8px 28px rgba(0,0,0,.44)',
@@ -911,7 +977,7 @@ def install_client_helpers() -> None:
                 }
                 audio.src = best.previewUrl;
                 audio.load();
-                player.querySelector('#__rcPlayerStatus').textContent = '30-sekundowy podgląd Apple/iTunes · możesz przewijać suwakiem';
+                player.querySelector('#__rcPlayerStatus').textContent = '';
                 const promise = audio.play();
                 if (promise && promise.catch) promise.catch(() => {});
               } finally {
@@ -1133,8 +1199,23 @@ def render_song_grid(
     if "spins" in show.columns:
         gb.configure_column("spins", "Emisje", width=92, minWidth=84, pinned="left" if source_layout == "airplay" else None)
     if "stations_count" in show.columns:
-        station_label = f"Stacje ({int(station_total)})" if station_total is not None else "Stacje"
-        gb.configure_column("stations_count", station_label, width=92, minWidth=84)
+        if station_total is not None and int(station_total) > 0:
+            denominator = int(station_total)
+            station_formatter = JsCode(f"""
+            function(params) {{
+              const v = Number(params.value);
+              if (!isFinite(v)) return '-';
+              const pct = Math.min(100, Math.max(0, 100 * v / {denominator}));
+              return Math.round(pct) + '% (' + Math.round(v) + ')';
+            }}
+            """)
+            gb.configure_column(
+                "stations_count", "Stacje", width=108, minWidth=100,
+                valueFormatter=station_formatter,
+                headerTooltip="Zasięg w wybranym okresie; procent z raportujących stacji, w nawiasie liczba stacji, które zagrały utwór.",
+            )
+        else:
+            gb.configure_column("stations_count", "Stacje", width=92, minWidth=84)
     if "avg_per_day" in show.columns:
         gb.configure_column("avg_per_day", "Emisje/dzień łącznie", width=150, minWidth=138)
     if "avg_station_day" in show.columns:
@@ -1353,6 +1434,47 @@ def render_airplay_data_management(running: bool) -> None:
         st.rerun()
     st.caption("Pełna zakończona doba jednej stacji = 12 bloków po 2h. Backfill pobiera tylko zakończone okna i nie powinien dublować zapisanych emisji.")
     render_job_status_fragment("airplay", "data_airplay")
+
+    with st.expander("🔎 Co dokładnie zostało pobrane — pokrycie per stacja", expanded=False):
+        first_date_raw = cov.get("first_date")
+        try:
+            coverage_earliest = date.fromisoformat(str(first_date_raw)) if first_date_raw else last_date
+        except Exception:
+            coverage_earliest = last_date
+        cov_start, cov_end = render_airplay_range_picker(
+            key_prefix="data_airplay_coverage_range",
+            default_end=last_date,
+            earliest=coverage_earliest,
+            default_preset="Ostatni tydzień",
+        )
+        cov_expected = len(completed_windows_in_range(cov_start, cov_end))
+        cov_rows = airplay_station_coverage(active_ids, cov_start, cov_end)
+        cov_df = pd.DataFrame(cov_rows)
+        if cov_df.empty:
+            st.caption("Brak danych pokrycia w wybranym zakresie.")
+        else:
+            cov_df["expected"] = cov_expected
+            cov_df["missing"] = (cov_df["expected"] - cov_df["ok_windows"].fillna(0).astype(int)).clip(lower=0)
+            cov_df["coverage_pct"] = [
+                round(100.0 * int(ok or 0) / cov_expected, 1) if cov_expected else 0.0
+                for ok in cov_df["ok_windows"]
+            ]
+            cov_df["status"] = [
+                ("✅ komplet" if int(ok or 0) >= cov_expected and int(plays or 0) > 0
+                 else "⚪ komplet, 0 emisji" if int(ok or 0) >= cov_expected and cov_expected > 0
+                 else "⚠️ braki")
+                for ok, plays in zip(cov_df["ok_windows"], cov_df["plays"])
+            ]
+            shown_cov = cov_df[["name", "status", "coverage_pct", "ok_windows", "expected", "missing", "zero_windows", "plays"]].rename(columns={
+                "name": "Stacja", "status": "Stan", "coverage_pct": "Pokrycie %",
+                "ok_windows": "Bloki OK", "expected": "Oczekiwane", "missing": "Brakuje",
+                "zero_windows": "Puste bloki", "plays": "Emisje",
+            })
+            st.dataframe(shown_cov, hide_index=True, use_container_width=True, height=min(610, 44 + 35 * len(shown_cov)))
+            st.caption(
+                f"{cov_start} → {cov_end}. Pusty blok = odSluchane odpowiedziało poprawnie, ale parser znalazł 0 emisji. "
+                "To jest diagnostyka pobierania, dlatego mieszka w Danych, nie w Emisjach."
+            )
 
     with st.expander("Stacje bez użytecznych danych / wyłączone", expanded=False):
         probe_date = min(last_date, date.today() - timedelta(days=1))
@@ -1615,7 +1737,7 @@ elif view_key == "song":
                         ("Familiarity", fam_label),
                         ("Momentum", mom_label),
                         ("Radio Presence 7d", radio_label),
-                        ("Zasięg stacji", reach_label),
+                        ("Zasięg 7d", reach_label),
                         ("Rotacja", rotation_label),
                     ], columns=5)
                     if reporting:
@@ -1715,16 +1837,58 @@ elif view_key == "song":
                     song_avg_day = song_spins / song_air_days
                     song_avg_station_day = song_spins / song_air_days / max(1, song_station_count)
                     song_last_play = str(song_air_detail.get("last_play") or "—").replace("T", " ")
-                    render_compact_metrics([
-                        ("Emisje", song_spins),
-                        (f"Stacje ({len(song_station_ids)})", song_station_count),
-                        ("Emisje/dzień", f"{song_avg_day:.1f}"),
-                        ("Śr./grającą stację/dzień", f"{song_avg_station_day:.2f}"),
-                        ("Ostatnio", song_last_play),
-                    ], columns=5)
+                    song_station_cov = airplay_station_coverage(song_station_ids, song_air_start, song_air_end)
+                    song_reporting_count = sum(1 for x in song_station_cov if int(x.get("plays") or 0) > 0)
+                    range_reach = (100.0 * song_station_count / song_reporting_count) if song_reporting_count else float("nan")
+                    range_rotation = min(100.0, 100.0 * song_avg_station_day / 6.0)
+                    range_presence = (0.70 * range_reach + 0.30 * range_rotation) if song_reporting_count else float("nan")
+                    station_rows = list(song_air_detail.get("stations") or [])
+                    top_station_row = max(station_rows, key=lambda x: int(x.get("spins") or 0), default={})
+                    max_station_spins = int(top_station_row.get("spins") or 0)
+                    top_station_name = str(top_station_row.get("station") or "")
+                    core_values = [pd.to_numeric(row.get(f"{src}_pos"), errors="coerce") for src in ["RMF", "ZET", "ESKA", "OLIA", "OLIS"]]
+                    valid_core = [float(x) for x in core_values if not pd.isna(x)]
+                    current_avg_position = round(sum(valid_core) / len(valid_core), 1) if valid_core else float("nan")
+                    song_release_month = release_month(
+                        song_meta.get("release_date"),
+                        row.get("first_chart_date") if has_chart_data else None,
+                    )
+                    song_air_row = {
+                        "song_id": song_id,
+                        "spins": song_spins,
+                        "artist": str(row.artist),
+                        "title": str(row.title),
+                        "release_month": song_release_month,
+                        "familiarity": float(row.familiarity) if has_chart_data else float("nan"),
+                        "momentum": float(row.momentum) if has_chart_data else float("nan"),
+                        "radio_reach": float(radio.get("radio_reach")) if reporting else float("nan"),
+                        "avg_position": current_avg_position,
+                        "stations_count": song_station_count,
+                        "radio_rotation": round(range_rotation, 1),
+                        "radio_presence_period": round(range_presence, 1) if song_reporting_count else float("nan"),
+                        "avg_per_day": round(song_avg_day, 1),
+                        "avg_station_day": round(song_avg_station_day, 2),
+                        "max_station_spins": max_station_spins,
+                        "top_station": top_station_name,
+                        "last_play": song_last_play,
+                        "RMF": position_sort_value(row.get("RMF_pos")),
+                        "ZET": position_sort_value(row.get("ZET_pos")),
+                        "OLIA": position_sort_value(row.get("OLIA_pos")),
+                        "OLIS": position_sort_value(row.get("OLIS_pos")),
+                        "ESKA": position_sort_value(row.get("ESKA_pos")),
+                    }
+                    render_song_grid(
+                        pd.DataFrame([song_air_row]),
+                        key=f"song_airplay_grid_{song_id}_{song_air_start}_{song_air_end}",
+                        height=92,
+                        editable_state=False,
+                        source_layout="airplay",
+                        station_total=song_reporting_count,
+                    )
                     st.caption(
-                        f"{song_air_start} → {song_air_end} · wszystkie aktywne stacje. "
-                        "Szczegóły per stacja są zwinięte poniżej, żeby karta Utworu pozostała kompaktowa."
+                        f"{song_air_start} → {song_air_end} · wszystkie aktywne stacje · "
+                        f"raportujące w okresie: {song_reporting_count}/{len(song_station_ids)}. "
+                        "Zasięg 7d jest zawsze liczony globalnie z ostatnich 7 dni, niezależnie od wybranego zakresu."
                     )
 
                     with st.expander("Szczegóły emisji per stacja i dzień", expanded=False):
@@ -1800,10 +1964,22 @@ elif view_key == "archive":
         if not entries.empty:
             historical_scores = with_notes(cached_scores(REVISION, as_of=str(meta["chart_date"])))
             if not historical_scores.empty:
-                score_cols = ["song_id", "familiarity", "momentum", "heard", "status", "note"]
+                hist_core = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in historical_scores.columns]
+                historical_scores["avg_position"] = historical_scores[hist_core].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if hist_core else float("nan")
+                score_cols = ["song_id", "familiarity", "momentum", "avg_position", "heard", "status", "note"]
                 entries = entries.drop(columns=[c for c in ["heard", "status", "note"] if c in entries.columns]).merge(
                     historical_scores[score_cols], on="song_id", how="left",
                 )
+            hist_presence = pd.DataFrame(
+                cached_airplay_presence_at(airplay_revision(), 7, str(meta["chart_date"])).get("rows") or []
+            )
+            if not hist_presence.empty and "radio_reach" in hist_presence.columns:
+                entries = entries.merge(
+                    hist_presence[["song_id", "radio_reach"]].drop_duplicates("song_id"),
+                    on="song_id", how="left",
+                )
+            elif "radio_reach" not in entries.columns:
+                entries["radio_reach"] = float("nan")
             entries["heard"] = entries.get("heard", False).fillna(False).astype(bool)
             entries["status"] = entries.get("status", "Nie słuchałem").fillna("Nie słuchałem").astype(str)
             entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
@@ -1816,8 +1992,9 @@ elif view_key == "archive":
 
             archive_cols = [
                 "song_id", "position", "artist", "title", "details", "preview", "spotify", "spotify_copy",
+                "familiarity", "momentum", "radio_reach", "avg_position",
                 "previous_position", "reported_weeks", "reported_peak",
-                "familiarity", "momentum", "status", "heard", "note",
+                "status", "heard", "note",
             ]
             archive_show = entries[[c for c in archive_cols if c in entries.columns]].copy()
             render_song_grid(
@@ -1826,28 +2003,13 @@ elif view_key == "archive":
                 height=770,
                 editable_state=True,
             )
-            st.caption("Poprzednio/Tygodnie/Peak są uzupełniane z danych źródła, a gdy ich brakuje — z naszej zapisanej historii. Familiarity i Momentum są liczone historycznie: tylko z danych dostępnych do daty tego notowania. Status, ✓ i notatka są Twoim obecnym stanem i można je edytować.")
+            st.caption("Poprzednio/Tygodnie/Peak są uzupełniane z danych źródła, a gdy ich brakuje — z naszej zapisanej historii. Familiarity, Momentum i Śr. poz. są liczone do daty notowania; Zasięg 7d kończy się na tej samej dacie, jeśli mamy wtedy dane emisji. Status, ✓ i notatka są Twoim obecnym stanem.")
 
 elif view_key == "airplay":
     st.subheader("📡 Emisje")
-    st.info(
-        "**Emisje są osobną miarą, ale utwory są wspólne.** Liczba odtworzeń z odSluchane.eu nie wpływa na "
-        "Familiarity, Momentum ani pozycje w notowaniach. Jeśli ten sam utwór występuje w obu miejscach, ma jeden "
-        "rekord, ten sam odsłuch/status/notatkę, a w Emisjach możemy obok pokazać jego bieżące pozycje z RMF/ZET/OLiA/OLiS/ESKA."
-    )
     stations = list_airplay_stations(active_only=True)
     all_known_stations = list_airplay_stations(active_only=False)
     running = active_job() is not None
-
-    latest_pos_rows = pd.DataFrame(latest_chart_positions())
-    if not latest_pos_rows.empty:
-        chart_latest = latest_pos_rows.pivot_table(
-            index="song_id", columns="source", values="position", aggfunc="first"
-        ).reset_index()
-        chart_latest.columns.name = None
-        chart_latest = chart_latest.rename(columns={src: f"{src}_pos" for src in ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"] if src in chart_latest.columns})
-    else:
-        chart_latest = pd.DataFrame(columns=["song_id"])
 
     if not stations:
         st.warning("Nie ma jeszcze listy stacji. Najpierw uruchom odkrywanie katalogu odSluchane.eu.")
@@ -1936,244 +2098,107 @@ elif view_key == "airplay":
                 f"Raportujące stacje w tym zakresie: **{reporting_station_count}/{len(selected_ids)}**. "
                 "Raportująca = mamy z niej przynajmniej jedną zapisaną emisję w wybranym okresie."
             )
-            with st.expander("🔎 Co dokładnie zostało pobrane — pokrycie per stacja", expanded=False):
-                cov_df = pd.DataFrame(station_cov_rows)
-                if not cov_df.empty:
-                    cov_df["expected"] = per_station_expected
-                    cov_df["missing"] = (cov_df["expected"] - cov_df["ok_windows"].fillna(0).astype(int)).clip(lower=0)
-                    cov_df["coverage_pct"] = [
-                        round(100.0 * int(ok or 0) / per_station_expected, 1) if per_station_expected else 0.0
-                        for ok in cov_df["ok_windows"]
-                    ]
-                    cov_df["status"] = [
-                        ("✅ komplet" if int(ok or 0) >= per_station_expected and int(plays or 0) > 0
-                         else "⚪ komplet, 0 emisji" if int(ok or 0) >= per_station_expected and per_station_expected > 0
-                         else "⚠️ braki")
-                        for ok, plays in zip(cov_df["ok_windows"], cov_df["plays"])
-                    ]
-                    shown_cov = cov_df[["name", "status", "ok_windows", "expected", "missing", "zero_windows", "plays"]].rename(columns={
-                        "name": "Stacja", "status": "Stan", "ok_windows": "Bloki OK", "expected": "Oczekiwane",
-                        "missing": "Brakuje", "zero_windows": "Puste bloki", "plays": "Emisje",
-                    })
-                    st.dataframe(shown_cov, hide_index=True, use_container_width=True, height=min(600, 44 + 35 * len(shown_cov)))
-                    st.caption("Pusty blok = strona odSluchane odpowiedziała poprawnie, ale parser nie znalazł żadnej emisji. To odróżnia brak pobrania od stacji, która nie zwraca playlisty/RDS.")
-
         if air.empty:
             st.info("Brak zapisanych emisji dla wybranych stacji i dat. Pobieranie bieżące i backfill są w zakładce Dane.")
         else:
-            tab_rank, tab_track = st.tabs(["🔥 Najczęściej grane", "🔎 Sprawdź utwór"])
+            st.markdown("### 🔥 Najczęściej grane")
+            r0, r1, r2, r3 = st.columns([2.2, .85, 1, .75])
+            airplay_query = r0.text_input(
+                "Szukaj w Emisjach",
+                placeholder="wykonawca lub tytuł",
+                key="airplay_rank_search",
+                help="Filtr jest wykonywany na wszystkich utworach w wybranym okresie, zanim zadziała limit Pokaż. Polskie znaki są ignorowane.",
+            )
+            min_station_count = r1.number_input(
+                "Min. stacji",
+                min_value=1,
+                max_value=max(1, len(selected_ids)),
+                value=1,
+                step=1,
+                key="airplay_rank_min_stations",
+            )
+            sort_mode = r2.selectbox(
+                "Sortuj",
+                ["Emisje", "Liczba stacji", "Max/stacja"],
+                index=0,
+                key="airplay_rank_sort",
+            )
+            top_n = r3.selectbox("Pokaż", [50, 100, 250, 500, "Wszystkie"], index=1, key="airplay_rank_top")
 
-            with tab_rank:
-                r0, r1, r2, r3 = st.columns([2.2, .85, 1, .75])
-                airplay_query = r0.text_input(
-                    "Szukaj w Emisjach",
-                    placeholder="wykonawca lub tytuł",
-                    key="airplay_rank_search",
-                    help="Filtr jest wykonywany na wszystkich utworach w wybranym okresie, zanim zadziała limit Pokaż. Polskie znaki są ignorowane.",
+            ranked = air[air["stations_count"] >= int(min_station_count)].copy()
+            if airplay_query.strip():
+                ranked = filter_song_rows(ranked, airplay_query)
+            if sort_mode == "Liczba stacji":
+                ranked = ranked.sort_values(["stations_count", "spins"], ascending=[False, False])
+            elif sort_mode == "Max/stacja":
+                ranked = ranked.sort_values(["max_station_spins", "spins"], ascending=[False, False])
+            else:
+                ranked = ranked.sort_values(["spins", "stations_count"], ascending=[False, False])
+            if top_n != "Wszystkie":
+                ranked = ranked.head(int(top_n))
+            ranked = ranked.reset_index(drop=True)
+            ranked = ranked[ranked["song_id"].notna()].copy()
+            ranked["song_id"] = ranked["song_id"].astype(int)
+            ranked["avg_per_day"] = (ranked["spins"] / period_days).round(1)
+            ranked["avg_station_day"] = (ranked["spins"] / period_days / ranked["stations_count"].clip(lower=1)).round(2)
+            ranked["station_reach"] = (
+                100.0 * ranked["stations_count"] / reporting_station_count
+            ).clip(upper=100).round(1) if reporting_station_count else float("nan")
+            ranked["radio_rotation"] = (100.0 * ranked["avg_station_day"] / 6.0).clip(upper=100).round(1)
+            ranked["radio_presence_period"] = (
+                0.70 * ranked["station_reach"].fillna(0) + 0.30 * ranked["radio_rotation"]
+            ).round(1) if reporting_station_count else float("nan")
+            ranked["last_play"] = ranked["last_play"].astype(str).str.replace("T", " ", regex=False)
+            ranked["release_month"] = [
+                release_month(rel, first)
+                for rel, first in zip(
+                    ranked["release_date"] if "release_date" in ranked.columns else [""] * len(ranked),
+                    ranked["first_chart_date"] if "first_chart_date" in ranked.columns else [""] * len(ranked),
                 )
-                min_station_count = r1.number_input(
-                    "Min. stacji",
-                    min_value=1,
-                    max_value=max(1, len(selected_ids)),
-                    value=1,
-                    step=1,
-                    key="airplay_rank_min_stations",
-                )
-                sort_mode = r2.selectbox(
-                    "Sortuj",
-                    ["Emisje", "Liczba stacji", "Max/stacja"],
-                    index=0,
-                    key="airplay_rank_sort",
-                )
-                top_n = r3.selectbox("Pokaż", [50, 100, 250, 500, "Wszystkie"], index=1, key="airplay_rank_top")
+            ]
+            ranked = with_notes(ranked)
 
-                ranked = air[air["stations_count"] >= int(min_station_count)].copy()
-                if airplay_query.strip():
-                    ranked = filter_song_rows(ranked, airplay_query)
-                if sort_mode == "Liczba stacji":
-                    ranked = ranked.sort_values(["stations_count", "spins"], ascending=[False, False])
-                elif sort_mode == "Max/stacja":
-                    ranked = ranked.sort_values(["max_station_spins", "spins"], ascending=[False, False])
-                else:
-                    ranked = ranked.sort_values(["spins", "stations_count"], ascending=[False, False])
-                if top_n != "Wszystkie":
-                    ranked = ranked.head(int(top_n))
-                ranked = ranked.reset_index(drop=True)
-                ranked = ranked[ranked["song_id"].notna()].copy()
-                ranked["song_id"] = ranked["song_id"].astype(int)
-                ranked["avg_per_day"] = (ranked["spins"] / period_days).round(1)
-                ranked["avg_station_day"] = (ranked["spins"] / period_days / ranked["stations_count"].clip(lower=1)).round(2)
-                ranked["station_reach"] = (
-                    100.0 * ranked["stations_count"] / reporting_station_count
-                ).clip(upper=100).round(1) if reporting_station_count else float("nan")
-                ranked["radio_rotation"] = (100.0 * ranked["avg_station_day"] / 6.0).clip(upper=100).round(1)
-                ranked["radio_presence_period"] = (
-                    0.70 * ranked["station_reach"].fillna(0) + 0.30 * ranked["radio_rotation"]
-                ).round(1) if reporting_station_count else float("nan")
-                ranked["last_play"] = ranked["last_play"].astype(str).str.replace("T", " ", regex=False)
-                ranked["release_month"] = [
-                    release_month(rel, first)
-                    for rel, first in zip(
-                        ranked["release_date"] if "release_date" in ranked.columns else [""] * len(ranked),
-                        ranked["first_chart_date"] if "first_chart_date" in ranked.columns else [""] * len(ranked),
-                    )
-                ]
-                ranked = with_notes(ranked)
+            # Standard parameters shown in every song table. Score only rows
+            # that survived search/sort/limit, so a large airplay database does
+            # not force compute_scores() across the whole catalogue. Zasięg 7d
+            # is global: all active/reporting stations, independent of this filter.
+            basic = cached_basic_song_metrics(
+                chart_revision(), air_rev, tuple(sorted(int(x) for x in ranked["song_id"].tolist()))
+            )
+            if not basic.empty:
+                ranked = ranked.merge(basic, on="song_id", how="left")
+            source_cols = ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]
+            for src in source_cols:
+                pos_col = f"{src}_pos"
+                ranked[src] = ranked[pos_col].map(position_sort_value).astype(int) if pos_col in ranked.columns else 999
 
-                # Join only latest chart-derived positions.  This avoids loading
-                # the expensive full score frame merely to render Emisje.
-                source_cols = ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]
-                if not chart_latest.empty:
-                    chart_cols = ["song_id"] + [f"{src}_pos" for src in source_cols if f"{src}_pos" in chart_latest.columns]
-                    ranked = ranked.merge(chart_latest[chart_cols].drop_duplicates("song_id"), on="song_id", how="left")
-                for src in source_cols:
-                    pos_col = f"{src}_pos"
-                    ranked[src] = ranked[pos_col].map(position_sort_value).astype(int) if pos_col in ranked.columns else 999
-
-                ranked["details"] = [song_link(sid) for sid in ranked["song_id"]]
-                ranked["preview"] = "▶"
-                ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
-                ranked["spotify_copy"] = ranked["spotify"]
-                air_cols = [
-                    "song_id", "spins", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status",
-                    "stations_count", "radio_rotation", "radio_presence_period",
-                    "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
-                    "RMF", "ZET", "OLIA", "OLIS", "ESKA", "note",
-                ]
-                air_show = ranked[[c for c in air_cols if c in ranked.columns]].copy()
-                station_key = "-".join(str(x) for x in selected_ids)
-                render_song_grid(
-                    air_show,
-                    key=f"airplay_rank_{range_start}_{range_end}_{sort_mode}_{top_n}_{min_station_count}_{normalize(airplay_query)}_{station_key}",
-                    height=690,
-                    editable_state=True,
-                    source_layout="airplay",
-                    station_total=len(selected_ids),
-                )
-                st.caption(
-                    "**Stacje (N)** = ile stacji z aktualnego filtra gra dany utwór; N w nagłówku to maksymalna liczba wybranych stacji. "
-                    "**Emisje/dzień łącznie** = suma odtworzeń ze wszystkich wybranych stacji / liczba dni. "
-                    "**Śr./grającą stację/dzień** dzieli dodatkowo przez liczbę stacji, które faktycznie zagrały utwór. "
-                    "**Rotacja** = intensywność grania (6+/stację/dzień = 100). Radio Presence nadal uwzględnia szerokość grania, "
-                    "ale osobna kolumna Zasięg została usunięta jako redundantna ze Stacjami."
-                )
-
-            with tab_track:
-                order = air.sort_values(["artist", "title"], key=lambda s: s.astype(str).str.casefold()).reset_index(drop=True)
-                track_query = st.text_input(
-                    "Wykonawca / tytuł",
-                    placeholder="wpisz fragment wykonawcy lub tytułu, np. meskie",
-                    key="airplay_track_search_v2",
-                    help="Wyszukiwanie jest dokładne po znormalizowanym tekście, a nie fuzzy. Ignoruje polskie znaki i przeszukuje cały wybrany okres.",
-                )
-                matches = filter_song_rows(order, track_query) if track_query.strip() else order
-                matches = matches.reset_index(drop=True)
-                if matches.empty:
-                    st.info("Brak utworów pasujących do wyszukiwania w tym okresie.")
-                    chosen = order.iloc[0]
-                else:
-                    preview_matches = matches.head(80).copy()
-                    result_table = preview_matches[["artist", "title", "spins", "stations_count"]].rename(columns={
-                        "artist": "Wykonawca", "title": "Tytuł", "spins": "Emisje", "stations_count": "Stacje",
-                    })
-                    selection = st.dataframe(
-                        result_table,
-                        hide_index=True,
-                        use_container_width=True,
-                        height=min(270, 38 + 35 * len(result_table)),
-                        on_select="rerun",
-                        selection_mode="single-row",
-                        key=f"airplay_track_results_{normalize(track_query)}",
-                    )
-                    try:
-                        selected_rows = list(selection.selection.rows or [])
-                    except Exception:
-                        try:
-                            selected_rows = list((selection.get("selection") or {}).get("rows") or [])
-                        except Exception:
-                            selected_rows = []
-                    picked_idx = int(selected_rows[0]) if selected_rows else 0
-                    chosen = preview_matches.iloc[picked_idx]
-                    if len(matches) > len(preview_matches):
-                        st.caption(f"Pokazuję pierwsze {len(preview_matches)} z {len(matches)} dopasowań — doprecyzuj wyszukiwanie.")
-                chosen_song_id = int(chosen["song_id"])
-                detail = cached_airplay_track_detail(
-                    air_rev, tuple(sorted(int(x) for x in selected_ids)),
-                    range_start.isoformat(), range_end.isoformat(), chosen_song_id,
-                )
-                st.markdown(f"### {chosen['artist']} — {chosen['title']}")
-                spotify_url = spotify_search_url(str(chosen["artist"]), str(chosen["title"]))
-                total_track_spins = int(detail.get("total_spins") or 0)
-                track_station_count = int(detail.get("stations_count") or 0)
-                track_reach = (100.0 * track_station_count / reporting_station_count) if reporting_station_count else None
-                track_station_day = total_track_spins / period_days / max(1, track_station_count)
-                track_rotation = min(100.0, 100.0 * track_station_day / 6.0)
-                track_presence = (0.70 * track_reach + 0.30 * track_rotation) if track_reach is not None else None
-                render_compact_metrics([
-                    ("Emisje", total_track_spins),
-                    (f"Stacje ({len(selected_ids)})", track_station_count),
-                    ("Rotacja", f"{track_rotation:.0f}%" if track_reach is not None else "—"),
-                    ("Radio Presence", f"{track_presence:.0f}%" if track_presence is not None else "—"),
-                    ("Emisje/dzień łącznie", f"{total_track_spins / period_days:.1f}"),
-                    ("Śr./grającą stację/dzień", f"{track_station_day:.2f}"),
-                ], columns=6)
-                st.caption(f"Ostatnia zapisana emisja: {str(detail.get('last_play') or '—').replace('T', ' ')}")
-
-                chart_match = chart_latest[chart_latest.song_id.astype(int) == chosen_song_id] if not chart_latest.empty else pd.DataFrame()
-                if not chart_match.empty:
-                    chart_row = chart_match.iloc[0]
-                    pos_bits = []
-                    for src in ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]:
-                        pos = position_display(chart_row.get(f"{src}_pos"))
-                        if pos != "-":
-                            pos_bits.append(f"{src} #{pos}")
-                    st.markdown("**Bieżące pozycje z notowań:** " + (" · ".join(pos_bits) if pos_bits else "brak w najnowszych notowaniach"))
-                else:
-                    st.caption("Brak tego utworu w najnowszych zapisanych notowaniach. Może nadal mieć starszą historię na karcie Utwór.")
-
-                act1, act2, act3 = st.columns(3)
-                with act1:
-                    render_preview_button(chosen_song_id, str(chosen["artist"]), str(chosen["title"]), spotify_url)
-                with act2:
-                    st.link_button("Spotify ↗", spotify_url, use_container_width=True)
-                with act3:
-                    if st.button("Otwórz kartę utworu", key=f"airplay_open_song_{chosen_song_id}", use_container_width=True):
-                        navigate_to_song(chosen_song_id)
-
-                station_df = pd.DataFrame(detail.get("stations") or [])
-                if not station_df.empty:
-                    station_df["avg_active_day"] = (station_df["spins"] / station_df["active_days"].clip(lower=1)).round(1)
-                    station_df["first_play"] = station_df["first_play"].astype(str).str.replace("T", " ", regex=False)
-                    station_df["last_play"] = station_df["last_play"].astype(str).str.replace("T", " ", regex=False)
-                    station_table = station_df[["station", "spins", "active_days", "avg_active_day", "first_play", "last_play"]].rename(columns={
-                        "station": "Stacja",
-                        "spins": "Emisje",
-                        "active_days": "Dni z emisją",
-                        "avg_active_day": "Śr./aktywny dzień",
-                        "first_play": "Pierwsza emisja",
-                        "last_play": "Ostatnia emisja",
-                    })
-                    st.markdown("#### Gdzie i jak często")
-                    st.dataframe(station_table, hide_index=True, use_container_width=True)
-
-                daily_df = pd.DataFrame(detail.get("daily") or [])
-                if not daily_df.empty:
-                    daily_total = daily_df.groupby("play_date", as_index=False)["spins"].sum()
-                    daily_total["play_date"] = pd.to_datetime(daily_total["play_date"])
-                    fig = px.bar(daily_total, x="play_date", y="spins", labels={"play_date": "Dzień", "spins": "Emisje"}, title="Emisje dzień po dniu")
-                    fig.update_layout(height=360, margin=dict(t=50, b=40))
-                    st.plotly_chart(fig, use_container_width=True)
-
-                history_df = pd.DataFrame(detail.get("plays") or [])
-                with st.expander("Dokładna historia emisji", expanded=False):
-                    if history_df.empty:
-                        st.caption("Brak zapisanych emisji.")
-                    else:
-                        history_df["played_at"] = history_df["played_at"].astype(str).str.replace("T", " ", regex=False)
-                        history_table = history_df[["played_at", "station"]].rename(columns={"played_at": "Czas", "station": "Stacja"})
-                        st.dataframe(history_table, hide_index=True, use_container_width=True, height=420)
-                        if int(detail.get("total_spins") or 0) > len(history_table):
-                            st.caption(f"Pokazuję ostatnie {len(history_table)} emisji; podsumowania powyżej liczą cały wybrany okres.")
+            ranked["details"] = [song_link(sid) for sid in ranked["song_id"]]
+            ranked["preview"] = "▶"
+            ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
+            ranked["spotify_copy"] = ranked["spotify"]
+            air_cols = [
+                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status",
+                "familiarity", "momentum", "radio_reach", "avg_position",
+                "stations_count", "radio_rotation", "radio_presence_period",
+                "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
+                "RMF", "ZET", "OLIA", "OLIS", "ESKA", "note",
+            ]
+            air_show = ranked[[c for c in air_cols if c in ranked.columns]].copy()
+            station_key = "-".join(str(x) for x in selected_ids)
+            render_song_grid(
+                air_show,
+                key=f"airplay_rank_{range_start}_{range_end}_{sort_mode}_{top_n}_{min_station_count}_{normalize(airplay_query)}_{station_key}",
+                height=690,
+                editable_state=True,
+                source_layout="airplay",
+                station_total=reporting_station_count,
+            )
+            st.caption(
+                "**Stacje** = zasięg w wybranym okresie wśród raportujących stacji; w nawiasie liczba stacji, np. 46% (26). "
+                "**Zasięg 7d** = wspólny sygnał z ostatnich 7 dni liczony ze wszystkich aktywnych raportujących stacji, niezależnie od filtra. "
+                "**Emisje/dzień łącznie** = suma odtworzeń ze wszystkich wybranych stacji / liczba dni. "
+                "**Śr./grającą stację/dzień** dzieli dodatkowo przez liczbę stacji, które faktycznie zagrały utwór."
+            )
 
         st.caption("Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zakładce **Dane**.")
 
@@ -2280,7 +2305,7 @@ else:
     st.markdown("## 📘 Manual RadioCharts")
     st.caption("Co pokazuje każda zakładka, jak czytać wskaźniki i jak odróżniać dane z list przebojów od realnych emisji radiowych.")
 
-    with st.expander("1. Najkrótsza ścieżka pracy", expanded=True):
+    with st.expander("1. Najkrótsza ścieżka pracy", expanded=False):
         st.markdown(
             """
 1. **Dane** — sprawdź, czy źródła są świeże i czy backfill nie ma luk.
@@ -2295,7 +2320,7 @@ Aktualna kolejność statusów roboczych: **Nie słuchałem → Watch → R1 Can
             """
         )
 
-    with st.expander("2. Dashboard — zakresy i filtry", expanded=True):
+    with st.expander("2. Dashboard — zakresy i filtry", expanded=False):
         st.markdown(
             """
 **Okres wskaźników** określa, z jak długiej historii list przebojów liczymy Familiarity i Momentum. `Całość` najlepiej opisuje trwałą znajomość utworu; krótsze okresy są przydatne do analizowania świeżych zmian.
@@ -2311,11 +2336,13 @@ Minimalne Familiarity/Momentum są tylko filtrami tabeli — nie zmieniają obli
 
 **Śr. poz.** to zwykła średnia arytmetyczna z bieżących pozycji **RMF, ZET, ESKA, OLiA i OLiS**, ale tylko z tych list, na których utwór aktualnie występuje. To szybki skrót orientacyjny, nie osobny scoring.
 
+**Standardowe parametry tabel utworów** to: **Familiarity, Momentum, Zasięg 7d i Śr. poz.** Dashboard, Emisje, Notowania oraz jednowierszowy wycinek Emisji na karcie Utwór pokazują ten sam zestaw, gdy dla danego okresu mamy dane.
+
 **Premiera** jest pokazywana jako `YYYY/MM`. Gdy baza ma dokładną datę wydania, miesiąc jest bez prefiksu. `~YYYY/MM` oznacza, że dokładnej daty nie mamy i pokazujemy miesiąc **pierwszego pojawienia się w naszych notowaniach**.
             """
         )
 
-    with st.expander("3. Familiarity — jak bardzo utwór powinien być znany", expanded=True):
+    with st.expander("3. Familiarity — jak bardzo utwór powinien być znany", expanded=False):
         st.markdown(
             """
 Familiarity jest **pamięcią sukcesu na listach**, a nie wskaźnikiem „czy utwór jest gorący dzisiaj”. Po zejściu z listy ma spadać bardzo powoli.
@@ -2356,7 +2383,7 @@ Emisje radiowe nie są dodawane do Momentum.
             """
         )
 
-    with st.expander("5. Radio Presence — szerokość + intensywność grania", expanded=True):
+    with st.expander("5. Radio Presence — szerokość + intensywność grania", expanded=False):
         st.markdown(
             """
 Radio Presence opisuje **realną bieżącą obecność na antenach** i jest niezależne od list przebojów.
@@ -2377,26 +2404,27 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
             """
         )
 
-    with st.expander("6. Emisje — znaczenie wszystkich parametrów", expanded=True):
+    with st.expander("6. Emisje — znaczenie wszystkich parametrów", expanded=False):
         st.markdown(
             """
 **Emisja** to jedno zapisane odtworzenie utworu przez jedną stację.
 
 - **Emisje** — suma wszystkich odtworzeń ze wszystkich wybranych stacji w okresie.
-- **Stacje (N)** — liczba stacji, które zagrały utwór co najmniej raz; `N` w nagłówku to liczba stacji w aktualnym filtrze.
+- **Stacje** — zasięg w wybranym okresie jako procent raportujących stacji, a w nawiasie liczba stacji, które zagrały utwór, np. `46% (26)`.
 - **Rotacja** — intensywność grania na stacjach, które grają utwór; 6+/stację/dzień = 100%.
-- **Radio Presence** — `70% zasięgu + 30% rotacji`. Sam zasięg nadal jest liczony jako `stacje grające / stacje raportujące`, ale nie ma osobnej kolumny, bo praktycznie dublował informację z liczby stacji.
+- **Zasięg 7d** — prosty, wspólny sygnał: jaki procent wszystkich aktywnych **raportujących** stacji z ostatnich 7 dni zagrał utwór. Jest niezależny od wybranego zakresu Emisji.
+- **Radio Presence** — `70% zasięgu + 30% rotacji`; w tabeli Emisji wersja zakresowa odnosi się do aktualnie wybranych dat/stacji.
 - **Emisje/dzień łącznie** — wszystkie emisje utworu / liczba dni kalendarzowych. **17 oznacza 17 odtworzeń dziennie łącznie w całej wybranej grupie stacji, nie 17 na każdej stacji.**
 - **Śr./grającą stację/dzień** — emisje / dni / liczba stacji, które faktycznie zagrały utwór.
 - **Max/stacja** — ile razy najaktywniejsza stacja zagrała utwór w całym wybranym okresie.
 - **Najmocniejsza stacja** — stacja z największą liczbą emisji tego utworu.
 - **Ostatnio** — ostatnia zapisana godzina emisji.
 
-Zakres Emisji można ustawić jednym rozwijanym polem: **ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok**. Opcja **Własny zakres** pokazuje dokładny wybór dat. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji, a nie na „dzisiaj” za wszelką cenę.
+Zakres Emisji ma preset **ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok** oraz stale widoczne dokładne daty. Preset tylko wstawia daty; ręczna zmiana dowolnej z nich automatycznie przełącza preset na **Własny zakres**. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji.
 
-W zakładce **Najczęściej grane** pole wyszukiwania filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. W **Sprawdź utwór** wyszukiwanie jest znormalizowane (np. `meskie` = `męskie`) i pokazuje tylko rzeczywiste dopasowania, bez fuzzy-searchu po przypadkowych podobnych słowach.
+Pole **Szukaj w Emisjach** filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. Wyszukiwanie ignoruje polskie znaki. Szczegóły konkretnego nagrania otwierasz przez **Otwórz → Utwór**.
 
-Na karcie **Utwór** jest osobna sekcja **Emisje radiowe** z takim samym wyborem zakresu. Pokazuje sumę emisji, liczbę stacji, średnią dzienną i średnią na grającą stację. Rozwijane **Szczegóły emisji per stacja i dzień** dodają tabelę stacji oraz niewielki wykres dzienny bez rozpychania całej karty.
+Na karcie **Utwór** jest osobna sekcja **Emisje radiowe**, która ma taki sam wybór zakresu i pokazuje jeden wiersz w tym samym układzie co tabela Emisji. Rozwijane **Szczegóły emisji per stacja i dzień** dodają tabelę stacji oraz niewielki wykres dzienny bez rozpychania całej karty.
 
 W szczegółach jednego utworu:
 
@@ -2445,7 +2473,7 @@ Przykład: utwór może być wielkim hitem w źródłach, a brzmieniowo być dan
     with st.expander("10. Dane, backfill i logi", expanded=False):
         st.markdown(
             """
-Zakładka **Dane** służy do całej obsługi pobierania: bieżących notowań, backfillu list oraz **backfillu Emisji / odSluchane**. Tabela „Stan źródeł” pokazuje kadencję publikacji, najnowsze pobrane notowanie oraz datę, której co najmniej oczekujemy dzisiaj. „Co jest już zapisane” pokazuje fizycznie zapisane wydania, zakres dat, liczbę pozycji i utworów.
+Zakładka **Dane** służy do całej obsługi pobierania: bieżących notowań, backfillu list oraz **backfillu Emisji / odSluchane**. Jest tu też diagnostyka **„Co dokładnie zostało pobrane — pokrycie per stacja”** z własnym zakresem dat. Tabela „Stan źródeł” pokazuje kadencję publikacji, najnowsze pobrane notowanie oraz datę, której co najmniej oczekujemy dzisiaj.
 
 Każdy nowy proces zapisuje pełny log w `/app/data/jobs/`. Nazwa zaczyna się od czasu uruchomienia:
 

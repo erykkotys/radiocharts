@@ -135,6 +135,11 @@ def parse_playlist_html(html: str, play_date: date, start_hour: int, source_url:
         if not parts:
             continue
         artist, title = parts
+        # odSluchane occasionally exposes ESKA station IDs/jingles as if they
+        # were songs. Keep them out of the catalogue and airplay metrics. Match
+        # the standalone token only so unrelated names such as "Kreska" survive.
+        if re.search(r"\beska\b", artist, flags=re.I) or re.search(r"\beska\b", title, flags=re.I):
+            continue
         d = play_date
         # The public UI represents 22→0 as the final two hours of play_date;
         # there should be no 00:xx rows in that response, but handle it safely.
