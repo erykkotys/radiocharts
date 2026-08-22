@@ -578,25 +578,27 @@ def render_nav_tabs(current: str) -> None:
 
 
 st.markdown('<div class="rc-app-title">📻 <span>RadioCharts Research</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="rc-app-subtitle">Familiarity, momentum i radio presence · wsparcie odsłuchu i ręcznej decyzji</div>', unsafe_allow_html=True)
 
 STATUSES = [
     "Nie słuchałem",
-    "Watch",
-    "R1 Candidate",
-    "CF Candidate",
-    "Baza Hold",
+    "Poza formatem",
     "Słabe",
+    "Watch",
+    "R2 Candidate",
+    "R1 Candidate",
+    "CF2 Candidate",
+    "CF1 Candidate",
+    "Baza Hold",
     "Baza R2",
     "Baza R1",
     "Baza CF2",
     "Baza CF1",
-    "Poza formatem",
 ]
 
 STATUS_ALIASES = {
     "Ignore": "Poza formatem",
-    "Candidate": "CF Candidate",
+    "Candidate": "CF1 Candidate",
+    "CF Candidate": "CF1 Candidate",
     "Current": "Baza CF2",
     "Current Familiar": "Baza CF1",
     "Recurrent": "Baza R1",
@@ -634,10 +636,12 @@ def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
         ids = out["song_id"].astype(int)
         out["heard"] = [bool(notes_df.at[i, "heard"]) if i in notes_df.index else False for i in ids]
         out["status"] = [normalized_status(notes_df.at[i, "status"]) if i in notes_df.index else "Nie słuchałem" for i in ids]
+        out["downloaded"] = [bool(notes_df.at[i, "downloaded"]) if i in notes_df.index else False for i in ids]
         out["note"] = [str(notes_df.at[i, "note"] or "") if i in notes_df.index else "" for i in ids]
     else:
         out["heard"] = False
         out["status"] = "Nie słuchałem"
+        out["downloaded"] = False
         out["note"] = ""
     return out
 
@@ -853,6 +857,105 @@ function(params) {
 """)
 
 
+FLOATING_HSCROLL_INSTALLER = JsCode("""
+function(params) {
+  // AG Grid's native horizontal scrollbar sits at the very bottom of a tall
+  // component iframe. Mirror it at the bottom of the browser viewport while
+  // this grid is visible, so wide Dashboard/Emisje tables can be moved sideways
+  // without first scrolling to the final row.
+  try {
+    if (window.__rcFloatingHScrollInstalled) return;
+    window.__rcFloatingHScrollInstalled = true;
+
+    const host = window.top || window;
+    const doc = host.document;
+    const frame = window.frameElement;
+    if (!frame || !doc) return;
+    const owner = 'rc-grid-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+
+    let bar = doc.getElementById('__rcFloatingGridHScroll');
+    if (!bar) {
+      bar = doc.createElement('div');
+      bar.id = '__rcFloatingGridHScroll';
+      bar.style.cssText = [
+        'display:none','position:fixed','bottom:0','height:18px','overflow-x:auto','overflow-y:hidden',
+        'z-index:2147482500','background:rgba(17,21,27,.96)','border-top:1px solid rgba(150,160,175,.34)',
+        'box-shadow:0 -2px 7px rgba(0,0,0,.28)'
+      ].join(';');
+      const inner = doc.createElement('div');
+      inner.id = '__rcFloatingGridHScrollInner';
+      inner.style.height = '1px';
+      bar.appendChild(inner);
+      doc.body.appendChild(bar);
+      bar.addEventListener('scroll', function() {
+        const vp = bar.__rcViewport;
+        if (!vp || bar.__rcSyncing) return;
+        try { vp.scrollLeft = bar.scrollLeft; } catch(e) {}
+      });
+    }
+    const inner = bar.querySelector('#__rcFloatingGridHScrollInner');
+
+    const findViewport = () => document.querySelector('.ag-body-horizontal-scroll-viewport')
+      || document.querySelector('.ag-center-cols-viewport');
+
+    const update = () => {
+      try {
+        if (!frame.isConnected) {
+          if (bar.dataset.owner === owner) bar.style.display = 'none';
+          return;
+        }
+        const vp = findViewport();
+        if (!vp) return;
+        const rect = frame.getBoundingClientRect();
+        const visible = rect.bottom > 0 && rect.top < host.innerHeight;
+        const scrollWidth = Math.max(vp.scrollWidth || 0, vp.firstElementChild ? vp.firstElementChild.scrollWidth || 0 : 0);
+        const overflow = scrollWidth > (vp.clientWidth || 0) + 4;
+        if (!visible || !overflow) {
+          if (bar.dataset.owner === owner) bar.style.display = 'none';
+          return;
+        }
+        bar.dataset.owner = owner;
+        bar.__rcViewport = vp;
+        const left = Math.max(0, rect.left);
+        const right = Math.max(0, host.innerWidth - rect.right);
+        bar.style.left = left + 'px';
+        bar.style.right = right + 'px';
+        bar.style.display = 'block';
+        inner.style.width = scrollWidth + 'px';
+        if (Math.abs(bar.scrollLeft - vp.scrollLeft) > 1) {
+          bar.__rcSyncing = true;
+          bar.scrollLeft = vp.scrollLeft;
+          bar.__rcSyncing = false;
+        }
+      } catch(e) {}
+    };
+
+    const bindViewport = () => {
+      const vp = findViewport();
+      if (vp && !vp.__rcProxyBound) {
+        vp.__rcProxyBound = true;
+        vp.addEventListener('scroll', update, {passive:true});
+      }
+      update();
+    };
+    host.addEventListener('scroll', update, true);
+    host.addEventListener('resize', update, {passive:true});
+    const cleanupTimer = host.setInterval(function() {
+      if (!frame.isConnected) {
+        if (bar.dataset.owner === owner) bar.style.display = 'none';
+        try { host.clearInterval(cleanupTimer); } catch(e) {}
+        return;
+      }
+      update();
+    }, 450);
+    setTimeout(bindViewport, 60);
+    setTimeout(bindViewport, 250);
+    setTimeout(bindViewport, 800);
+  } catch(e) {}
+}
+""")
+
+
 def install_client_helpers() -> None:
     """Install hard-navigation/back-button support and one page-level preview player.
 
@@ -1024,21 +1127,32 @@ def render_preview_button(song_id: int | str, artist: str, title: str, spotify: 
     )
 
 @st.fragment
-def render_song_note_editor(song_id: int, heard_value: bool, status_value: str, note_value: str) -> None:
+def render_song_note_editor(
+    song_id: int,
+    heard_value: bool,
+    status_value: str,
+    downloaded_value: bool,
+    note_value: str,
+) -> None:
     """Small fragment so editing one song does not rerun/repaint the whole detail page."""
     with st.container(border=True):
         with st.form(f"note_form_{song_id}"):
-            n1, n2, n3, n4 = st.columns([1.0, 1.5, 4.8, .8])
+            n1, n2, n3, n4, n5 = st.columns([1.0, 1.6, .75, 4.5, .8])
             heard = n1.checkbox("Przesłuchany", value=bool(heard_value))
             current_status = normalized_status(status_value)
             idx = STATUSES.index(current_status) if current_status in STATUSES else 0
             status = n2.selectbox("Status", STATUSES, index=idx)
-            note = n3.text_input("Notatka", value=note_value or "")
-            with n4:
+            downloaded = n3.checkbox(
+                "DL",
+                value=bool(downloaded_value),
+                help="Utwór pobrany / dodany do lokalnej biblioteki po odsłuchu.",
+            )
+            note = n4.text_input("Notatka", value=note_value or "")
+            with n5:
                 st.caption("Zapis")
                 save_note = st.form_submit_button("Zapisz", use_container_width=True)
             if save_note:
-                update_note(song_id, heard, status, note)
+                update_note(song_id, heard, status, note, downloaded=downloaded)
                 st.toast("Zapisano")
 
 
@@ -1067,6 +1181,7 @@ def render_song_grid(
     editable_state: bool = True,
     source_layout: str = "full",
     station_total: int | None = None,
+    floating_hscroll: bool = False,
 ) -> pd.DataFrame:
     """AG Grid table: row highlight, editing, responsive source columns and preview player."""
     show = frame.copy()
@@ -1082,6 +1197,8 @@ def render_song_grid(
     gb.configure_default_column(resizable=True, sortable=True, filter=True, editable=False)
     gb.configure_selection(selection_mode="single", use_checkbox=False, suppressRowClickSelection=False)
     gb.configure_grid_options(rowHeight=36, animateRows=False, onCellClicked=GRID_CLICK_HANDLER)
+    if floating_hscroll:
+        gb.configure_grid_options(onGridReady=FLOATING_HSCROLL_INSTALLER)
 
     if "song_id" in show.columns:
         gb.configure_column("song_id", hide=True)
@@ -1136,6 +1253,13 @@ def render_song_grid(
             "status", "Status", minWidth=150, width=165,
             editable=bool(editable_state),
             cellEditor="agSelectCellEditor", cellEditorParams={"values": STATUSES},
+        )
+    if "downloaded" in show.columns:
+        gb.configure_column(
+            "downloaded", "DL", width=62, minWidth=56,
+            editable=bool(editable_state), cellDataType="boolean",
+            cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor",
+            headerTooltip="Utwór pobrany / dodany do lokalnej biblioteki po odsłuchu.",
         )
     if "note" in show.columns:
         gb.configure_column("note", "Notatka", minWidth=220, width=300, editable=bool(editable_state))
@@ -1233,7 +1357,7 @@ def render_song_grid(
 
     options = gb.build()
     options.pop("autoSizeStrategy", None)
-    original = show[[c for c in ["song_id", "heard", "status", "note"] if c in show.columns]].copy()
+    original = show[[c for c in ["song_id", "heard", "status", "downloaded", "note"] if c in show.columns]].copy()
 
     response = AgGrid(
         show,
@@ -1271,7 +1395,7 @@ def render_song_grid(
     if editable_state and {"song_id", "heard", "status"}.issubset(edited.columns) and not original.empty:
         before = original.set_index("song_id")
         changed = 0
-        cols_for_edit = [c for c in ["song_id", "heard", "status", "note"] if c in edited.columns]
+        cols_for_edit = [c for c in ["song_id", "heard", "status", "downloaded", "note"] if c in edited.columns]
         for r in edited[cols_for_edit].itertuples(index=False):
             try:
                 sid = int(r.song_id)
@@ -1282,8 +1406,15 @@ def render_song_grid(
             prev = before.loc[sid]
             old_note = str(prev["note"] or "") if "note" in before.columns else ""
             new_note = str(getattr(r, "note", old_note) or "")
-            if bool(r.heard) != bool(prev.heard) or str(r.status) != str(prev.status) or new_note != old_note:
-                update_note(sid, bool(r.heard), str(r.status), new_note)
+            old_downloaded = bool(prev["downloaded"]) if "downloaded" in before.columns else False
+            new_downloaded = bool(getattr(r, "downloaded", old_downloaded))
+            if (
+                bool(r.heard) != bool(prev.heard)
+                or str(r.status) != str(prev.status)
+                or new_downloaded != old_downloaded
+                or new_note != old_note
+            ):
+                update_note(sid, bool(r.heard), str(r.status), new_note, downloaded=new_downloaded)
                 changed += 1
         if changed:
             st.toast(f"Zapisano status dla {changed} utworów.")
@@ -1544,6 +1675,8 @@ if view_key == "dashboard":
             st.dataframe(health_df, hide_index=True, use_container_width=True, height=285)
             st.caption("Publikacja = typowa kadencja źródła. „Powinno być ≥” jest liczone w tej samej semantyce daty, którą zwraca dane źródło (np. koniec okresu UK/OLiS, sobotnia data wydania Billboard; ESKA = dzień odczytu). Status pobrania i data notowania są rozdzielone.")
 
+        dashboard_count_slot = st.empty()
+
         period_map = {
             "1 tydz.": 7,
             "2 tyg.": 14,
@@ -1608,13 +1741,13 @@ if view_key == "dashboard":
                 view = view[~view.heard]
             view = view.reset_index(drop=True)
 
-            render_compact_metrics([
-                ("Utwory (filtr / okres)", f"{len(view)} / {len(period_df)}"),
-                ("Current Familiar ≥70%", f"{int((view.familiarity >= 70).sum())} / {int((period_df.familiarity >= 70).sum())}"),
-                ("Rising ≥65%", f"{int((view.momentum >= 65).sum())} / {int((period_df.momentum >= 65).sum())}"),
-                ("Pokrycie źródeł", f"{period_df.coverage.max():.0f}%"),
-            ])
-            st.caption(f"Okres wskaźników: {period_label}. Cała baza zawiera obecnie {len(df)} utworów. Rising nie ma już osobnej tabeli — wystarczy sortować Momentum albo ustawić jego minimum.")
+            dashboard_count_slot.markdown(
+                f'<div style="display:inline-flex;align-items:baseline;gap:.45rem;border:1px solid #3e4653;'
+                f'border-radius:6px;background:#1d232c;padding:.28rem .48rem;margin:.02rem 0 .18rem;">'
+                f'<span style="color:#aeb6c2;font-size:.76rem;">Utwory (filtr / okres)</span>'
+                f'<strong style="font-size:.98rem;">{len(view)} / {len(period_df)}</strong></div>',
+                unsafe_allow_html=True,
+            )
 
             core_avg_cols = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in view.columns]
             if core_avg_cols:
@@ -1634,9 +1767,13 @@ if view_key == "dashboard":
             view["preview"] = "▶"
             view["heard"] = view["heard"].fillna(False).astype(bool)
             view["status"] = view["status"].fillna("Nie słuchałem").astype(str)
+            if "downloaded" not in view.columns:
+                view["downloaded"] = False
+            else:
+                view["downloaded"] = view["downloaded"].fillna(False).astype(bool)
 
             cols = [
-                "song_id", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status",
+                "song_id", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status", "downloaded",
                 "familiarity", "momentum", "radio_presence", "radio_reach", "radio_rotation",
                 "avg_position", "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
                 "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
@@ -1647,7 +1784,14 @@ if view_key == "dashboard":
             for col in pos_cols:
                 show[col] = show[col].map(position_sort_value).astype(int)
             show = show.rename(columns={c: c.replace("_pos", "") for c in pos_cols})
-            render_song_grid(show, key=f"dashboard_grid_{lookback}_{scope}_{source_layout}", height=660, editable_state=True, source_layout=source_layout)
+            render_song_grid(
+                show,
+                key=f"dashboard_grid_{lookback}_{scope}_{source_layout}",
+                height=660,
+                editable_state=True,
+                source_layout=source_layout,
+                floating_hscroll=True,
+            )
             st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7 · 5w. Radio Presence 7d = 70% zasięg stacji + 30% intensywność rotacji; szczegóły są w Manualu. ▶ 30s otwiera player przyklejony do dołu ekranu.")
 
 elif view_key == "song":
@@ -1709,6 +1853,7 @@ elif view_key == "song":
                 row["title"] = str(song_meta["title"])
                 row["heard"] = bool(song_meta.get("heard", False))
                 row["status"] = str(song_meta.get("status") or "Nie słuchałem")
+                row["downloaded"] = bool(song_meta.get("downloaded", False))
                 row["note"] = str(song_meta.get("note") or "")
 
                 radio = cached_airplay_song_presence(airplay_revision(), song_id, 7)
@@ -1740,12 +1885,6 @@ elif view_key == "song":
                         ("Zasięg 7d", reach_label),
                         ("Rotacja", rotation_label),
                     ], columns=5)
-                    if reporting:
-                        st.caption(
-                            f"Radio 7d: {int(radio.get('stations_count') or 0)}/{reporting} raportujących stacji · "
-                            f"{float(radio.get('airplay_spins_per_day') or 0):.1f} emisji/dzień łącznie · "
-                            f"{float(radio.get('airplay_spins_per_station_day') or 0):.2f} na grającą stację/dzień."
-                        )
                     if row.note:
                         st.caption(f"Notatka: {row.note}")
 
@@ -1859,6 +1998,9 @@ elif view_key == "song":
                         "artist": str(row.artist),
                         "title": str(row.title),
                         "release_month": song_release_month,
+                        "heard": bool(row.heard),
+                        "status": normalized_status(str(row.status)),
+                        "downloaded": bool(row.downloaded),
                         "familiarity": float(row.familiarity) if has_chart_data else float("nan"),
                         "momentum": float(row.momentum) if has_chart_data else float("nan"),
                         "radio_reach": float(radio.get("radio_reach")) if reporting else float("nan"),
@@ -1876,6 +2018,7 @@ elif view_key == "song":
                         "OLIA": position_sort_value(row.get("OLIA_pos")),
                         "OLIS": position_sort_value(row.get("OLIS_pos")),
                         "ESKA": position_sort_value(row.get("ESKA_pos")),
+                        "note": str(row.note or ""),
                     }
                     render_song_grid(
                         pd.DataFrame([song_air_row]),
@@ -1892,8 +2035,20 @@ elif view_key == "song":
                     )
 
                     with st.expander("Szczegóły emisji per stacja i dzień", expanded=False):
+                        # Resolve the detail from the currently selected range here
+                        # as well. The cached helper is date-keyed, so changing the
+                        # preset or either exact date immediately changes both the
+                        # one-row summary above and these station/day details.
+                        detail_for_range = cached_airplay_track_detail(
+                            airplay_revision(),
+                            tuple(sorted(song_station_ids)),
+                            song_air_start.isoformat(),
+                            song_air_end.isoformat(),
+                            song_id,
+                        )
+                        st.caption(f"Zakres szczegółów: {song_air_start} → {song_air_end}")
                         detail_left, detail_right = st.columns([1.15, 1])
-                        station_df = pd.DataFrame(song_air_detail.get("stations") or [])
+                        station_df = pd.DataFrame(detail_for_range.get("stations") or [])
                         with detail_left:
                             if station_df.empty:
                                 st.caption("Brak zapisanych emisji tego utworu w wybranym okresie.")
@@ -1916,7 +2071,7 @@ elif view_key == "song":
                                     height=min(330, 38 + 35 * len(station_table)),
                                 )
                         with detail_right:
-                            daily_df = pd.DataFrame(song_air_detail.get("daily") or [])
+                            daily_df = pd.DataFrame(detail_for_range.get("daily") or [])
                             if daily_df.empty:
                                 st.caption("Brak danych dziennych do wykresu.")
                             else:
@@ -1931,7 +2086,13 @@ elif view_key == "song":
                                 air_fig.update_layout(height=285, margin=dict(t=10, b=35, l=25, r=10))
                                 st.plotly_chart(air_fig, use_container_width=True)
 
-                render_song_note_editor(song_id, bool(row.heard), str(row.status), str(row.note or ""))
+                render_song_note_editor(
+                    song_id,
+                    bool(row.heard),
+                    str(row.status),
+                    bool(row.downloaded),
+                    str(row.note or ""),
+                )
                 # Player jest podniesiony nad dół okna; dodatkowy luz zapobiega
                 # przycinaniu ostatniego wiersza formularza na niższych ekranach.
                 st.markdown('<div style="height:5rem"></div>', unsafe_allow_html=True)
@@ -1966,8 +2127,8 @@ elif view_key == "archive":
             if not historical_scores.empty:
                 hist_core = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in historical_scores.columns]
                 historical_scores["avg_position"] = historical_scores[hist_core].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if hist_core else float("nan")
-                score_cols = ["song_id", "familiarity", "momentum", "avg_position", "heard", "status", "note"]
-                entries = entries.drop(columns=[c for c in ["heard", "status", "note"] if c in entries.columns]).merge(
+                score_cols = ["song_id", "familiarity", "momentum", "avg_position", "heard", "status", "downloaded", "note"]
+                entries = entries.drop(columns=[c for c in ["heard", "status", "downloaded", "note"] if c in entries.columns]).merge(
                     historical_scores[score_cols], on="song_id", how="left",
                 )
             hist_presence = pd.DataFrame(
@@ -1982,6 +2143,10 @@ elif view_key == "archive":
                 entries["radio_reach"] = float("nan")
             entries["heard"] = entries.get("heard", False).fillna(False).astype(bool)
             entries["status"] = entries.get("status", "Nie słuchałem").fillna("Nie słuchałem").astype(str)
+            if "downloaded" not in entries.columns:
+                entries["downloaded"] = False
+            else:
+                entries["downloaded"] = entries["downloaded"].fillna(False).astype(bool)
             entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
             entries["spotify_copy"] = entries["spotify"]
             entries["details"] = [song_link(sid) for sid in entries.song_id]
@@ -1994,7 +2159,7 @@ elif view_key == "archive":
                 "song_id", "position", "artist", "title", "details", "preview", "spotify", "spotify_copy",
                 "familiarity", "momentum", "radio_reach", "avg_position",
                 "previous_position", "reported_weeks", "reported_peak",
-                "status", "heard", "note",
+                "status", "downloaded", "heard", "note",
             ]
             archive_show = entries[[c for c in archive_cols if c in entries.columns]].copy()
             render_song_grid(
@@ -2177,7 +2342,7 @@ elif view_key == "airplay":
             ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
             ranked["spotify_copy"] = ranked["spotify"]
             air_cols = [
-                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status",
+                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status", "downloaded",
                 "familiarity", "momentum", "radio_reach", "avg_position",
                 "stations_count", "radio_rotation", "radio_presence_period",
                 "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
@@ -2192,6 +2357,7 @@ elif view_key == "airplay":
                 editable_state=True,
                 source_layout="airplay",
                 station_total=reporting_station_count,
+                floating_hscroll=True,
             )
             st.caption(
                 "**Stacje** = zasięg w wybranym okresie wśród raportujących stacji; w nawiasie liczba stacji, np. 46% (26). "
@@ -2314,9 +2480,9 @@ else:
 4. **Emisje** — sprawdź, co faktycznie grają stacje, jak szeroko i jak często.
 5. **Notowania** — podejrzyj konkretny historyczny tydzień/listę bez mieszania go z bieżącym stanem.
 
-**Status, „Przesłuchany” i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji.
+**Status, „Przesłuchany”, DL i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji. **DL** oznacza, że po odsłuchu utwór został już pobrany / dodany do lokalnej biblioteki.
 
-Aktualna kolejność statusów roboczych: **Nie słuchałem → Watch → R1 Candidate → CF Candidate → Baza Hold → Słabe → Baza R2 → Baza R1 → Baza CF2 → Baza CF1 → Poza formatem**. Stare `Candidate` jest migrowane do `CF Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
+Aktualna kolejność statusów roboczych: **Nie słuchałem → Poza formatem → Słabe → Watch → R2 Candidate → R1 Candidate → CF2 Candidate → CF1 Candidate → Baza Hold → Baza R2 → Baza R1 → Baza CF2 → Baza CF1**. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
             """
         )
 
@@ -2333,6 +2499,8 @@ Aktualna kolejność statusów roboczych: **Nie słuchałem → Watch → R1 Can
 - **Cała historia** — również utwory, które już zeszły ze wszystkich najnowszych list.
 
 Minimalne Familiarity/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli.
+
+Nad filtrami widzisz tylko licznik **Utwory (filtr / okres)**. Dawne kafle Current Familiar / Rising / Pokrycie źródeł zostały usunięte, bo te same informacje można uzyskać przez sortowanie i filtry tabeli.
 
 **Śr. poz.** to zwykła średnia arytmetyczna z bieżących pozycji **RMF, ZET, ESKA, OLiA i OLiS**, ale tylko z tych list, na których utwór aktualnie występuje. To szybki skrót orientacyjny, nie osobny scoring.
 
@@ -2423,6 +2591,8 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
 Zakres Emisji ma preset **ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok** oraz stale widoczne dokładne daty. Preset tylko wstawia daty; ręczna zmiana dowolnej z nich automatycznie przełącza preset na **Własny zakres**. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji.
 
 Pole **Szukaj w Emisjach** filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. Wyszukiwanie ignoruje polskie znaki. Szczegóły konkretnego nagrania otwierasz przez **Otwórz → Utwór**.
+
+W szerokich tabelach Dashboardu i Emisji poziomy scrollbar jest dodatkowo **przyklejony do dołu okna przeglądarki**, gdy tabela jest na ekranie. Jest zsynchronizowany z natywnym paskiem AG Grid.
 
 Na karcie **Utwór** jest osobna sekcja **Emisje radiowe**, która ma taki sam wybór zakresu i pokazuje jeden wiersz w tym samym układzie co tabela Emisji. Rozwijane **Szczegóły emisji per stacja i dzień** dodają tabelę stacji oraz niewielki wykres dzienny bez rozpychania całej karty.
 

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS song_notes (
     song_id INTEGER PRIMARY KEY REFERENCES songs(id) ON DELETE CASCADE,
     heard INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'Nie słuchałem',
+    downloaded INTEGER NOT NULL DEFAULT 0,
     note TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
@@ -661,6 +662,7 @@ def _merge_duplicate_songs(con: sqlite3.Connection) -> int:
             ids,
         ).fetchall()
         heard = any(bool(n["heard"]) for n in notes)
+        downloaded = any(bool(n["downloaded"]) for n in notes)
         chosen = notes[0] if notes else None
         note_texts = []
         for n in notes:
@@ -670,9 +672,9 @@ def _merge_duplicate_songs(con: sqlite3.Connection) -> int:
         if notes:
             status = str(chosen["status"] or "Nie słuchałem")
             con.execute(
-                """INSERT INTO song_notes(song_id,heard,status,note,updated_at) VALUES(?,?,?,?,?)
-                   ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,note=excluded.note,updated_at=excluded.updated_at""",
-                (cid, int(heard), status, "\n---\n".join(note_texts), chosen["updated_at"]),
+                """INSERT INTO song_notes(song_id,heard,status,downloaded,note,updated_at) VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,downloaded=excluded.downloaded,note=excluded.note,updated_at=excluded.updated_at""",
+                (cid, int(heard), status, int(downloaded), "\n---\n".join(note_texts), chosen["updated_at"]),
             )
 
         for dup in variants[1:]:
@@ -782,6 +784,8 @@ def init_db() -> None:
         "airplay_chart_title_relink_v1",
         "airplay_chart_title_relink_v2",
         "status_taxonomy_v2",
+        "status_taxonomy_v3",
+        "song_downloaded_v1",
         "airplay_dead_station_cleanup_v1",
         "airplay_eska_jingle_cleanup_v1",
     }
@@ -847,6 +851,11 @@ def init_db() -> None:
                     if "reported_peak" not in cols:
                         con.execute("ALTER TABLE chart_entries ADD COLUMN reported_peak INTEGER")
 
+                    note_cols = {row["name"] for row in con.execute("PRAGMA table_info(song_notes)").fetchall()}
+                    if "downloaded" not in note_cols:
+                        con.execute("ALTER TABLE song_notes ADD COLUMN downloaded INTEGER NOT NULL DEFAULT 0")
+                    con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_downloaded_v1','done')")
+
                     # Remove incomplete 100-position issues left by early experimental
                     # parsers / failed pre-0.1.9 transactions. They would otherwise make
                     # coverage look complete and distort scores until a valid issue lands.
@@ -902,6 +911,19 @@ def init_db() -> None:
                                 (new_status, old_status),
                             )
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('status_taxonomy_v2','done')")
+
+                    status_mig_v3 = con.execute("SELECT value FROM app_meta WHERE key='status_taxonomy_v3'").fetchone()
+                    if not status_mig_v3:
+                        status_map_v3 = {
+                            "Candidate": "CF1 Candidate",
+                            "CF Candidate": "CF1 Candidate",
+                        }
+                        for old_status, new_status in status_map_v3.items():
+                            con.execute(
+                                "UPDATE song_notes SET status=? WHERE status=?",
+                                (new_status, old_status),
+                            )
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('status_taxonomy_v3','done')")
 
                     dead_station_mig = con.execute("SELECT value FROM app_meta WHERE key='airplay_dead_station_cleanup_v1'").fetchone()
                     if not dead_station_mig:
@@ -1051,13 +1073,16 @@ def upsert_issue(source: str, chart_date: str | date, issue_key: str, chart_size
         return issue_id
 
 
-def update_note(song_id: int, heard: bool, status: str, note: str) -> None:
+def update_note(song_id: int, heard: bool, status: str, note: str, downloaded: bool | None = None) -> None:
     init_db()
     with connect() as con:
+        if downloaded is None:
+            existing = con.execute("SELECT downloaded FROM song_notes WHERE song_id=?", (int(song_id),)).fetchone()
+            downloaded = bool(existing["downloaded"]) if existing else False
         con.execute(
-            """INSERT INTO song_notes(song_id,heard,status,note,updated_at) VALUES(?,?,?,?,?)
-               ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,note=excluded.note,updated_at=excluded.updated_at""",
-            (song_id, int(heard), status, note, _utcnow()),
+            """INSERT INTO song_notes(song_id,heard,status,downloaded,note,updated_at) VALUES(?,?,?,?,?,?)
+               ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,downloaded=excluded.downloaded,note=excluded.note,updated_at=excluded.updated_at""",
+            (song_id, int(heard), status, int(bool(downloaded)), note, _utcnow()),
         )
 
 
@@ -1083,6 +1108,7 @@ def list_songs() -> list[dict]:
             """SELECT s.id AS song_id,s.artist,s.title,s.release_date,
                       COALESCE(n.heard,0) AS heard,
                       COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.downloaded,0) AS downloaded,
                       COALESCE(n.note,'') AS note,
                       n.updated_at
                FROM songs s
@@ -1099,6 +1125,7 @@ def get_song(song_id: int) -> dict | None:
         row = con.execute(
             """SELECT s.id AS song_id,s.artist,s.title,s.release_date,s.artist_key,s.title_key,
                       COALESCE(n.heard,0) AS heard,COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.downloaded,0) AS downloaded,
                       COALESCE(n.note,'') AS note,n.updated_at
                FROM songs s LEFT JOIN song_notes n ON n.song_id=s.id WHERE s.id=?""",
             (int(song_id),),
@@ -1181,7 +1208,7 @@ def load_notes() -> list[dict]:
     init_db()
     with connect() as con:
         rows = con.execute(
-            "SELECT song_id,heard,status,note,updated_at FROM song_notes"
+            "SELECT song_id,heard,status,downloaded,note,updated_at FROM song_notes"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1369,6 +1396,7 @@ def issue_entries_enriched(issue_id: int) -> list[dict]:
                       s.id AS song_id,
                       COALESCE(n.heard,0) AS heard,
                       COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.downloaded,0) AS downloaded,
                       COALESCE(n.note,'') AS note
                FROM chart_entries e
                JOIN songs s ON s.id=e.song_id
