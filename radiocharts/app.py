@@ -857,100 +857,98 @@ function(params) {
 """)
 
 
-FLOATING_HSCROLL_INSTALLER = JsCode("""
+TOP_HSCROLL_INSTALLER = JsCode("""
 function(params) {
-  // AG Grid's native horizontal scrollbar sits at the very bottom of a tall
-  // component iframe. Mirror it at the bottom of the browser viewport while
-  // this grid is visible, so wide Dashboard/Emisje tables can be moved sideways
-  // without first scrolling to the final row.
+  // Duplicate AG Grid's horizontal scrollbar directly below the column header.
+  // This lives inside the grid iframe, so it works reliably even when Streamlit
+  // sandboxes the component and prevents us from attaching UI to window.top.
   try {
-    if (window.__rcFloatingHScrollInstalled) return;
-    window.__rcFloatingHScrollInstalled = true;
+    if (window.__rcTopHScrollInstalled) return;
+    window.__rcTopHScrollInstalled = true;
 
-    const host = window.top || window;
-    const doc = host.document;
-    const frame = window.frameElement;
-    if (!frame || !doc) return;
-    const owner = 'rc-grid-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+    const header = document.querySelector('.ag-header');
+    if (!header || !header.parentElement) return;
+    const parent = header.parentElement;
 
-    let bar = doc.getElementById('__rcFloatingGridHScroll');
-    if (!bar) {
-      bar = doc.createElement('div');
-      bar.id = '__rcFloatingGridHScroll';
-      bar.style.cssText = [
-        'display:none','position:fixed','bottom:0','height:18px','overflow-x:auto','overflow-y:hidden',
-        'z-index:2147482500','background:rgba(17,21,27,.96)','border-top:1px solid rgba(150,160,175,.34)',
-        'box-shadow:0 -2px 7px rgba(0,0,0,.28)'
-      ].join(';');
-      const inner = doc.createElement('div');
-      inner.id = '__rcFloatingGridHScrollInner';
-      inner.style.height = '1px';
-      bar.appendChild(inner);
-      doc.body.appendChild(bar);
-      bar.addEventListener('scroll', function() {
-        const vp = bar.__rcViewport;
-        if (!vp || bar.__rcSyncing) return;
-        try { vp.scrollLeft = bar.scrollLeft; } catch(e) {}
-      });
-    }
-    const inner = bar.querySelector('#__rcFloatingGridHScrollInner');
+    const bar = document.createElement('div');
+    bar.className = 'rc-top-hscroll';
+    bar.style.cssText = [
+      'display:none','flex:0 0 16px','height:16px','min-height:16px','width:100%',
+      'box-sizing:border-box','overflow-x:auto','overflow-y:hidden','background:#171c23',
+      'border-bottom:1px solid rgba(150,160,175,.34)','z-index:20'
+    ].join(';');
+    const inner = document.createElement('div');
+    inner.style.height = '1px';
+    inner.style.minWidth = '1px';
+    bar.appendChild(inner);
+    parent.insertBefore(bar, header.nextSibling);
 
     const findViewport = () => document.querySelector('.ag-body-horizontal-scroll-viewport')
       || document.querySelector('.ag-center-cols-viewport');
+    const findContent = () => document.querySelector('.ag-body-horizontal-scroll-container')
+      || document.querySelector('.ag-center-cols-container');
+    let syncing = false;
 
     const update = () => {
       try {
-        if (!frame.isConnected) {
-          if (bar.dataset.owner === owner) bar.style.display = 'none';
-          return;
-        }
         const vp = findViewport();
-        if (!vp) return;
-        const rect = frame.getBoundingClientRect();
-        const visible = rect.bottom > 0 && rect.top < host.innerHeight;
-        const scrollWidth = Math.max(vp.scrollWidth || 0, vp.firstElementChild ? vp.firstElementChild.scrollWidth || 0 : 0);
-        const overflow = scrollWidth > (vp.clientWidth || 0) + 4;
-        if (!visible || !overflow) {
-          if (bar.dataset.owner === owner) bar.style.display = 'none';
-          return;
-        }
-        bar.dataset.owner = owner;
-        bar.__rcViewport = vp;
-        const left = Math.max(0, rect.left);
-        const right = Math.max(0, host.innerWidth - rect.right);
-        bar.style.left = left + 'px';
-        bar.style.right = right + 'px';
-        bar.style.display = 'block';
-        inner.style.width = scrollWidth + 'px';
-        if (Math.abs(bar.scrollLeft - vp.scrollLeft) > 1) {
-          bar.__rcSyncing = true;
+        const content = findContent();
+        if (!vp || !content) return;
+        const contentWidth = Math.max(content.scrollWidth || 0, content.offsetWidth || 0, vp.scrollWidth || 0);
+        const overflow = contentWidth > (vp.clientWidth || 0) + 4;
+        bar.style.display = overflow ? 'block' : 'none';
+        if (!overflow) return;
+        // The proxy spans the whole grid, including pinned identity columns. Add
+        // that width difference so both scrollbars have exactly the same range.
+        const pinnedDiff = Math.max(0, (bar.clientWidth || 0) - (vp.clientWidth || 0));
+        inner.style.width = (contentWidth + pinnedDiff) + 'px';
+        if (!syncing && Math.abs(bar.scrollLeft - vp.scrollLeft) > 1) {
+          syncing = true;
           bar.scrollLeft = vp.scrollLeft;
-          bar.__rcSyncing = false;
+          syncing = false;
         }
       } catch(e) {}
     };
 
-    const bindViewport = () => {
+    bar.addEventListener('scroll', function() {
+      if (syncing) return;
       const vp = findViewport();
-      if (vp && !vp.__rcProxyBound) {
-        vp.__rcProxyBound = true;
-        vp.addEventListener('scroll', update, {passive:true});
+      if (!vp) return;
+      syncing = true;
+      try { vp.scrollLeft = bar.scrollLeft; } catch(e) {}
+      syncing = false;
+    }, {passive:true});
+
+    const bind = () => {
+      const vp = findViewport();
+      if (vp && !vp.__rcTopProxyBound) {
+        vp.__rcTopProxyBound = true;
+        vp.addEventListener('scroll', function() {
+          if (syncing) return;
+          syncing = true;
+          try { bar.scrollLeft = vp.scrollLeft; } catch(e) {}
+          syncing = false;
+        }, {passive:true});
       }
       update();
     };
-    host.addEventListener('scroll', update, true);
-    host.addEventListener('resize', update, {passive:true});
-    const cleanupTimer = host.setInterval(function() {
-      if (!frame.isConnected) {
-        if (bar.dataset.owner === owner) bar.style.display = 'none';
-        try { host.clearInterval(cleanupTimer); } catch(e) {}
-        return;
+
+    try {
+      if (params && params.api) {
+        ['columnResized','columnVisible','columnPinned','displayedColumnsChanged','gridSizeChanged'].forEach(function(name) {
+          try { params.api.addEventListener(name, update); } catch(e) {}
+        });
       }
-      update();
-    }, 450);
-    setTimeout(bindViewport, 60);
-    setTimeout(bindViewport, 250);
-    setTimeout(bindViewport, 800);
+    } catch(e) {}
+    try {
+      const ro = new ResizeObserver(update);
+      ro.observe(parent);
+      const vp = findViewport();
+      if (vp) ro.observe(vp);
+    } catch(e) {}
+    setTimeout(bind, 60);
+    setTimeout(bind, 250);
+    setTimeout(bind, 800);
   } catch(e) {}
 }
 """)
@@ -996,7 +994,7 @@ def install_client_helpers() -> None:
             wrap = doc.createElement('div');
             wrap.id = '__rcFloatingPlayer';
             wrap.style.cssText = [
-              'display:none','position:fixed','left:50%','bottom:125px','transform:translateX(-50%)',
+              'display:none','position:fixed','left:50%','bottom:75px','transform:translateX(-50%)',
               'z-index:2147483000','width:min(760px,calc(100vw - 36px))','box-sizing:border-box',
               'background:rgba(22,27,35,.985)','border:1px solid rgba(160,175,195,.42)',
               'border-radius:11px','box-shadow:0 -8px 28px rgba(0,0,0,.44)',
@@ -1198,7 +1196,7 @@ def render_song_grid(
     gb.configure_selection(selection_mode="single", use_checkbox=False, suppressRowClickSelection=False)
     gb.configure_grid_options(rowHeight=36, animateRows=False, onCellClicked=GRID_CLICK_HANDLER)
     if floating_hscroll:
-        gb.configure_grid_options(onGridReady=FLOATING_HSCROLL_INSTALLER)
+        gb.configure_grid_options(onGridReady=TOP_HSCROLL_INSTALLER)
 
     if "song_id" in show.columns:
         gb.configure_column("song_id", hide=True)
@@ -1675,8 +1673,6 @@ if view_key == "dashboard":
             st.dataframe(health_df, hide_index=True, use_container_width=True, height=285)
             st.caption("Publikacja = typowa kadencja źródła. „Powinno być ≥” jest liczone w tej samej semantyce daty, którą zwraca dane źródło (np. koniec okresu UK/OLiS, sobotnia data wydania Billboard; ESKA = dzień odczytu). Status pobrania i data notowania są rozdzielone.")
 
-        dashboard_count_slot = st.empty()
-
         period_map = {
             "1 tydz.": 7,
             "2 tyg.": 14,
@@ -1686,7 +1682,12 @@ if view_key == "dashboard":
             "6 mies.": 183,
             "Całość": 0,
         }
-        ctl_period, ctl_scope, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns([1.05, 1.35, .9, 1.1, 1.1, 1.0])
+        ctl_count, ctl_period, ctl_scope, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns([1.10, 1.10, 1.48, .82, 1.0, 1.0, .92])
+        ctl_count.markdown(
+            '<div style="font-size:.76rem;font-weight:600;line-height:1.18;margin:0 0 .08rem;">Utwory (filtr / okres)</div>',
+            unsafe_allow_html=True,
+        )
+        dashboard_count_slot = ctl_count.empty()
         period_label = ctl_period.selectbox(
             "Okres wskaźników",
             list(period_map),
@@ -1742,10 +1743,9 @@ if view_key == "dashboard":
             view = view.reset_index(drop=True)
 
             dashboard_count_slot.markdown(
-                f'<div style="display:inline-flex;align-items:baseline;gap:.45rem;border:1px solid #3e4653;'
-                f'border-radius:6px;background:#1d232c;padding:.28rem .48rem;margin:.02rem 0 .18rem;">'
-                f'<span style="color:#aeb6c2;font-size:.76rem;">Utwory (filtr / okres)</span>'
-                f'<strong style="font-size:.98rem;">{len(view)} / {len(period_df)}</strong></div>',
+                f'<div style="display:flex;align-items:center;justify-content:center;border:1px solid #3e4653;'
+                f'border-radius:6px;background:#1d232c;min-height:2.1rem;padding:.22rem .40rem;margin:0;">'
+                f'<strong style="font-size:.95rem;white-space:nowrap;">{len(view)} / {len(period_df)}</strong></div>',
                 unsafe_allow_html=True,
             )
 
@@ -1784,9 +1784,18 @@ if view_key == "dashboard":
             for col in pos_cols:
                 show[col] = show[col].map(position_sort_value).astype(int)
             show = show.rename(columns={c: c.replace("_pos", "") for c in pos_cols})
+            # streamlit-aggrid keeps its own frontend row model for a stable widget key.
+            # When Dashboard filters/search changed, the Python frame was fresh but the
+            # existing grid could keep showing the previous rows until a full browser
+            # refresh.  Include every row-affecting control in the component key so the
+            # grid is remounted immediately as the user types/clears the search box.
+            dashboard_grid_state = quote(
+                f"{min_fam}|{min_mom}|{int(only_unheard)}|{normalize(song_query)}",
+                safe="",
+            )[:120]
             render_song_grid(
                 show,
-                key=f"dashboard_grid_{lookback}_{scope}_{source_layout}",
+                key=f"dashboard_grid_{lookback}_{scope}_{source_layout}_{dashboard_grid_state}",
                 height=660,
                 editable_state=True,
                 source_layout=source_layout,
