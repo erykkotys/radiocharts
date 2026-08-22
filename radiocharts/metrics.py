@@ -261,6 +261,11 @@ def compute_scores(
 
         first = song_meta[sid]
         rel = first.get("release_date") or ""
+        first_chart_date = min(
+            str(r["chart_date"])[:10]
+            for rows_for_source in per_source_rows.values()
+            for r in rows_for_source
+        )
         age_weeks = None
         if rel:
             try:
@@ -281,6 +286,7 @@ def compute_scores(
             "artist": first["artist"],
             "title": first["title"],
             "release_date": rel,
+            "first_chart_date": first_chart_date,
             "age_weeks": age_weeks,
             "familiarity": round(familiarity, 1),
             "momentum": round(momentum, 1),

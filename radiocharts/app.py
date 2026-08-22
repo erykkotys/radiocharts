@@ -420,9 +420,46 @@ st.markdown('<div class="rc-app-title">📻 <span>RadioCharts Research</span></d
 st.markdown('<div class="rc-app-subtitle">Familiarity, momentum i radio presence · wsparcie odsłuchu i ręcznej decyzji</div>', unsafe_allow_html=True)
 
 STATUSES = [
-    "Nie słuchałem", "Ignore", "Watch", "Candidate", "Current", "Current Familiar", "Recurrent",
-    "Poza formatem", "Baza CF1", "Baza CF2", "Baza R1", "Baza R2", "Poza bazą", "Słabe",
+    "Nie słuchałem",
+    "Watch",
+    "R1 Candidate",
+    "CF Candidate",
+    "Baza Hold",
+    "Słabe",
+    "Baza R2",
+    "Baza R1",
+    "Baza CF2",
+    "Baza CF1",
+    "Poza formatem",
 ]
+
+STATUS_ALIASES = {
+    "Ignore": "Poza formatem",
+    "Candidate": "CF Candidate",
+    "Current": "Baza CF2",
+    "Current Familiar": "Baza CF1",
+    "Recurrent": "Baza R1",
+    "Poza bazą": "Baza Hold",
+}
+
+def normalized_status(value: str | None) -> str:
+    raw = str(value or "Nie słuchałem")
+    return STATUS_ALIASES.get(raw, raw if raw in STATUSES else "Nie słuchałem")
+
+
+def release_month(exact_release: object = None, first_chart: object = None) -> str:
+    """YYYY/MM. A leading ~ means first chart appearance, not an exact release date."""
+    raw = str(exact_release or "").strip()
+    if raw and raw.lower() not in {"nan", "none", "nat"}:
+        m = re.match(r"^(\d{4})-(\d{2})", raw)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    raw = str(first_chart or "").strip()
+    if raw and raw.lower() not in {"nan", "none", "nat"}:
+        m = re.match(r"^(\d{4})-(\d{2})", raw)
+        if m:
+            return f"~{m.group(1)}/{m.group(2)}"
+    return "—"
 
 
 def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
@@ -435,7 +472,7 @@ def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
         notes_df = pd.DataFrame(note_rows).set_index("song_id")
         ids = out["song_id"].astype(int)
         out["heard"] = [bool(notes_df.at[i, "heard"]) if i in notes_df.index else False for i in ids]
-        out["status"] = [str(notes_df.at[i, "status"]) if i in notes_df.index else "Nie słuchałem" for i in ids]
+        out["status"] = [normalized_status(notes_df.at[i, "status"]) if i in notes_df.index else "Nie słuchałem" for i in ids]
         out["note"] = [str(notes_df.at[i, "note"] or "") if i in notes_df.index else "" for i in ids]
     else:
         out["heard"] = False
@@ -575,6 +612,14 @@ function(params) {
 }
 """)
 
+AVERAGE_POSITION_FORMATTER = JsCode("""
+function(params) {
+  const v = Number(params.value);
+  if (!isFinite(v) || v >= 999) return '-';
+  return v.toFixed(1);
+}
+""")
+
 GRID_CLICK_HANDLER = JsCode("""
 function(params) {
   const field = params && params.colDef ? params.colDef.field : null;
@@ -687,23 +732,20 @@ def install_client_helpers() -> None:
             wrap = doc.createElement('div');
             wrap.id = '__rcFloatingPlayer';
             wrap.style.cssText = [
-              'display:none','position:fixed','left:50%','bottom:0','transform:translateX(-50%)',
-              'z-index:2147483000','width:min(980px,calc(100vw - 28px))','box-sizing:border-box',
+              'display:none','position:fixed','left:50%','bottom:24px','transform:translateX(-50%)',
+              'z-index:2147483000','width:min(760px,calc(100vw - 36px))','box-sizing:border-box',
               'background:rgba(22,27,35,.985)','border:1px solid rgba(160,175,195,.42)',
-              'border-bottom:0','border-radius:13px 13px 0 0','box-shadow:0 -10px 36px rgba(0,0,0,.48)',
-              'padding:10px 13px 9px','font-family:system-ui,-apple-system,Segoe UI,sans-serif','color:#f4f6f8'
+              'border-radius:11px','box-shadow:0 -8px 28px rgba(0,0,0,.44)',
+              'padding:6px 10px 6px','font-family:system-ui,-apple-system,Segoe UI,sans-serif','color:#f4f6f8'
             ].join(';');
             wrap.innerHTML = `
-              <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
-                <div style="min-width:0;flex:1">
-                  <div id="__rcPlayerTitle" style="font-size:14px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Podgląd</div>
-                  <div id="__rcPlayerArtist" style="font-size:12px;opacity:.68;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
-                </div>
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:3px">
+                <div id="__rcPlayerTitle" style="min-width:0;flex:1;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Podgląd</div>
                 <a id="__rcPlayerSpotify" href="#" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:#d7f9df;text-decoration:none;white-space:nowrap">Spotify ↗</a>
                 <button id="__rcPlayerClose" type="button" aria-label="Zamknij" style="border:0;background:transparent;color:#fff;font-size:22px;cursor:pointer;line-height:1;padding:0 3px">×</button>
               </div>
-              <audio id="__rcPlayerAudio" controls preload="metadata" style="display:block;width:100%;height:34px"></audio>
-              <div id="__rcPlayerStatus" style="font-size:10px;opacity:.55;margin-top:3px">30-sekundowy podgląd Apple/iTunes</div>`;
+              <audio id="__rcPlayerAudio" controls preload="metadata" style="display:block;width:100%;height:32px"></audio>
+              <div id="__rcPlayerStatus" style="display:none"></div>`;
             doc.body.appendChild(wrap);
             const audio = wrap.querySelector('#__rcPlayerAudio');
             wrap.querySelector('#__rcPlayerClose').addEventListener('click', function(ev) {
@@ -741,8 +783,7 @@ def install_client_helpers() -> None:
             audio.removeAttribute('src');
             audio.load();
             host.__rcPreviewSongId = songId;
-            player.querySelector('#__rcPlayerTitle').textContent = title || 'Podgląd';
-            player.querySelector('#__rcPlayerArtist').textContent = artist;
+            player.querySelector('#__rcPlayerTitle').textContent = (artist && title) ? (artist + ' — ' + title) : (title || artist || 'Podgląd');
             const spot = player.querySelector('#__rcPlayerSpotify');
             if (spotify) { spot.href = spotify; spot.style.display = ''; }
             else { spot.style.display = 'none'; }
@@ -821,6 +862,25 @@ def render_preview_button(song_id: int | str, artist: str, title: str, spotify: 
         scrolling=False,
     )
 
+@st.fragment
+def render_song_note_editor(song_id: int, heard_value: bool, status_value: str, note_value: str) -> None:
+    """Small fragment so editing one song does not rerun/repaint the whole detail page."""
+    with st.container(border=True):
+        with st.form(f"note_form_{song_id}"):
+            n1, n2, n3, n4 = st.columns([1.0, 1.5, 4.8, .8])
+            heard = n1.checkbox("Przesłuchany", value=bool(heard_value))
+            current_status = normalized_status(status_value)
+            idx = STATUSES.index(current_status) if current_status in STATUSES else 0
+            status = n2.selectbox("Status", STATUSES, index=idx)
+            note = n3.text_input("Notatka", value=note_value or "")
+            with n4:
+                st.caption("Zapis")
+                save_note = st.form_submit_button("Zapisz", use_container_width=True)
+            if save_note:
+                update_note(song_id, heard, status, note)
+                st.toast("Zapisano")
+
+
 PERCENT_FORMATTER = JsCode("""
 function(params) {
   if (params.value === null || params.value === undefined || isNaN(params.value)) return '-';
@@ -837,6 +897,7 @@ function(params) {
 """)
 
 
+@st.fragment
 def render_song_grid(
     frame: pd.DataFrame,
     *,
@@ -844,6 +905,7 @@ def render_song_grid(
     height: int = 640,
     editable_state: bool = True,
     source_layout: str = "full",
+    station_total: int | None = None,
 ) -> pd.DataFrame:
     """AG Grid table: row highlight, editing, responsive source columns and preview player."""
     show = frame.copy()
@@ -869,6 +931,17 @@ def render_song_grid(
         gb.configure_column("artist", "Wykonawca", minWidth=170 if pin_identity else 190, width=205 if pin_identity else 220, pinned="left" if pin_identity else None)
     if "title" in show.columns:
         gb.configure_column("title", "Tytuł", minWidth=185 if pin_identity else 210, width=235 if pin_identity else 260, pinned="left" if pin_identity else None)
+    if "release_month" in show.columns:
+        gb.configure_column(
+            "release_month", "Premiera", minWidth=86, width=92,
+            headerTooltip="YYYY/MM; ~YYYY/MM = miesiąc pierwszego pojawienia się w naszych notowaniach, gdy brak dokładnej daty premiery.",
+        )
+    if "avg_position" in show.columns:
+        gb.configure_column(
+            "avg_position", "Śr. poz.", minWidth=82, width=88,
+            headerTooltip="Średnia arytmetyczna bieżącej pozycji RMF, ZET, ESKA, OLiA i OLiS — tylko z list, na których utwór jest obecny.",
+            valueFormatter=AVERAGE_POSITION_FORMATTER,
+        )
     if "details" in show.columns:
         gb.configure_column(
             "details", "Otwórz", minWidth=78, width=84, sortable=False, filter=False,
@@ -965,7 +1038,8 @@ def render_song_grid(
     if "spins" in show.columns:
         gb.configure_column("spins", "Emisje", width=92, minWidth=84, pinned="left" if source_layout == "airplay" else None)
     if "stations_count" in show.columns:
-        gb.configure_column("stations_count", "Stacje", width=82, minWidth=76)
+        station_label = f"Stacje ({int(station_total)})" if station_total is not None else "Stacje"
+        gb.configure_column("stations_count", station_label, width=92, minWidth=84)
     if "avg_per_day" in show.columns:
         gb.configure_column("avg_per_day", "Emisje/dzień łącznie", width=150, minWidth=138)
     if "avg_station_day" in show.columns:
@@ -1037,7 +1111,6 @@ def render_song_grid(
                 changed += 1
         if changed:
             st.toast(f"Zapisano status dla {changed} utworów.")
-            st.rerun()
     return edited
 
 
@@ -1326,6 +1399,18 @@ if view_key == "dashboard":
             ])
             st.caption(f"Okres wskaźników: {period_label}. Cała baza zawiera obecnie {len(df)} utworów. Rising nie ma już osobnej tabeli — wystarczy sortować Momentum albo ustawić jego minimum.")
 
+            core_avg_cols = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in view.columns]
+            if core_avg_cols:
+                view["avg_position"] = view[core_avg_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1)
+            else:
+                view["avg_position"] = float("nan")
+            view["release_month"] = [
+                release_month(rel, first)
+                for rel, first in zip(
+                    view["release_date"] if "release_date" in view.columns else [""] * len(view),
+                    view["first_chart_date"] if "first_chart_date" in view.columns else [""] * len(view),
+                )
+            ]
             view["details"] = [song_link(sid) for sid in view.song_id]
             view["spotify"] = [spotify_search_url(a, t) for a, t in zip(view.artist, view.title)]
             view["spotify_copy"] = view["spotify"]
@@ -1334,9 +1419,9 @@ if view_key == "dashboard":
             view["status"] = view["status"].fillna("Nie słuchałem").astype(str)
 
             cols = [
-                "song_id", "artist", "title", "details", "preview", "spotify", "spotify_copy", "heard", "status",
+                "song_id", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status",
                 "familiarity", "momentum", "radio_presence", "radio_reach", "radio_rotation",
-                "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
+                "avg_position", "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
                 "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
                 "UK_pos", "UK_weeks", "BILLBOARD_pos", "BILLBOARD_weeks", "note",
             ]
@@ -1505,20 +1590,10 @@ elif view_key == "song":
                         fig.update_layout(height=430, legend=dict(orientation="h", yanchor="top", y=-0.12, x=0), margin=dict(t=12,b=65,l=35,r=20))
                         st.plotly_chart(fig, use_container_width=True)
 
-                with st.container(border=True):
-                    with st.form(f"note_form_{song_id}"):
-                        n1, n2, n3, n4 = st.columns([1.0, 1.5, 4.8, .8])
-                        heard = n1.checkbox("Przesłuchany", value=bool(row.heard))
-                        idx = STATUSES.index(row.status) if row.status in STATUSES else 0
-                        status = n2.selectbox("Status", STATUSES, index=idx)
-                        note = n3.text_input("Notatka", value=row.note or "")
-                        with n4:
-                            st.caption("Zapis")
-                            save_note = st.form_submit_button("Zapisz", use_container_width=True)
-                        if save_note:
-                            update_note(song_id, heard, status, note)
-                            st.toast("Zapisano")
-                            st.rerun()
+                render_song_note_editor(song_id, bool(row.heard), str(row.status), str(row.note or ""))
+                # Player jest podniesiony nad dół okna; dodatkowy luz zapobiega
+                # przycinaniu ostatniego wiersza formularza na niższych ekranach.
+                st.markdown('<div style="height:5rem"></div>', unsafe_allow_html=True)
 
 
 elif view_key == "archive":
@@ -1765,6 +1840,13 @@ elif view_key == "airplay":
                     0.70 * ranked["station_reach"].fillna(0) + 0.30 * ranked["radio_rotation"]
                 ).round(1) if reporting_station_count else float("nan")
                 ranked["last_play"] = ranked["last_play"].astype(str).str.replace("T", " ", regex=False)
+                ranked["release_month"] = [
+                    release_month(rel, first)
+                    for rel, first in zip(
+                        ranked["release_date"] if "release_date" in ranked.columns else [""] * len(ranked),
+                        ranked["first_chart_date"] if "first_chart_date" in ranked.columns else [""] * len(ranked),
+                    )
+                ]
                 ranked = with_notes(ranked)
 
                 # Join only latest chart-derived positions.  This avoids loading
@@ -1782,8 +1864,8 @@ elif view_key == "airplay":
                 ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
                 ranked["spotify_copy"] = ranked["spotify"]
                 air_cols = [
-                    "song_id", "spins", "artist", "title", "details", "preview", "spotify", "spotify_copy", "heard", "status",
-                    "stations_count", "station_reach", "radio_rotation", "radio_presence_period",
+                    "song_id", "spins", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status",
+                    "stations_count", "radio_rotation", "radio_presence_period",
                     "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
                     "RMF", "ZET", "OLIA", "OLIS", "ESKA", "note",
                 ]
@@ -1795,12 +1877,14 @@ elif view_key == "airplay":
                     height=690,
                     editable_state=True,
                     source_layout="airplay",
+                    station_total=len(selected_ids),
                 )
                 st.caption(
-                    "**Emisje/dzień łącznie** = suma odtworzeń ze wszystkich wybranych stacji podzielona przez liczbę dni — "
-                    "to NIE jest średnia na jedną stację. **Śr./grającą stację/dzień** dzieli dodatkowo przez liczbę stacji, które faktycznie zagrały utwór. "
-                    "**Zasięg stacji** = odsetek raportujących stacji, **Rotacja** = intensywność grania (6+/stację/dzień = 100), "
-                    "a **Radio Presence** = 70% zasięgu + 30% rotacji. Pozycje list są tylko podglądem."
+                    "**Stacje (N)** = ile stacji z aktualnego filtra gra dany utwór; N w nagłówku to maksymalna liczba wybranych stacji. "
+                    "**Emisje/dzień łącznie** = suma odtworzeń ze wszystkich wybranych stacji / liczba dni. "
+                    "**Śr./grającą stację/dzień** dzieli dodatkowo przez liczbę stacji, które faktycznie zagrały utwór. "
+                    "**Rotacja** = intensywność grania (6+/stację/dzień = 100). Radio Presence nadal uwzględnia szerokość grania, "
+                    "ale osobna kolumna Zasięg została usunięta jako redundantna ze Stacjami."
                 )
 
             with tab_track:
@@ -1856,13 +1940,12 @@ elif view_key == "airplay":
                 track_presence = (0.70 * track_reach + 0.30 * track_rotation) if track_reach is not None else None
                 render_compact_metrics([
                     ("Emisje", total_track_spins),
-                    ("Stacje", track_station_count),
-                    ("Zasięg stacji", f"{track_reach:.0f}%" if track_reach is not None else "—"),
+                    (f"Stacje ({len(selected_ids)})", track_station_count),
                     ("Rotacja", f"{track_rotation:.0f}%" if track_reach is not None else "—"),
                     ("Radio Presence", f"{track_presence:.0f}%" if track_presence is not None else "—"),
                     ("Emisje/dzień łącznie", f"{total_track_spins / period_days:.1f}"),
                     ("Śr./grającą stację/dzień", f"{track_station_day:.2f}"),
-                ], columns=7)
+                ], columns=6)
                 st.caption(f"Ostatnia zapisana emisja: {str(detail.get('last_play') or '—').replace('T', ' ')}")
 
                 chart_match = chart_latest[chart_latest.song_id.astype(int) == chosen_song_id] if not chart_latest.empty else pd.DataFrame()
@@ -2036,6 +2119,8 @@ else:
 5. **Notowania** — podejrzyj konkretny historyczny tydzień/listę bez mieszania go z bieżącym stanem.
 
 **Status, „Przesłuchany” i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji.
+
+Aktualna kolejność statusów roboczych: **Nie słuchałem → Watch → R1 Candidate → CF Candidate → Baza Hold → Słabe → Baza R2 → Baza R1 → Baza CF2 → Baza CF1 → Poza formatem**. Stare `Candidate` jest migrowane do `CF Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
             """
         )
 
@@ -2052,6 +2137,10 @@ else:
 - **Cała historia** — również utwory, które już zeszły ze wszystkich najnowszych list.
 
 Minimalne Familiarity/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli.
+
+**Śr. poz.** to zwykła średnia arytmetyczna z bieżących pozycji **RMF, ZET, ESKA, OLiA i OLiS**, ale tylko z tych list, na których utwór aktualnie występuje. To szybki skrót orientacyjny, nie osobny scoring.
+
+**Premiera** jest pokazywana jako `YYYY/MM`. Gdy baza ma dokładną datę wydania, miesiąc jest bez prefiksu. `~YYYY/MM` oznacza, że dokładnej daty nie mamy i pokazujemy miesiąc **pierwszego pojawienia się w naszych notowaniach**.
             """
         )
 
@@ -2123,10 +2212,9 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
 **Emisja** to jedno zapisane odtworzenie utworu przez jedną stację.
 
 - **Emisje** — suma wszystkich odtworzeń ze wszystkich wybranych stacji w okresie.
-- **Stacje** — liczba stacji, które zagrały utwór co najmniej raz.
-- **Zasięg stacji** — `stacje grające utwór / stacje raportujące w okresie × 100%`.
+- **Stacje (N)** — liczba stacji, które zagrały utwór co najmniej raz; `N` w nagłówku to liczba stacji w aktualnym filtrze.
 - **Rotacja** — intensywność grania na stacjach, które grają utwór; 6+/stację/dzień = 100%.
-- **Radio Presence** — `70% zasięgu + 30% rotacji`.
+- **Radio Presence** — `70% zasięgu + 30% rotacji`. Sam zasięg nadal jest liczony jako `stacje grające / stacje raportujące`, ale nie ma osobnej kolumny, bo praktycznie dublował informację z liczby stacji.
 - **Emisje/dzień łącznie** — wszystkie emisje utworu / liczba dni kalendarzowych. **17 oznacza 17 odtworzeń dziennie łącznie w całej wybranej grupie stacji, nie 17 na każdej stacji.**
 - **Śr./grającą stację/dzień** — emisje / dni / liczba stacji, które faktycznie zagrały utwór.
 - **Max/stacja** — ile razy najaktywniejsza stacja zagrała utwór w całym wybranym okresie.

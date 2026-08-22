@@ -730,6 +730,8 @@ def init_db() -> None:
         "airplay_link_songs_v1",
         "airplay_chart_title_relink_v1",
         "airplay_chart_title_relink_v2",
+        "status_taxonomy_v2",
+        "airplay_dead_station_cleanup_v1",
     }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
         # Hot-path for a running web/worker process. Migrations are checked once
@@ -831,6 +833,37 @@ def init_db() -> None:
                                WHERE issue_id IN (SELECT id FROM chart_issues WHERE source='BILLBOARD')"""
                         )
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('billboard_metadata_reset_v2','done')")
+
+                    status_mig = con.execute("SELECT value FROM app_meta WHERE key='status_taxonomy_v2'").fetchone()
+                    if not status_mig:
+                        status_map = {
+                            "Ignore": "Poza formatem",
+                            "Candidate": "CF Candidate",
+                            "Current": "Baza CF2",
+                            "Current Familiar": "Baza CF1",
+                            "Recurrent": "Baza R1",
+                            "Poza bazą": "Baza Hold",
+                        }
+                        for old_status, new_status in status_map.items():
+                            con.execute(
+                                "UPDATE song_notes SET status=? WHERE status=?",
+                                (new_status, old_status),
+                            )
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('status_taxonomy_v2','done')")
+
+                    dead_station_mig = con.execute("SELECT value FROM app_meta WHERE key='airplay_dead_station_cleanup_v1'").fetchone()
+                    if not dead_station_mig:
+                        # 2026-01-01..2026-04-30 backfill: these stations returned
+                        # zero plays in every successfully checked 2h window.
+                        dead_names = ("Brak nazwy #7", "Freee", "RDN Małopolska", "Radiofonia", "Łódź Extra")
+                        placeholders = ",".join("?" for _ in dead_names)
+                        con.execute(
+                            f"UPDATE airplay_stations SET active=0,updated_at=? WHERE name IN ({placeholders})",
+                            (_utcnow(), *dead_names),
+                        )
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_dead_station_cleanup_v1','done')"
+                        )
 
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('source_checks_v1','done')")
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v2','done')")
@@ -1836,13 +1869,19 @@ def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date
                     SELECT song_id,SUM(station_spins) AS spins,COUNT(*) AS stations_count,
                            MAX(station_spins) AS max_station_spins,MAX(station_last) AS last_play
                     FROM per_station GROUP BY song_id
+                ), chart_first AS (
+                    SELECT ce.song_id,MIN(i.chart_date) AS first_chart_date
+                    FROM chart_entries ce JOIN chart_issues i ON i.id=ce.issue_id
+                    GROUP BY ce.song_id
                 )
-                SELECT t.song_id,s.artist,s.title,s.artist_key,s.title_key,
+                SELECT t.song_id,s.artist,s.title,s.release_date,s.artist_key,s.title_key,
+                       cf.first_chart_date,
                        t.spins,t.stations_count,t.max_station_spins,
                        COALESCE(r.station_name,'') AS top_station,t.last_play,
                        ROUND(1.0*t.spins/CASE WHEN t.stations_count>0 THEN t.stations_count ELSE 1 END,1) AS avg_per_station
                 FROM totals t JOIN songs s ON s.id=t.song_id
                 LEFT JOIN ranked r ON r.song_id=t.song_id AND r.rn=1
+                LEFT JOIN chart_first cf ON cf.song_id=t.song_id
                 ORDER BY t.spins DESC,t.stations_count DESC,s.artist COLLATE NOCASE,s.title COLLATE NOCASE""",
             (*ids, start_ts, end_ts),
         ).fetchall()

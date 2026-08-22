@@ -10,5 +10,7 @@ def test_version_badge_is_attached_to_streamlit_header_layer():
 
 def test_release_version_file_matches_package_version():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.3.19"
-    assert '__version__ = "0.3.19"' in (root / "radiocharts" / "__init__.py").read_text(encoding="utf-8")
+    version = (root / "VERSION").read_text(encoding="utf-8").strip()
+    package = (root / "radiocharts" / "__init__.py").read_text(encoding="utf-8")
+    assert version and version != "dev"
+    assert f'__version__ = "{version}"' in package
