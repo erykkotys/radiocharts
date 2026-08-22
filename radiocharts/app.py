@@ -230,6 +230,101 @@ def render_compact_metrics(items: list[tuple[str, object]], columns: int | None 
     )
 
 
+AIRPLAY_QUICK_RANGES = [
+    "Ostatni tydzień",
+    "Ostatnie 2 tyg.",
+    "Ostatni miesiąc",
+    "Ostatnie 3 miesiące",
+    "Ostatnie pół roku",
+    "Ostatni rok",
+    "Własny zakres",
+]
+
+
+def _subtract_months(anchor: date, months: int) -> date:
+    """Calendar-month subtraction without an extra dependency."""
+    months = max(0, int(months))
+    total = anchor.year * 12 + (anchor.month - 1) - months
+    year, month0 = divmod(total, 12)
+    month = month0 + 1
+    # clamp the day to the destination month's last valid day
+    if month == 12:
+        next_month = date(year + 1, 1, 1)
+    else:
+        next_month = date(year, month + 1, 1)
+    last_day = (next_month - timedelta(days=1)).day
+    return date(year, month, min(anchor.day, last_day))
+
+
+def airplay_quick_range(preset: str, end_date: date, earliest: date | None = None) -> tuple[date, date]:
+    """Resolve a compact preset to an inclusive date range."""
+    label = str(preset or "")
+    if label == "Ostatni tydzień":
+        start = end_date - timedelta(days=6)
+    elif label == "Ostatnie 2 tyg.":
+        start = end_date - timedelta(days=13)
+    elif label == "Ostatni miesiąc":
+        start = _subtract_months(end_date, 1) + timedelta(days=1)
+    elif label == "Ostatnie 3 miesiące":
+        start = _subtract_months(end_date, 3) + timedelta(days=1)
+    elif label == "Ostatnie pół roku":
+        start = _subtract_months(end_date, 6) + timedelta(days=1)
+    elif label == "Ostatni rok":
+        start = _subtract_months(end_date, 12) + timedelta(days=1)
+    else:
+        start = end_date - timedelta(days=6)
+    if earliest is not None and start < earliest:
+        start = earliest
+    if start > end_date:
+        start = end_date
+    return start, end_date
+
+
+def render_airplay_range_picker(
+    *,
+    key_prefix: str,
+    default_end: date,
+    earliest: date | None = None,
+    default_preset: str = "Ostatni tydzień",
+) -> tuple[date, date]:
+    """Compact preset dropdown; exact date picker appears only for custom range."""
+    try:
+        default_idx = AIRPLAY_QUICK_RANGES.index(default_preset)
+    except ValueError:
+        default_idx = 0
+    c1, c2 = st.columns([1.05, 2.2])
+    preset = c1.selectbox(
+        "Zakres dat",
+        AIRPLAY_QUICK_RANGES,
+        index=default_idx,
+        key=f"{key_prefix}_preset",
+    )
+    if preset == "Własny zakres":
+        default_start, _ = airplay_quick_range("Ostatni tydzień", default_end, earliest)
+        selected = c2.date_input(
+            "Daty",
+            value=(default_start, default_end),
+            key=f"{key_prefix}_custom",
+            help="Zakres jest inkluzywny.",
+        )
+        if isinstance(selected, (list, tuple)) and len(selected) == 2:
+            start, end = selected
+        else:
+            start = end = selected if isinstance(selected, date) else default_end
+        if end < start:
+            start, end = end, start
+        if earliest is not None and start < earliest:
+            start = earliest
+        return start, end
+    start, end = airplay_quick_range(preset, default_end, earliest)
+    c2.markdown(
+        f'<div style="padding-top:1.45rem;color:#aeb6c2;font-size:.78rem">'
+        f'{html.escape(start.isoformat())} → {html.escape(end.isoformat())}</div>',
+        unsafe_allow_html=True,
+    )
+    return start, end
+
+
 def song_link(song_id: int, title: str | None = None) -> str:
     """Relative URL to the song detail view (compatible with LinkColumn)."""
     return f"?view=song&song={int(song_id)}"
@@ -1590,6 +1685,88 @@ elif view_key == "song":
                         fig.update_layout(height=430, legend=dict(orientation="h", yanchor="top", y=-0.12, x=0), margin=dict(t=12,b=65,l=35,r=20))
                         st.plotly_chart(fig, use_container_width=True)
 
+                st.markdown("### Emisje radiowe")
+                song_airplay_stations = list_airplay_stations(active_only=True)
+                song_station_ids = [int(s["station_id"]) for s in song_airplay_stations]
+                if not song_station_ids:
+                    st.caption("Brak aktywnych stacji w Emisjach.")
+                else:
+                    song_cov = airplay_coverage(song_station_ids)
+                    song_last_date = song_cov.get("last_date")
+                    song_first_date = song_cov.get("first_date")
+                    song_air_end = date.fromisoformat(str(song_last_date)) if song_last_date else date.today()
+                    song_air_earliest = date.fromisoformat(str(song_first_date)) if song_first_date else song_air_end
+                    song_air_start, song_air_end = render_airplay_range_picker(
+                        key_prefix=f"song_airplay_range_{song_id}",
+                        default_end=song_air_end,
+                        earliest=song_air_earliest,
+                        default_preset="Ostatni tydzień",
+                    )
+                    song_air_detail = cached_airplay_track_detail(
+                        airplay_revision(),
+                        tuple(sorted(song_station_ids)),
+                        song_air_start.isoformat(),
+                        song_air_end.isoformat(),
+                        song_id,
+                    )
+                    song_air_days = max(1, (song_air_end - song_air_start).days + 1)
+                    song_spins = int(song_air_detail.get("total_spins") or 0)
+                    song_station_count = int(song_air_detail.get("stations_count") or 0)
+                    song_avg_day = song_spins / song_air_days
+                    song_avg_station_day = song_spins / song_air_days / max(1, song_station_count)
+                    song_last_play = str(song_air_detail.get("last_play") or "—").replace("T", " ")
+                    render_compact_metrics([
+                        ("Emisje", song_spins),
+                        (f"Stacje ({len(song_station_ids)})", song_station_count),
+                        ("Emisje/dzień", f"{song_avg_day:.1f}"),
+                        ("Śr./grającą stację/dzień", f"{song_avg_station_day:.2f}"),
+                        ("Ostatnio", song_last_play),
+                    ], columns=5)
+                    st.caption(
+                        f"{song_air_start} → {song_air_end} · wszystkie aktywne stacje. "
+                        "Szczegóły per stacja są zwinięte poniżej, żeby karta Utworu pozostała kompaktowa."
+                    )
+
+                    with st.expander("Szczegóły emisji per stacja i dzień", expanded=False):
+                        detail_left, detail_right = st.columns([1.15, 1])
+                        station_df = pd.DataFrame(song_air_detail.get("stations") or [])
+                        with detail_left:
+                            if station_df.empty:
+                                st.caption("Brak zapisanych emisji tego utworu w wybranym okresie.")
+                            else:
+                                station_df["avg_period_day"] = (station_df["spins"] / song_air_days).round(2)
+                                station_df["avg_active_day"] = (station_df["spins"] / station_df["active_days"].clip(lower=1)).round(2)
+                                station_table = station_df[[
+                                    "station", "spins", "active_days", "avg_period_day", "avg_active_day"
+                                ]].rename(columns={
+                                    "station": "Stacja",
+                                    "spins": "Emisje",
+                                    "active_days": "Dni z emisją",
+                                    "avg_period_day": "Śr./dzień okresu",
+                                    "avg_active_day": "Śr./aktywny dzień",
+                                })
+                                st.dataframe(
+                                    station_table,
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    height=min(330, 38 + 35 * len(station_table)),
+                                )
+                        with detail_right:
+                            daily_df = pd.DataFrame(song_air_detail.get("daily") or [])
+                            if daily_df.empty:
+                                st.caption("Brak danych dziennych do wykresu.")
+                            else:
+                                daily_total = daily_df.groupby("play_date", as_index=False)["spins"].sum()
+                                daily_total["play_date"] = pd.to_datetime(daily_total["play_date"])
+                                air_fig = px.bar(
+                                    daily_total,
+                                    x="play_date",
+                                    y="spins",
+                                    labels={"play_date": "Dzień", "spins": "Emisje"},
+                                )
+                                air_fig.update_layout(height=285, margin=dict(t=10, b=35, l=25, r=10))
+                                st.plotly_chart(air_fig, use_container_width=True)
+
                 render_song_note_editor(song_id, bool(row.heard), str(row.status), str(row.note or ""))
                 # Player jest podniesiony nad dół okna; dodatkowy luz zapobiega
                 # przycinaniu ostatniego wiersza formularza na niższych ekranach.
@@ -1712,18 +1889,12 @@ elif view_key == "airplay":
             )
             selected_ids = [int(x) for x in selected_ids]
 
-        selected_range = st.date_input(
-            "Zakres dat",
-            value=(default_start, default_end),
-            key="airplay_range_v2",
-            help="Zakres jest inkluzywny. Ranking powstaje tylko z emisji zapisanych w tym okresie.",
+        range_start, range_end = render_airplay_range_picker(
+            key_prefix="airplay_range_v3",
+            default_end=default_end,
+            earliest=earliest,
+            default_preset="Ostatni tydzień",
         )
-        if isinstance(selected_range, (list, tuple)) and len(selected_range) == 2:
-            range_start, range_end = selected_range
-        else:
-            range_start = range_end = selected_range if isinstance(selected_range, date) else default_end
-        if range_end < range_start:
-            range_start, range_end = range_end, range_start
 
         expected_windows = len(completed_windows_in_range(range_start, range_end)) * len(selected_ids) if selected_ids else 0
         range_coverage = airplay_coverage(selected_ids, range_start, range_end) if selected_ids else {}
@@ -2221,7 +2392,11 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
 - **Najmocniejsza stacja** — stacja z największą liczbą emisji tego utworu.
 - **Ostatnio** — ostatnia zapisana godzina emisji.
 
+Zakres Emisji można ustawić jednym rozwijanym polem: **ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok**. Opcja **Własny zakres** pokazuje dokładny wybór dat. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji, a nie na „dzisiaj” za wszelką cenę.
+
 W zakładce **Najczęściej grane** pole wyszukiwania filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. W **Sprawdź utwór** wyszukiwanie jest znormalizowane (np. `meskie` = `męskie`) i pokazuje tylko rzeczywiste dopasowania, bez fuzzy-searchu po przypadkowych podobnych słowach.
+
+Na karcie **Utwór** jest osobna sekcja **Emisje radiowe** z takim samym wyborem zakresu. Pokazuje sumę emisji, liczbę stacji, średnią dzienną i średnią na grającą stację. Rozwijane **Szczegóły emisji per stacja i dzień** dodają tabelę stacji oraz niewielki wykres dzienny bez rozpychania całej karty.
 
 W szczegółach jednego utworu:
 
