@@ -1,3 +1,12 @@
+## 0.3.26 — synchronizacja bazy radia i czytelniejsze Emisje
+
+- Emisje pokazują osobno **Zasięg 7d** oraz **Zasięg** dla aktualnie wybranego okresu; okresowy Zasięg jest wyświetlany jako procent raportujących stacji z liczbą stacji w nawiasie.
+- RMF/ZET/OLiA/OLiS/ESKA w Emisjach używają kompaktowego zapisu pozycji z tygodniami, np. `#7 (5w)`.
+- Przesłuchano, Status i DL są ustawione bezpośrednio za Odsłuchem w głównych tabelach.
+- Taksonomia statusów obejmuje teraz wszystkie kategorie z lokalnej bazy radia: R2, R1, CF2, CF1, F1, G1, G2, SP1, SP2 i NB — zarówno jako `... Candidate`, jak i `Baza ...`.
+- Jednorazowa migracja produkcyjna importuje do wspólnego katalogu eksport bazy radia z 2026-08-25, aktualizuje status istniejących utworów do `Baza <Cat>`, dodaje brakujące i zaznacza DL.
+- W **Dane → Synchronizacja bazy radia** można później wrzucić kolejny plik TSV/TXT tego samego typu i ponownie wyrównać RadioCharts z biblioteką emisyjną.
+
 ## 0.3.2 — hotfix AG Grid / React
 
 - usunięte renderery zwracające surowe elementy DOM (`HTMLAnchorElement` / `HTMLButtonElement`), które powodowały React error #31 w `streamlit-aggrid`;

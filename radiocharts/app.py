@@ -22,7 +22,7 @@ from radiocharts.db import (
     airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision,
-    set_airplay_station_active, update_note,
+    parse_radio_library_tsv, set_airplay_station_active, sync_radio_library_tsv, update_note,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
@@ -396,7 +396,8 @@ def cached_basic_song_metrics(chart_rev: str, air_rev: str, song_key: tuple[int,
     scored = compute_scores(song_ids=ids)
     score_cols = [
         "song_id", "familiarity", "momentum",
-        "RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos",
+        "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks",
+        "ESKA_pos", "ESKA_weeks", "OLIA_pos", "OLIA_weeks", "OLIS_pos", "OLIS_weeks",
     ]
     if not scored.empty:
         base = base.merge(scored[[c for c in score_cols if c in scored.columns]].drop_duplicates("song_id"), on="song_id", how="left")
@@ -588,11 +589,23 @@ STATUSES = [
     "R1 Candidate",
     "CF2 Candidate",
     "CF1 Candidate",
+    "F1 Candidate",
+    "G1 Candidate",
+    "G2 Candidate",
+    "SP1 Candidate",
+    "SP2 Candidate",
+    "NB Candidate",
     "Baza Hold",
     "Baza R2",
     "Baza R1",
     "Baza CF2",
     "Baza CF1",
+    "Baza F1",
+    "Baza G1",
+    "Baza G2",
+    "Baza SP1",
+    "Baza SP2",
+    "Baza NB",
 ]
 
 STATUS_ALIASES = {
@@ -773,7 +786,7 @@ function(params) {
 
   const weeks = Number((params.data || {})[weekField] || 0);
   const weekLabel = weeks > 0 ? (Math.round(weeks) + 'w') : '–';
-  return '#' + Math.round(v) + ' · ' + weekLabel;
+  return '#' + Math.round(v) + ' (' + weekLabel + ')';
 }
 """)
 
@@ -1278,7 +1291,7 @@ def render_song_grid(
 
     source_names = [c for c in ["RMF", "ZET", "OLIA", "OLIS", "ESKA", "UK", "BILLBOARD"] if c in show.columns]
     week_names = [f"{c}_weeks" for c in source_names if f"{c}_weeks" in show.columns]
-    compact_initial = source_layout == "compact"
+    compact_initial = source_layout in {"compact", "airplay"}
     for col in source_names:
         gb.configure_column(
             col, valueFormatter=SOURCE_POSITION_FORMATTER,
@@ -1332,12 +1345,12 @@ def render_song_grid(
             }}
             """)
             gb.configure_column(
-                "stations_count", "Stacje", width=108, minWidth=100,
+                "stations_count", "Zasięg", width=108, minWidth=100,
                 valueFormatter=station_formatter,
                 headerTooltip="Zasięg w wybranym okresie; procent z raportujących stacji, w nawiasie liczba stacji, które zagrały utwór.",
             )
         else:
-            gb.configure_column("stations_count", "Stacje", width=92, minWidth=84)
+            gb.configure_column("stations_count", "Zasięg", width=92, minWidth=84)
     if "avg_per_day" in show.columns:
         gb.configure_column("avg_per_day", "Emisje/dzień łącznie", width=150, minWidth=138)
     if "avg_station_day" in show.columns:
@@ -1773,7 +1786,7 @@ if view_key == "dashboard":
                 view["downloaded"] = view["downloaded"].fillna(False).astype(bool)
 
             cols = [
-                "song_id", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status", "downloaded",
+                "song_id", "artist", "title", "release_month", "details", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
                 "familiarity", "momentum", "radio_presence", "radio_reach", "radio_rotation",
                 "avg_position", "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
                 "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
@@ -1801,7 +1814,7 @@ if view_key == "dashboard":
                 source_layout=source_layout,
                 floating_hscroll=True,
             )
-            st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7 · 5w. Radio Presence 7d = 70% zasięg stacji + 30% intensywność rotacji; szczegóły są w Manualu. ▶ 30s otwiera player przyklejony do dołu ekranu.")
+            st.caption("Auto składa na laptopie pozycję i tygodnie do jednej komórki, np. #7 (5w). Radio Presence 7d = 70% zasięg stacji + 30% intensywność rotacji; szczegóły są w Manualu. ▶ 30s otwiera player przyklejony do dołu ekranu.")
 
 elif view_key == "song":
     st.markdown('<span id="rc-song-top"></span>', unsafe_allow_html=True)
@@ -2023,10 +2036,15 @@ elif view_key == "song":
                         "top_station": top_station_name,
                         "last_play": song_last_play,
                         "RMF": position_sort_value(row.get("RMF_pos")),
+                        "RMF_weeks": int(row.get("RMF_weeks", 0) or 0),
                         "ZET": position_sort_value(row.get("ZET_pos")),
+                        "ZET_weeks": int(row.get("ZET_weeks", 0) or 0),
                         "OLIA": position_sort_value(row.get("OLIA_pos")),
+                        "OLIA_weeks": int(row.get("OLIA_weeks", 0) or 0),
                         "OLIS": position_sort_value(row.get("OLIS_pos")),
+                        "OLIS_weeks": int(row.get("OLIS_weeks", 0) or 0),
                         "ESKA": position_sort_value(row.get("ESKA_pos")),
+                        "ESKA_weeks": int(row.get("ESKA_weeks", 0) or 0),
                         "note": str(row.note or ""),
                     }
                     render_song_grid(
@@ -2165,10 +2183,9 @@ elif view_key == "archive":
                     entries[c] = entries[c].map(position_sort_value).astype(int)
 
             archive_cols = [
-                "song_id", "position", "artist", "title", "details", "preview", "spotify", "spotify_copy",
+                "song_id", "position", "artist", "title", "details", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
                 "familiarity", "momentum", "radio_reach", "avg_position",
-                "previous_position", "reported_weeks", "reported_peak",
-                "status", "downloaded", "heard", "note",
+                "previous_position", "reported_weeks", "reported_peak", "note",
             ]
             archive_show = entries[[c for c in archive_cols if c in entries.columns]].copy()
             render_song_grid(
@@ -2351,11 +2368,11 @@ elif view_key == "airplay":
             ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
             ranked["spotify_copy"] = ranked["spotify"]
             air_cols = [
-                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "spotify", "spotify_copy", "heard", "status", "downloaded",
+                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
                 "familiarity", "momentum", "radio_reach", "avg_position",
                 "stations_count", "radio_rotation", "radio_presence_period",
                 "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
-                "RMF", "ZET", "OLIA", "OLIS", "ESKA", "note",
+                "RMF", "RMF_weeks", "ZET", "ZET_weeks", "OLIA", "OLIA_weeks", "OLIS", "OLIS_weeks", "ESKA", "ESKA_weeks", "note",
             ]
             air_show = ranked[[c for c in air_cols if c in ranked.columns]].copy()
             station_key = "-".join(str(x) for x in selected_ids)
@@ -2369,7 +2386,7 @@ elif view_key == "airplay":
                 floating_hscroll=True,
             )
             st.caption(
-                "**Stacje** = zasięg w wybranym okresie wśród raportujących stacji; w nawiasie liczba stacji, np. 46% (26). "
+                "**Zasięg** = procent raportujących stacji, które zagrały utwór w wybranym okresie; w nawiasie liczba stacji, np. 46% (26). "
                 "**Zasięg 7d** = wspólny sygnał z ostatnich 7 dni liczony ze wszystkich aktywnych raportujących stacji, niezależnie od filtra. "
                 "**Emisje/dzień łącznie** = suma odtworzeń ze wszystkich wybranych stacji / liczba dni. "
                 "**Śr./grającą stację/dzień** dzieli dodatkowo przez liczbę stacji, które faktycznie zagrały utwór."
@@ -2401,6 +2418,60 @@ elif view_key == "data":
             )
         else:
             st.caption("Archiwum notowań jest puste.")
+
+    with st.expander("🎵 Synchronizacja bazy radia", expanded=False):
+        st.caption(
+            "Wrzuć eksport TSV/TXT z kolumnami Active / Cat / Pack / Ver / Title / Artist / Album / Runtime. "
+            "RadioCharts dopasuje istniejące utwory po wykonawcy i tytule, doda brakujące, ustawi status Baza <Cat> "
+            "i zaznaczy DL, bo utwór znajduje się już w lokalnej bazie radia. Przesłuchanie i notatka pozostają bez zmian."
+        )
+        radio_file = st.file_uploader(
+            "Eksport bazy radia",
+            type=["txt", "tsv", "csv"],
+            key="radio_library_sync_file",
+            help="Format jak w eksporcie z kolumnami Cat, Title i Artist. Polskie znaki i wielkość liter nie przeszkadzają w dopasowaniu.",
+        )
+        if radio_file is not None:
+            raw_bytes = radio_file.getvalue()
+            radio_text = None
+            for enc in ("utf-8-sig", "cp1250", "latin-1"):
+                try:
+                    radio_text = raw_bytes.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if radio_text is None:
+                st.error("Nie udało się odczytać kodowania pliku.")
+            else:
+                try:
+                    preview_rows, preview_meta = parse_radio_library_tsv(radio_text)
+                except Exception as exc:
+                    st.error(f"Nie udało się rozpoznać eksportu bazy radia: {type(exc).__name__}: {exc}")
+                else:
+                    category_text = ", ".join(
+                        f"{cat}: {count}" for cat, count in sorted((preview_meta.get("categories") or {}).items())
+                    )
+                    st.caption(
+                        f"Rozpoznano **{preview_meta.get('rows', 0)}** utworów"
+                        + (f" · {category_text}" if category_text else "")
+                    )
+                    unsupported = preview_meta.get("unsupported") or {}
+                    if unsupported:
+                        st.warning(
+                            "Pominięte nieznane kategorie: "
+                            + ", ".join(f"{k} ({v})" for k, v in sorted(unsupported.items()))
+                        )
+                    if st.button("Synchronizuj z RadioCharts", type="primary", key="radio_library_sync_button"):
+                        result = sync_radio_library_tsv(radio_text)
+                        cached_song_catalog.clear()
+                        cached_basic_song_metrics.clear()
+                        st.success(
+                            "Synchronizacja zakończona: "
+                            f"{result.get('processed', 0)} przetworzonych · "
+                            f"{result.get('added', 0)} nowych · "
+                            f"{result.get('matched', 0)} dopasowanych · "
+                            f"{result.get('status_updated', 0)} statusów zmienionych."
+                        )
 
     st.markdown("### Bieżące notowania")
     fetch_main, _ = st.columns([1.7, 5.3])
@@ -2491,7 +2562,9 @@ else:
 
 **Status, „Przesłuchany”, DL i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji. **DL** oznacza, że po odsłuchu utwór został już pobrany / dodany do lokalnej biblioteki.
 
-Aktualna kolejność statusów roboczych: **Nie słuchałem → Poza formatem → Słabe → Watch → R2 Candidate → R1 Candidate → CF2 Candidate → CF1 Candidate → Baza Hold → Baza R2 → Baza R1 → Baza CF2 → Baza CF1**. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
+W **Dane → Synchronizacja bazy radia** można wrzucić eksport TSV/TXT z kategorią, tytułem i wykonawcą. RadioCharts dopasowuje istniejące utwory, dodaje brakujące, ustawia `Baza <Cat>` i zaznacza DL. To jest mechanizm do okresowego wyrównania RadioCharts z faktyczną biblioteką emisyjną.
+
+Aktualna kolejność statusów roboczych zaczyna się od **Nie słuchałem → Poza formatem → Słabe → Watch**, potem są statusy **Candidate** dla kategorii R2/R1/CF2/CF1/F1/G1/G2/SP1/SP2/NB, a następnie odpowiadające im statusy **Baza ...**. `Baza Hold` pozostaje osobnym stanem przejściowym. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
             """
         )
 
@@ -2565,7 +2638,7 @@ Emisje radiowe nie są dodawane do Momentum.
             """
 Radio Presence opisuje **realną bieżącą obecność na antenach** i jest niezależne od list przebojów.
 
-**Zasięg stacji** = procent raportujących stacji, które zagrały utwór przynajmniej raz.
+**Zasięg** = procent raportujących stacji, które zagrały utwór przynajmniej raz w aktualnie wybranym okresie. W tabeli obok procentu w nawiasie pokazujemy też liczbę takich stacji.
 
 **Rotacja** = jak często utwór jest grany na stacjach, które go grają. Liczymy średnią `emisje / grająca stacja / dzień` i skalujemy ją tak, że:
 
@@ -2587,7 +2660,7 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
 **Emisja** to jedno zapisane odtworzenie utworu przez jedną stację.
 
 - **Emisje** — suma wszystkich odtworzeń ze wszystkich wybranych stacji w okresie.
-- **Stacje** — zasięg w wybranym okresie jako procent raportujących stacji, a w nawiasie liczba stacji, które zagrały utwór, np. `46% (26)`.
+- **Zasięg** — procent raportujących stacji, które zagrały utwór w wybranym okresie; w nawiasie liczba stacji, np. `46% (26)`.
 - **Rotacja** — intensywność grania na stacjach, które grają utwór; 6+/stację/dzień = 100%.
 - **Zasięg 7d** — prosty, wspólny sygnał: jaki procent wszystkich aktywnych **raportujących** stacji z ostatnich 7 dni zagrał utwór. Jest niezależny od wybranego zakresu Emisji.
 - **Radio Presence** — `70% zasięgu + 30% rotacji`; w tabeli Emisji wersja zakresowa odnosi się do aktualnie wybranych dat/stacji.
@@ -2599,7 +2672,7 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
 
 Zakres Emisji ma preset **ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok** oraz stale widoczne dokładne daty. Preset tylko wstawia daty; ręczna zmiana dowolnej z nich automatycznie przełącza preset na **Własny zakres**. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji.
 
-Pole **Szukaj w Emisjach** filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. Wyszukiwanie ignoruje polskie znaki. Szczegóły konkretnego nagrania otwierasz przez **Otwórz → Utwór**.
+Pole **Szukaj w Emisjach** filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. Wyszukiwanie ignoruje polskie znaki. Szczegóły konkretnego nagrania otwierasz przez **Otwórz → Utwór**. Pozycje RMF/ZET/OLiA/OLiS/ESKA są w Emisjach pokazywane kompaktowo razem z tygodniami, np. `#7 (5w)`.
 
 W szerokich tabelach Dashboardu i Emisji poziomy scrollbar jest dodatkowo **przyklejony do dołu okna przeglądarki**, gdy tabela jest na ekranie. Jest zsynchronizowany z natywnym paskiem AG Grid.
 

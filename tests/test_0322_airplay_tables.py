@@ -16,7 +16,7 @@ def test_0322_airplay_tables_share_basic_metrics_and_station_reach():
     # Common/basic song metrics requested for all research tables.
     for field in ['"familiarity"', '"momentum"', '"radio_reach"', '"avg_position"']:
         assert field in APP
-    assert '"stations_count", "Stacje"' in APP
+    assert '"stations_count", "Zasięg"' in APP
     assert "Math.round(pct) + '% (' + Math.round(v) + ')'" in APP
     assert 'station_total=reporting_station_count' in APP
     assert 'station_total=song_reporting_count' in APP
@@ -39,7 +39,7 @@ def test_0322_airplay_ui_is_consolidated_and_manual_collapsed():
     manual = APP[manual_pos:]
     assert manual.count('with st.expander("') >= 11
     assert 'expanded=True' not in manual
-    assert 'bottom:125px' in APP
+    assert 'bottom:75px' in APP
     assert 'padding-top: .85rem' in APP
     assert '30-sekundowy podgląd Apple/iTunes · możesz przewijać suwakiem' not in APP
 

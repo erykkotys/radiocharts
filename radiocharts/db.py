@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
 import re
 import sqlite3
@@ -925,6 +927,36 @@ def init_db() -> None:
                             )
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('status_taxonomy_v3','done')")
 
+                    # 0.3.26: seed the current local radio library once.  This
+                    # makes songs that exist only in the station database visible
+                    # in RadioCharts and aligns their status with the radio
+                    # category.  The same parser is also exposed in Dane for
+                    # future manual syncs of a fresh export.
+                    seed_mode = os.getenv("RADIOCHARTS_AUTO_LIBRARY_SEED", "auto").strip().lower()
+                    seed_enabled = seed_mode in {"1", "true", "yes", "on"} or (
+                        seed_mode == "auto" and str(DB_PATH).replace("\\", "/").startswith("/app/data/")
+                    )
+                    if seed_enabled:
+                        radio_seed = con.execute("SELECT value FROM app_meta WHERE key='radio_library_seed_20260825_v1'").fetchone()
+                        if not radio_seed:
+                            seed_path = Path(__file__).resolve().parent / "data" / "radio_library_seed_20260825.tsv"
+                            seed_value = "missing"
+                            if seed_path.exists():
+                                try:
+                                    seed_text = seed_path.read_text(encoding="utf-8-sig")
+                                except UnicodeDecodeError:
+                                    seed_text = seed_path.read_text(encoding="cp1250")
+                                seed_rows, seed_parse = parse_radio_library_tsv(seed_text)
+                                seed_result = _sync_radio_library_rows(con, seed_rows)
+                                seed_value = (
+                                    f"rows={seed_parse['rows']};added={seed_result['added']};"
+                                    f"matched={seed_result['matched']};updated={seed_result['status_updated']}"
+                                )
+                            con.execute(
+                                "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_seed_20260825_v1',?)",
+                                (seed_value,),
+                            )
+
                     dead_station_mig = con.execute("SELECT value FROM app_meta WHERE key='airplay_dead_station_cleanup_v1'").fetchone()
                     if not dead_station_mig:
                         # 2026-01-01..2026-04-30 backfill: these stations returned
@@ -1010,6 +1042,132 @@ def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release
         (artist.strip(), title.strip(), akey, tkey, release_date, _utcnow()),
     )
     return int(cur.lastrowid)
+
+
+RADIO_LIBRARY_CATEGORIES = ("R2", "R1", "CF2", "CF1", "F1", "G1", "G2", "SP1", "SP2", "NB")
+
+
+def radio_library_status(category: str) -> str:
+    cat = str(category or "").strip().upper()
+    if cat not in RADIO_LIBRARY_CATEGORIES:
+        raise ValueError(f"Nieobsługiwana kategoria bazy radia: {category!r}")
+    return f"Baza {cat}"
+
+
+def parse_radio_library_tsv(text: str) -> tuple[list[dict], dict]:
+    """Parse the station-library export used by the user's radio database.
+
+    Expected columns are ``Active, Cat, Pack, Ver, Title, Artist, Album, Runtime``.
+    Only Cat/Title/Artist are required for the sync itself.  The parser is kept
+    deliberately strict about category codes so a typo cannot silently create a
+    new status taxonomy.
+    """
+    raw = str(text or "").lstrip("\ufeff")
+    first_line = raw.splitlines()[0] if raw.splitlines() else ""
+    delimiter = "\t" if "\t" in first_line else ","
+    reader = csv.DictReader(io.StringIO(raw), delimiter=delimiter)
+    headers = {str(h or "").strip() for h in (reader.fieldnames or [])}
+    required = {"Cat", "Title", "Artist"}
+    missing = sorted(required - headers)
+    if missing:
+        raise ValueError("Brak wymaganych kolumn: " + ", ".join(missing))
+
+    rows: list[dict] = []
+    categories: dict[str, int] = {}
+    skipped = 0
+    unsupported: dict[str, int] = {}
+    for src in reader:
+        cat = str(src.get("Cat") or "").strip().upper()
+        artist = str(src.get("Artist") or "").strip()
+        title = str(src.get("Title") or "").strip()
+        if not artist or not title or not cat:
+            skipped += 1
+            continue
+        if cat not in RADIO_LIBRARY_CATEGORIES:
+            unsupported[cat or "(brak)"] = unsupported.get(cat or "(brak)", 0) + 1
+            continue
+        categories[cat] = categories.get(cat, 0) + 1
+        rows.append({
+            "active": str(src.get("Active") or "").strip(),
+            "category": cat,
+            "artist": artist,
+            "title": title,
+            "album": str(src.get("Album") or "").strip(),
+            "runtime": str(src.get("Runtime") or "").strip(),
+        })
+    return rows, {
+        "rows": len(rows),
+        "skipped": skipped,
+        "unsupported": unsupported,
+        "categories": categories,
+    }
+
+
+def _sync_radio_library_rows(con: sqlite3.Connection, rows: Iterable[dict]) -> dict:
+    """Add missing radio-library songs and make the radio category authoritative.
+
+    Existing heard/notatka state is preserved.  ``downloaded`` is set because a
+    song present in this export is, by definition, already in the local radio
+    library.  The status is updated to ``Baza <Cat>``.
+    """
+    added = matched = status_updated = downloaded_marked = 0
+    processed = 0
+    for src in rows:
+        artist = str(src.get("artist") or "").strip()
+        title = str(src.get("title") or "").strip()
+        cat = str(src.get("category") or "").strip().upper()
+        if not artist or not title or cat not in RADIO_LIBRARY_CATEGORIES:
+            continue
+        processed += 1
+        existing_id = _match_song_id(con, artist, title)
+        if existing_id is not None:
+            song_id = int(existing_id)
+            matched += 1
+        else:
+            song_id = get_or_create_song(con, artist, title)
+            added += 1
+        desired = radio_library_status(cat)
+        note = con.execute(
+            "SELECT heard,status,downloaded,note,updated_at FROM song_notes WHERE song_id=?",
+            (int(song_id),),
+        ).fetchone()
+        now = _utcnow()
+        if note:
+            old_status = str(note["status"] or "Nie słuchałem")
+            old_downloaded = bool(note["downloaded"])
+            if old_status != desired or not old_downloaded:
+                con.execute(
+                    "UPDATE song_notes SET status=?,downloaded=1,updated_at=? WHERE song_id=?",
+                    (desired, now, int(song_id)),
+                )
+            if old_status != desired:
+                status_updated += 1
+            if not old_downloaded:
+                downloaded_marked += 1
+        else:
+            con.execute(
+                "INSERT INTO song_notes(song_id,heard,status,downloaded,note,updated_at) VALUES(?,?,?,?,?,?)",
+                (int(song_id), 0, desired, 1, "", now),
+            )
+            status_updated += 1
+            downloaded_marked += 1
+    return {
+        "processed": processed,
+        "added": added,
+        "matched": matched,
+        "status_updated": status_updated,
+        "downloaded_marked": downloaded_marked,
+    }
+
+
+def sync_radio_library_tsv(text: str) -> dict:
+    """Synchronize one uploaded radio-library TSV with the persistent DB."""
+    rows, parsed = parse_radio_library_tsv(text)
+    init_db()
+    with connect() as con:
+        result = _sync_radio_library_rows(con, rows)
+    return {**parsed, **result}
+
 
 def _validated_entries(source: str, entries: Iterable[dict]) -> list[dict]:
     rows = [dict(e) for e in entries]
