@@ -4,6 +4,7 @@ import html
 import json
 import math
 import re
+from pathlib import Path
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -22,7 +23,7 @@ from radiocharts.db import (
     airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision,
-    parse_radio_library_tsv, set_airplay_station_active, sync_radio_library_tsv, update_note,
+    parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
@@ -561,6 +562,7 @@ def render_nav_tabs(current: str) -> None:
         ("song", "Utwór"),
         ("archive", "Notowania"),
         ("airplay", "Emisje"),
+        ("library", "Baza"),
         ("data", "Dane"),
         ("methodology", "Manual"),
     ]
@@ -580,32 +582,19 @@ def render_nav_tabs(current: str) -> None:
 
 st.markdown('<div class="rc-app-title">📻 <span>RadioCharts Research</span></div>', unsafe_allow_html=True)
 
+RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F1"]
+RADIO_STATUS_TOP_DOWN = list(reversed(RADIO_STATUS_BOTTOM_UP))
+BASE_STATUSES = [f"Baza {code}" for code in RADIO_STATUS_TOP_DOWN]
+CANDIDATE_STATUSES = [f"{code} Candidate" for code in RADIO_STATUS_TOP_DOWN]
+
 STATUSES = [
     "Nie słuchałem",
     "Poza formatem",
     "Słabe",
     "Watch",
-    "R2 Candidate",
-    "R1 Candidate",
-    "CF2 Candidate",
-    "CF1 Candidate",
-    "F1 Candidate",
-    "G1 Candidate",
-    "G2 Candidate",
-    "SP1 Candidate",
-    "SP2 Candidate",
-    "NB Candidate",
+    *CANDIDATE_STATUSES,
     "Baza Hold",
-    "Baza R2",
-    "Baza R1",
-    "Baza CF2",
-    "Baza CF1",
-    "Baza F1",
-    "Baza G1",
-    "Baza G2",
-    "Baza SP1",
-    "Baza SP2",
-    "Baza NB",
+    *BASE_STATUSES,
 ]
 
 STATUS_ALIASES = {
@@ -621,6 +610,30 @@ STATUS_ALIASES = {
 def normalized_status(value: str | None) -> str:
     raw = str(value or "Nie słuchałem")
     return STATUS_ALIASES.get(raw, raw if raw in STATUSES else "Nie słuchałem")
+
+
+STATUS_FILTER_ALL = "Wszystkie statusy"
+STATUS_FILTER_BASE = "Baza — wszystkie"
+STATUS_FILTER_CANDIDATE = "Candidate — wszystkie"
+
+
+def status_filter_options(*, base_only: bool = False) -> list[str]:
+    if base_only:
+        return [STATUS_FILTER_BASE, *list(reversed(BASE_STATUSES))]
+    return [STATUS_FILTER_ALL, STATUS_FILTER_BASE, STATUS_FILTER_CANDIDATE, *STATUSES]
+
+
+def apply_status_filter(frame: pd.DataFrame, choice: str) -> pd.DataFrame:
+    if frame.empty or "status" not in frame.columns:
+        return frame
+    status = frame["status"].fillna("Nie słuchałem").map(normalized_status)
+    if choice == STATUS_FILTER_ALL:
+        return frame
+    if choice == STATUS_FILTER_BASE:
+        return frame[status.isin(BASE_STATUSES)].copy()
+    if choice == STATUS_FILTER_CANDIDATE:
+        return frame[status.isin(CANDIDATE_STATUSES)].copy()
+    return frame[status == str(choice)].copy()
 
 
 def release_month(exact_release: object = None, first_chart: object = None) -> str:
@@ -1648,7 +1661,7 @@ def render_airplay_data_management(running: bool) -> None:
 
 
 view_key = str(st.query_params.get("view", "dashboard"))
-if view_key not in {"dashboard", "song", "archive", "airplay", "data", "methodology"}:
+if view_key not in {"dashboard", "song", "archive", "airplay", "library", "data", "methodology"}:
     view_key = "dashboard"
 render_nav_tabs(view_key)
 install_client_helpers()
@@ -1695,7 +1708,7 @@ if view_key == "dashboard":
             "6 mies.": 183,
             "Całość": 0,
         }
-        ctl_count, ctl_period, ctl_scope, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns([1.10, 1.10, 1.48, .82, 1.0, 1.0, .92])
+        ctl_count, ctl_period, ctl_scope, ctl_status, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns([.92, 1.0, 1.28, 1.15, .72, .86, .86, .82])
         ctl_count.markdown(
             '<div style="font-size:.76rem;font-weight:600;line-height:1.18;margin:0 0 .08rem;">Utwory (filtr / okres)</div>',
             unsafe_allow_html=True,
@@ -1717,6 +1730,13 @@ if view_key == "dashboard":
                 ["W najnowszych notowaniach", "PL w najnowszych", "Zagraniczne w najnowszych", "Cała historia"],
                 index=0,
                 help="„W najnowszych” = utwór jest obecny w najnowszym zapisanym notowaniu co najmniej jednego odpowiedniego źródła. To nie znaczy po prostu „kiedyś ostatnio pobrany”.",
+            )
+            status_choice = ctl_status.selectbox(
+                "Status",
+                status_filter_options(),
+                index=0,
+                key="dashboard_status_filter",
+                help="Możesz pokazać całą aktywną bazę, wszystkie Candidate albo jeden konkretny status.",
             )
             table_layout_label = ctl_layout.selectbox(
                 "Tabela",
@@ -1742,6 +1762,7 @@ if view_key == "dashboard":
             elif scope == "W najnowszych notowaniach" and all_pos:
                 base = base[base[all_pos].notna().any(axis=1)]
             view = base[(base.familiarity >= min_fam) & (base.momentum >= min_mom)].copy()
+            view = apply_status_filter(view, status_choice)
             search_col, unheard_col = st.columns([5.2, 1.0])
             song_query = search_col.text_input(
                 "Szukaj w Dashboardzie",
@@ -1803,7 +1824,7 @@ if view_key == "dashboard":
             # refresh.  Include every row-affecting control in the component key so the
             # grid is remounted immediately as the user types/clears the search box.
             dashboard_grid_state = quote(
-                f"{min_fam}|{min_mom}|{int(only_unheard)}|{normalize(song_query)}",
+                f"{min_fam}|{min_mom}|{int(only_unheard)}|{status_choice}|{normalize(song_query)}",
                 safe="",
             )[:120]
             render_song_grid(
@@ -2293,12 +2314,18 @@ elif view_key == "airplay":
             st.info("Brak zapisanych emisji dla wybranych stacji i dat. Pobieranie bieżące i backfill są w zakładce Dane.")
         else:
             st.markdown("### 🔥 Najczęściej grane")
-            r0, r1, r2, r3 = st.columns([2.2, .85, 1, .75])
+            r0, rstatus, r1, r2, r3 = st.columns([2.0, 1.15, .72, .9, .68])
             airplay_query = r0.text_input(
                 "Szukaj w Emisjach",
                 placeholder="wykonawca lub tytuł",
                 key="airplay_rank_search",
                 help="Filtr jest wykonywany na wszystkich utworach w wybranym okresie, zanim zadziała limit Pokaż. Polskie znaki są ignorowane.",
+            )
+            airplay_status_choice = rstatus.selectbox(
+                "Status",
+                status_filter_options(),
+                index=0,
+                key="airplay_status_filter",
             )
             min_station_count = r1.number_input(
                 "Min. stacji",
@@ -2317,6 +2344,8 @@ elif view_key == "airplay":
             top_n = r3.selectbox("Pokaż", [50, 100, 250, 500, "Wszystkie"], index=1, key="airplay_rank_top")
 
             ranked = air[air["stations_count"] >= int(min_station_count)].copy()
+            ranked = with_notes(ranked)
+            ranked = apply_status_filter(ranked, airplay_status_choice)
             if airplay_query.strip():
                 ranked = filter_song_rows(ranked, airplay_query)
             if sort_mode == "Liczba stacji":
@@ -2347,8 +2376,6 @@ elif view_key == "airplay":
                     ranked["first_chart_date"] if "first_chart_date" in ranked.columns else [""] * len(ranked),
                 )
             ]
-            ranked = with_notes(ranked)
-
             # Standard parameters shown in every song table. Score only rows
             # that survived search/sort/limit, so a large airplay database does
             # not force compute_scores() across the whole catalogue. Zasięg 7d
@@ -2378,7 +2405,7 @@ elif view_key == "airplay":
             station_key = "-".join(str(x) for x in selected_ids)
             render_song_grid(
                 air_show,
-                key=f"airplay_rank_{range_start}_{range_end}_{sort_mode}_{top_n}_{min_station_count}_{normalize(airplay_query)}_{station_key}",
+                key=f"airplay_rank_{range_start}_{range_end}_{sort_mode}_{top_n}_{min_station_count}_{quote(airplay_status_choice, safe='')}_{normalize(airplay_query)}_{station_key}",
                 height=690,
                 editable_state=True,
                 source_layout="airplay",
@@ -2393,6 +2420,174 @@ elif view_key == "airplay":
             )
 
         st.caption("Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zakładce **Dane**.")
+
+elif view_key == "library":
+    st.subheader("🎵 Baza")
+    library_rows = pd.DataFrame(radio_library_catalog())
+    if library_rows.empty:
+        st.warning("Nie ma jeszcze utworów ze statusem Baza. W zakładce Dane → Synchronizacja bazy radia wklej eksport i uruchom synchronizację.")
+    else:
+        stations = list_airplay_stations(active_only=True)
+        all_station_ids = [int(s["station_id"]) for s in stations]
+        station_labels = {int(s["station_id"]): str(s["name"]) for s in stations}
+        coverage_all = airplay_coverage(all_station_ids) if all_station_ids else {}
+        last_date = coverage_all.get("last_date")
+        first_date = coverage_all.get("first_date")
+        default_end = date.fromisoformat(str(last_date)) if last_date else date.today()
+        earliest = date.fromisoformat(str(first_date)) if first_date else default_end - timedelta(days=6)
+
+        bscope, bstations = st.columns([1, 2])
+        library_station_scope = bscope.radio(
+            "Stacje", ["Wszystkie stacje", "Wybrane stacje"], horizontal=True, key="library_station_scope"
+        )
+        if library_station_scope == "Wszystkie stacje":
+            selected_ids = all_station_ids
+            bstations.caption(f"Porównujemy bazę z {len(selected_ids)} aktywnymi stacjami.")
+        else:
+            selected_ids = bstations.multiselect(
+                "Wybierz stacje",
+                all_station_ids,
+                default=all_station_ids[: min(8, len(all_station_ids))],
+                format_func=lambda sid: station_labels.get(int(sid), str(sid)),
+                key="library_station_multiselect",
+            )
+            selected_ids = [int(x) for x in selected_ids]
+
+        range_start, range_end = render_airplay_range_picker(
+            key_prefix="library_range_v1",
+            default_end=default_end,
+            earliest=earliest,
+            default_preset="Ostatni tydzień",
+        )
+        air_rev = airplay_revision()
+        summary_rows = cached_airplay_summary(
+            air_rev, tuple(sorted(selected_ids)), range_start.isoformat(), range_end.isoformat()
+        ) if selected_ids else []
+        air = pd.DataFrame(summary_rows)
+        station_cov_rows = airplay_station_coverage(selected_ids, range_start, range_end) if selected_ids else []
+        reporting_station_count = sum(1 for r in station_cov_rows if int(r.get("plays") or 0) > 0)
+        period_days = max(1, (range_end - range_start).days + 1)
+
+        lib = library_rows.copy()
+        lib["song_id"] = lib["song_id"].astype(int)
+        metric_ids = tuple(sorted(int(x) for x in lib["song_id"].tolist()))
+        basic = cached_basic_song_metrics(chart_revision(), air_rev, metric_ids)
+        if not basic.empty:
+            lib = lib.merge(basic, on="song_id", how="left")
+
+        air_keep = [
+            "song_id", "spins", "stations_count", "max_station_spins", "top_station", "last_play"
+        ]
+        if not air.empty:
+            lib = lib.merge(air[[c for c in air_keep if c in air.columns]], on="song_id", how="left")
+        for col in ["spins", "stations_count", "max_station_spins"]:
+            if col not in lib.columns:
+                lib[col] = 0
+            lib[col] = pd.to_numeric(lib[col], errors="coerce").fillna(0).astype(int)
+        for col in ["top_station", "last_play"]:
+            if col not in lib.columns:
+                lib[col] = ""
+            lib[col] = lib[col].fillna("").astype(str).replace("nan", "")
+        for col in ["familiarity", "momentum", "radio_reach"]:
+            if col not in lib.columns:
+                lib[col] = 0.0
+            lib[col] = pd.to_numeric(lib[col], errors="coerce").fillna(0.0)
+
+        lib["avg_per_day"] = (lib["spins"] / period_days).round(1)
+        lib["avg_station_day"] = (
+            lib["spins"] / period_days / lib["stations_count"].clip(lower=1)
+        ).round(2)
+        lib["station_reach"] = (
+            100.0 * lib["stations_count"] / reporting_station_count
+        ).clip(upper=100).round(1) if reporting_station_count else 0.0
+        lib["radio_rotation"] = (100.0 * lib["avg_station_day"] / 6.0).clip(upper=100).round(1)
+        lib["radio_presence_period"] = (0.70 * lib["station_reach"] + 0.30 * lib["radio_rotation"]).round(1)
+        lib["release_month"] = [
+            release_month(rel, first) for rel, first in zip(
+                lib["release_date"] if "release_date" in lib.columns else [""] * len(lib),
+                lib["first_chart_date"] if "first_chart_date" in lib.columns else [""] * len(lib),
+            )
+        ]
+        source_cols = ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]
+        for src in source_cols:
+            pos_col = f"{src}_pos"
+            lib[src] = lib[pos_col].map(position_sort_value).astype(int) if pos_col in lib.columns else 999
+        lib["details"] = [song_link(sid) for sid in lib["song_id"]]
+        lib["preview"] = "▶"
+        lib["spotify"] = [spotify_search_url(a, t) for a, t in zip(lib["artist"], lib["title"])]
+        lib["spotify_copy"] = lib["spotify"]
+
+        render_compact_metrics([
+            ("Utwory w bazie", len(lib)),
+            ("Grane w okresie", int((lib["spins"] > 0).sum())),
+            ("Niegrane w okresie", int((lib["spins"] == 0).sum())),
+            ("Raportujące stacje", f"{reporting_station_count}/{len(selected_ids)}" if selected_ids else "—"),
+        ])
+
+        qcol, scol, zerocol, sortcol, showcol = st.columns([2.2, 1.2, .9, 1.0, .72])
+        library_query = qcol.text_input(
+            "Szukaj w Bazie", placeholder="wykonawca lub tytuł", key="library_search"
+        )
+        library_status = scol.selectbox(
+            "Status", status_filter_options(base_only=True), index=0, key="library_status_filter"
+        )
+        with zerocol:
+            st.caption("Emisje")
+            only_zero = st.checkbox("Tylko niegrane", key="library_only_zero")
+        library_sort = sortcol.selectbox(
+            "Sortuj",
+            ["Status", "Emisje", "Zasięg", "Radio Presence", "Familiarity", "Momentum", "Śr. poz."],
+            index=0, key="library_sort",
+        )
+        library_top = showcol.selectbox(
+            "Pokaż", [100, 250, 500, "Wszystkie"], index=3, key="library_top"
+        )
+
+        view = apply_status_filter(lib, library_status)
+        if library_query.strip():
+            view = filter_song_rows(view, library_query)
+        if only_zero:
+            view = view[view["spins"] == 0]
+        if library_sort == "Emisje":
+            view = view.sort_values(["spins", "stations_count"], ascending=[False, False])
+        elif library_sort == "Zasięg":
+            view = view.sort_values(["station_reach", "spins"], ascending=[False, False])
+        elif library_sort == "Radio Presence":
+            view = view.sort_values(["radio_presence_period", "spins"], ascending=[False, False])
+        elif library_sort == "Familiarity":
+            view = view.sort_values(["familiarity", "spins"], ascending=[False, False])
+        elif library_sort == "Momentum":
+            view = view.sort_values(["momentum", "spins"], ascending=[False, False])
+        elif library_sort == "Śr. poz.":
+            view = view.sort_values(["avg_position", "spins"], ascending=[True, False], na_position="last")
+        else:
+            status_rank = {status: i for i, status in enumerate(STATUSES)}
+            view = view.assign(_status_rank=view["status"].map(status_rank).fillna(999)).sort_values(
+                ["_status_rank", "artist", "title"], ascending=[False, True, True]
+            ).drop(columns=["_status_rank"])
+        if library_top != "Wszystkie":
+            view = view.head(int(library_top))
+        view = view.reset_index(drop=True)
+
+        library_cols = [
+            "song_id", "spins", "artist", "title", "release_month", "details", "preview", "heard", "status", "downloaded",
+            "spotify", "spotify_copy", "familiarity", "momentum", "radio_reach", "avg_position",
+            "stations_count", "radio_rotation", "radio_presence_period", "avg_per_day", "avg_station_day",
+            "max_station_spins", "top_station", "last_play",
+            "RMF", "RMF_weeks", "ZET", "ZET_weeks", "OLIA", "OLIA_weeks", "OLIS", "OLIS_weeks", "ESKA", "ESKA_weeks", "note",
+        ]
+        show = view[[c for c in library_cols if c in view.columns]].copy()
+        station_key = "-".join(str(x) for x in selected_ids)
+        render_song_grid(
+            show,
+            key=f"library_grid_{range_start}_{range_end}_{quote(library_status, safe='')}_{library_sort}_{library_top}_{int(only_zero)}_{normalize(library_query)}_{station_key}",
+            height=700, editable_state=True, source_layout="airplay",
+            station_total=reporting_station_count, floating_hscroll=True,
+        )
+        st.caption(
+            "Baza pokazuje wszystkie utwory z aktywnym statusem Baza, także gdy w wybranym okresie mają 0 emisji. "
+            "Zasięg i Radio Presence odnoszą się do wybranego okresu; Zasięg 7d pozostaje wspólnym sygnałem z ostatnich 7 dni."
+        )
 
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
@@ -2420,58 +2615,77 @@ elif view_key == "data":
             st.caption("Archiwum notowań jest puste.")
 
     with st.expander("🎵 Synchronizacja bazy radia", expanded=False):
+        overview = radio_library_overview()
+        bundled_seed = Path(__file__).resolve().parent / "data" / "radio_library_seed_20260825.tsv"
+        expected_rows = 0
+        expected_categories = {}
+        if bundled_seed.exists():
+            try:
+                seed_rows, seed_meta = parse_radio_library_tsv(bundled_seed.read_text(encoding="utf-8-sig"))
+                expected_rows = int(seed_meta.get("rows") or 0)
+                expected_categories = dict(seed_meta.get("categories") or {})
+            except Exception:
+                pass
+        render_compact_metrics([
+            ("W bazie RadioCharts", overview.get("total", 0)),
+            ("Oczekiwane z ostatniego eksportu", expected_rows or "—"),
+            ("DL w bazie", overview.get("downloaded", 0)),
+            ("Seed", "OK" if str(overview.get("seed_marker", "")).startswith("rows=") else str(overview.get("seed_marker") or "—")[:24]),
+        ])
+        if expected_rows and int(overview.get("total") or 0) < expected_rows:
+            st.warning(
+                f"W aktywnych statusach Baza jest {overview.get('total', 0)} utworów, a ostatni dołączony eksport ma {expected_rows}. "
+                "Wklej eksport poniżej i uruchom synchronizację; 0.3.27 naprawia też jednorazowy seed z 0.3.26."
+            )
+        elif expected_rows:
+            st.success(f"Aktywne statusy Baza: {overview.get('total', 0)} utworów · ostatni dołączony eksport: {expected_rows} wierszy.")
+        counts = overview.get("categories") or {}
+        if counts:
+            count_df = pd.DataFrame([
+                {"Kategoria": code, "RadioCharts": int(counts.get(code, 0)), "Eksport": int(expected_categories.get(code, 0))}
+                for code in RADIO_STATUS_BOTTOM_UP
+            ])
+            st.dataframe(count_df, hide_index=True, use_container_width=True, height=220)
+
         st.caption(
-            "Wrzuć eksport TSV/TXT z kolumnami Active / Cat / Pack / Ver / Title / Artist / Album / Runtime. "
-            "RadioCharts dopasuje istniejące utwory po wykonawcy i tytule, doda brakujące, ustawi status Baza <Cat> "
-            "i zaznaczy DL, bo utwór znajduje się już w lokalnej bazie radia. Przesłuchanie i notatka pozostają bez zmian."
+            "Wklej cały eksport TXT/TSV z nagłówkiem Active / Cat / Pack / Ver / Title / Artist / Album / Runtime. "
+            "Synchronizacja dopasowuje istniejące utwory, dodaje brakujące, ustawia Baza <Cat> i DL. Przesłuchanie i notatka zostają."
         )
-        radio_file = st.file_uploader(
-            "Eksport bazy radia",
-            type=["txt", "tsv", "csv"],
-            key="radio_library_sync_file",
-            help="Format jak w eksporcie z kolumnami Cat, Title i Artist. Polskie znaki i wielkość liter nie przeszkadzają w dopasowaniu.",
+        radio_text = st.text_area(
+            "Wklej eksport bazy radia",
+            value="",
+            height=220,
+            key="radio_library_sync_text",
+            placeholder="Active\tCat\tPack\tVer\tTitle\tArtist\tAlbum\tRuntime\nChecked\tR2\t...",
         )
-        if radio_file is not None:
-            raw_bytes = radio_file.getvalue()
-            radio_text = None
-            for enc in ("utf-8-sig", "cp1250", "latin-1"):
-                try:
-                    radio_text = raw_bytes.decode(enc)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if radio_text is None:
-                st.error("Nie udało się odczytać kodowania pliku.")
+        if radio_text.strip():
+            try:
+                preview_rows, preview_meta = parse_radio_library_tsv(radio_text)
+            except Exception as exc:
+                st.error(f"Nie udało się rozpoznać eksportu bazy radia: {type(exc).__name__}: {exc}")
             else:
-                try:
-                    preview_rows, preview_meta = parse_radio_library_tsv(radio_text)
-                except Exception as exc:
-                    st.error(f"Nie udało się rozpoznać eksportu bazy radia: {type(exc).__name__}: {exc}")
-                else:
-                    category_text = ", ".join(
-                        f"{cat}: {count}" for cat, count in sorted((preview_meta.get("categories") or {}).items())
+                category_text = ", ".join(
+                    f"{cat}: {count}" for cat, count in sorted((preview_meta.get("categories") or {}).items())
+                )
+                st.caption(
+                    f"Rozpoznano **{preview_meta.get('rows', 0)}** utworów"
+                    + (f" · {category_text}" if category_text else "")
+                )
+                unsupported = preview_meta.get("unsupported") or {}
+                if unsupported:
+                    st.warning("Pominięte nieznane kategorie: " + ", ".join(f"{k} ({v})" for k, v in sorted(unsupported.items())))
+                if st.button("Synchronizuj z RadioCharts", type="primary", key="radio_library_sync_button"):
+                    result = sync_radio_library_tsv(radio_text)
+                    cached_song_catalog.clear()
+                    cached_basic_song_metrics.clear()
+                    st.success(
+                        "Synchronizacja zakończona: "
+                        f"{result.get('processed', 0)} przetworzonych · "
+                        f"{result.get('added', 0)} nowych · "
+                        f"{result.get('matched', 0)} dopasowanych · "
+                        f"{result.get('status_updated', 0)} statusów zmienionych."
                     )
-                    st.caption(
-                        f"Rozpoznano **{preview_meta.get('rows', 0)}** utworów"
-                        + (f" · {category_text}" if category_text else "")
-                    )
-                    unsupported = preview_meta.get("unsupported") or {}
-                    if unsupported:
-                        st.warning(
-                            "Pominięte nieznane kategorie: "
-                            + ", ".join(f"{k} ({v})" for k, v in sorted(unsupported.items()))
-                        )
-                    if st.button("Synchronizuj z RadioCharts", type="primary", key="radio_library_sync_button"):
-                        result = sync_radio_library_tsv(radio_text)
-                        cached_song_catalog.clear()
-                        cached_basic_song_metrics.clear()
-                        st.success(
-                            "Synchronizacja zakończona: "
-                            f"{result.get('processed', 0)} przetworzonych · "
-                            f"{result.get('added', 0)} nowych · "
-                            f"{result.get('matched', 0)} dopasowanych · "
-                            f"{result.get('status_updated', 0)} statusów zmienionych."
-                        )
+                    st.rerun()
 
     st.markdown("### Bieżące notowania")
     fetch_main, _ = st.columns([1.7, 5.3])
@@ -2558,13 +2772,14 @@ else:
 2. **Dashboard** — znajdź utwory warte odsłuchu; sortuj po Familiarity, Momentum i Radio Presence.
 3. **Utwór** — zobacz pełną historię pozycji, emisje, odsłuchaj i ustaw własny status/notatkę.
 4. **Emisje** — sprawdź, co faktycznie grają stacje, jak szeroko i jak często.
-5. **Notowania** — podejrzyj konkretny historyczny tydzień/listę bez mieszania go z bieżącym stanem.
+5. **Baza** — oceń, czy utwory faktycznie trzymane w Twojej bibliotece nadal mają sens: widzisz też pozycje z zerową emisją w wybranym okresie.
+6. **Notowania** — podejrzyj konkretny historyczny tydzień/listę bez mieszania go z bieżącym stanem.
 
 **Status, „Przesłuchany”, DL i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji. **DL** oznacza, że po odsłuchu utwór został już pobrany / dodany do lokalnej biblioteki.
 
-W **Dane → Synchronizacja bazy radia** można wrzucić eksport TSV/TXT z kategorią, tytułem i wykonawcą. RadioCharts dopasowuje istniejące utwory, dodaje brakujące, ustawia `Baza <Cat>` i zaznacza DL. To jest mechanizm do okresowego wyrównania RadioCharts z faktyczną biblioteką emisyjną.
+W **Dane → Synchronizacja bazy radia** wklejasz eksport TSV/TXT z kategorią, tytułem i wykonawcą. RadioCharts dopasowuje istniejące utwory, dodaje brakujące, ustawia `Baza <Cat>` i zaznacza DL. Nad polem wklejania widać liczbę utworów i rozkład kategorii, więc można od razu sprawdzić, czy synchronizacja faktycznie weszła.
 
-Aktualna kolejność statusów roboczych zaczyna się od **Nie słuchałem → Poza formatem → Słabe → Watch**, potem są statusy **Candidate** dla kategorii R2/R1/CF2/CF1/F1/G1/G2/SP1/SP2/NB, a następnie odpowiadające im statusy **Baza ...**. `Baza Hold` pozostaje osobnym stanem przejściowym. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
+W edytorze statusów, licząc od dołu, kolejność kategorii bazy to **CF1 → CF2 → R1 → R2 → G1 → G2 → SP1 → SP2 → NB → F1**, wyżej jest **Baza Hold**, a jeszcze wyżej analogiczne statusy **Candidate** w tej samej kolejności. Na górze pozostają **Watch, Słabe, Poza formatem, Nie słuchałem**. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
             """
         )
 
@@ -2580,7 +2795,7 @@ Aktualna kolejność statusów roboczych zaczyna się od **Nie słuchałem → P
 - **Zagraniczne w najnowszych** — UK lub Billboard.
 - **Cała historia** — również utwory, które już zeszły ze wszystkich najnowszych list.
 
-Minimalne Familiarity/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli.
+Minimalne Familiarity/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli. Filtr **Status** pozwala pokazać np. całą aktywną Bazę, wszystkie Candidate albo jeden konkretny status.
 
 Nad filtrami widzisz tylko licznik **Utwory (filtr / okres)**. Dawne kafle Current Familiar / Rising / Pokrycie źródeł zostały usunięte, bo te same informacje można uzyskać przez sortowanie i filtry tabeli.
 
@@ -2688,7 +2903,18 @@ W szczegółach jednego utworu:
             """
         )
 
-    with st.expander("7. Pokrycie emisji i bloki 2h", expanded=False):
+    with st.expander("7. Baza — audyt własnej biblioteki", expanded=False):
+        st.markdown(
+            """
+Zakładka **Baza** nie jest rankingiem zewnętrznym. Jej punktem wyjścia są wszystkie utwory ze statusem `Baza <kategoria>` — również te, których żadna obserwowana stacja nie zagrała w wybranym okresie. `Baza Hold` nie jest traktowana jako aktywna biblioteka.
+
+Możesz zmieniać zakres dat i stacje dokładnie jak w Emisjach, a następnie sortować m.in. po Emisjach, Zasięgu, Radio Presence, Familiarity, Momentum albo średniej pozycji. **Tylko niegrane** szybko pokazuje rzeczy obecne u Ciebie, ale nieobecne w monitorowanych stacjach w danym okresie.
+
+Filtr statusu rozbija własną bazę na CF1/CF2/R1/R2/G1/G2/SP1/SP2/NB/F1. Dzięki temu można np. osobno sprawdzić, czy CF-y naprawdę mają szeroką i intensywną rotację, a goldy nadal pojawiają się wystarczająco często.
+            """
+        )
+
+    with st.expander("8. Pokrycie emisji i bloki 2h", expanded=False):
         st.markdown(
             """
 odSluchane udostępnia historię w **blokach po 2 godziny**. Pełna zakończona doba jednej stacji to **12 bloków**.
@@ -2702,7 +2928,7 @@ Ranking Emisji liczy tylko to, co faktycznie jest zapisane. Przy niepełnym pokr
             """
         )
 
-    with st.expander("8. Utwór i identyfikacja między źródłami", expanded=False):
+    with st.expander("9. Utwór i identyfikacja między źródłami", expanded=False):
         st.markdown(
             """
 RadioCharts próbuje utrzymywać **jeden wspólny rekord utworu** dla notowań i emisji. RDS potrafi jednak zapisać ten sam numer z innym zestawem wykonawców. System łączy bezpieczne warianty, gdy tytuł jest wystarczająco charakterystyczny i jednoznacznie wskazuje jeden utwór z historii notowań.
@@ -2713,7 +2939,7 @@ Wyszukiwarka Utwór pokazuje przede wszystkim utwory z notowań oraz te, którym
             """
         )
 
-    with st.expander("9. Format Fit — dlaczego został wycofany", expanded=False):
+    with st.expander("10. Format Fit — dlaczego został wycofany", expanded=False):
         st.markdown(
             """
 **Format Fit nie jest już pokazywany.** Sama pozycja na RMF/ZET/ESKA/OLiA nie mówi wiarygodnie, czy nagranie pasuje do konkretnego Mainstream AC.
@@ -2722,7 +2948,7 @@ Przykład: utwór może być wielkim hitem w źródłach, a brzmieniowo być dan
             """
         )
 
-    with st.expander("10. Dane, backfill i logi", expanded=False):
+    with st.expander("11. Dane, backfill i logi", expanded=False):
         st.markdown(
             """
 Zakładka **Dane** służy do całej obsługi pobierania: bieżących notowań, backfillu list oraz **backfillu Emisji / odSluchane**. Jest tu też diagnostyka **„Co dokładnie zostało pobrane — pokrycie per stacja”** z własnym zakresem dat. Tabela „Stan źródeł” pokazuje kadencję publikacji, najnowsze pobrane notowanie oraz datę, której co najmniej oczekujemy dzisiaj.
@@ -2737,7 +2963,7 @@ Worker sprawdza automatyczne źródła dwa razy dziennie — 07:30 i 20:30 czasu
             """
         )
 
-    with st.expander("11. Spotify, odsłuch i własna ocena", expanded=False):
+    with st.expander("12. Spotify, odsłuch i własna ocena", expanded=False):
         st.markdown(
             """
 **▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł. Kolumna **Kopiuj (⧉)** kopiuje ten sam link Spotify do schowka; działa też na zwykłym HTTP w sieci LAN dzięki fallbackowi `execCommand`.

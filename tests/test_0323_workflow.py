@@ -44,7 +44,10 @@ def test_0323_status_v3_migrates_old_cf_candidate(tmp_path, monkeypatch):
 
 
 def test_0323_dashboard_cleanup_and_status_order_contract():
-    assert '"Poza formatem",\n    "Słabe",\n    "Watch",\n    "R2 Candidate",\n    "R1 Candidate",\n    "CF2 Candidate",\n    "CF1 Candidate"' in APP
+    assert 'RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F1"]' in APP
+    assert '*CANDIDATE_STATUSES' in APP
+    assert '"Baza Hold"' in APP
+    assert '*BASE_STATUSES' in APP
     assert "Current Familiar ≥70%" not in APP[: APP.index('st.markdown("## 📘 Manual RadioCharts")')]
     assert "Rising ≥65%" not in APP[: APP.index('st.markdown("## 📘 Manual RadioCharts")')]
     assert "Pokrycie źródeł" not in APP[: APP.index('st.markdown("## 📘 Manual RadioCharts")')]
@@ -58,6 +61,6 @@ def test_0323_airplay_detail_uses_selected_dates_and_wide_tables_get_proxy_scrol
     assert 'song_air_start.isoformat(),' in APP
     assert 'song_air_end.isoformat(),' in APP
     assert 'st.caption(f"Zakres szczegółów: {song_air_start} → {song_air_end}")' in APP
-    assert "FLOATING_HSCROLL_INSTALLER" in APP
-    assert "__rcFloatingGridHScroll" in APP
+    assert "TOP_HSCROLL_INSTALLER" in APP
+    assert "rc-top-hscroll" in APP
     assert APP.count("floating_hscroll=True") >= 2

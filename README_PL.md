@@ -1,3 +1,11 @@
+## 0.3.27 — audyt własnej bazy i naprawiona synchronizacja
+
+- naprawiony jednorazowy import statusów z lokalnej bazy radia po aktualizacji z 0.3.26;
+- nowa zakładka **Baza** pokazuje wszystkie utwory z aktywnym statusem `Baza ...`, także gdy mają 0 emisji w wybranym okresie;
+- filtry statusu w Dashboardzie i Emisjach;
+- synchronizacja bazy radia przez wklejenie pełnego TXT/TSV oraz diagnostyka liczby utworów/kategorii;
+- kolejność statusów dopasowana do hierarchii CF1/CF2/R1/R2/G1/G2/SP1/SP2/NB/F1.
+
 ## 0.3.26 — synchronizacja bazy radia i czytelniejsze Emisje
 
 - Emisje pokazują osobno **Zasięg 7d** oraz **Zasięg** dla aktualnie wybranego okresu; okresowy Zasięg jest wyświetlany jako procent raportujących stacji z liczbą stacji w nawiasie.

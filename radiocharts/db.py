@@ -788,6 +788,7 @@ def init_db() -> None:
         "status_taxonomy_v2",
         "status_taxonomy_v3",
         "song_downloaded_v1",
+        "radio_library_seed_20260825_v2",
         "airplay_dead_station_cleanup_v1",
         "airplay_eska_jingle_cleanup_v1",
     }
@@ -927,20 +928,22 @@ def init_db() -> None:
                             )
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('status_taxonomy_v3','done')")
 
-                    # 0.3.26: seed the current local radio library once.  This
-                    # makes songs that exist only in the station database visible
-                    # in RadioCharts and aligns their status with the radio
-                    # category.  The same parser is also exposed in Dane for
-                    # future manual syncs of a fresh export.
+                    # 0.3.27: robust one-shot seed of the user's current radio
+                    # library.  0.3.26 kept this migration outside the fast-path
+                    # marker set, so an already-migrated production DB could return
+                    # before executing it.  v2 is itself a required marker, which
+                    # guarantees one pass after upgrade.  The sync is idempotent.
                     seed_mode = os.getenv("RADIOCHARTS_AUTO_LIBRARY_SEED", "auto").strip().lower()
                     seed_enabled = seed_mode in {"1", "true", "yes", "on"} or (
                         seed_mode == "auto" and str(DB_PATH).replace("\\", "/").startswith("/app/data/")
                     )
-                    if seed_enabled:
-                        radio_seed = con.execute("SELECT value FROM app_meta WHERE key='radio_library_seed_20260825_v1'").fetchone()
-                        if not radio_seed:
+                    radio_seed_v2 = con.execute(
+                        "SELECT value FROM app_meta WHERE key='radio_library_seed_20260825_v2'"
+                    ).fetchone()
+                    if not radio_seed_v2:
+                        seed_value = "disabled" if not seed_enabled else "missing"
+                        if seed_enabled:
                             seed_path = Path(__file__).resolve().parent / "data" / "radio_library_seed_20260825.tsv"
-                            seed_value = "missing"
                             if seed_path.exists():
                                 try:
                                     seed_text = seed_path.read_text(encoding="utf-8-sig")
@@ -950,12 +953,13 @@ def init_db() -> None:
                                 seed_result = _sync_radio_library_rows(con, seed_rows)
                                 seed_value = (
                                     f"rows={seed_parse['rows']};added={seed_result['added']};"
-                                    f"matched={seed_result['matched']};updated={seed_result['status_updated']}"
+                                    f"matched={seed_result['matched']};updated={seed_result['status_updated']};"
+                                    f"downloaded={seed_result['downloaded_marked']}"
                                 )
-                            con.execute(
-                                "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_seed_20260825_v1',?)",
-                                (seed_value,),
-                            )
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_seed_20260825_v2',?)",
+                            (seed_value,),
+                        )
 
                     dead_station_mig = con.execute("SELECT value FROM app_meta WHERE key='airplay_dead_station_cleanup_v1'").fetchone()
                     if not dead_station_mig:
@@ -1167,6 +1171,57 @@ def sync_radio_library_tsv(text: str) -> dict:
     with connect() as con:
         result = _sync_radio_library_rows(con, rows)
     return {**parsed, **result}
+
+
+def radio_library_catalog() -> list[dict]:
+    """Return every song currently assigned to an active ``Baza <Cat>`` bucket.
+
+    ``Baza Hold`` is intentionally excluded: it is a parking/workflow state,
+    not a song confirmed to be present in the station's active library.
+    """
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """WITH chart_first AS (
+                   SELECT ce.song_id,MIN(i.chart_date) AS first_chart_date
+                   FROM chart_entries ce JOIN chart_issues i ON i.id=ce.issue_id
+                   GROUP BY ce.song_id
+               )
+               SELECT s.id AS song_id,s.artist,s.title,s.release_date,cf.first_chart_date,
+                      n.heard,n.status,n.downloaded,n.note,n.updated_at
+               FROM songs s
+               JOIN song_notes n ON n.song_id=s.id
+               LEFT JOIN chart_first cf ON cf.song_id=s.id
+               WHERE n.status LIKE 'Baza %' AND n.status<>'Baza Hold'
+               ORDER BY n.status COLLATE NOCASE,s.artist COLLATE NOCASE,s.title COLLATE NOCASE,s.id"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def radio_library_overview() -> dict:
+    """Compact diagnostics for verifying that a radio-library sync really landed."""
+    init_db()
+    with connect() as con:
+        status_rows = con.execute(
+            """SELECT status,COUNT(*) AS count
+               FROM song_notes
+               WHERE status LIKE 'Baza %' AND status<>'Baza Hold'
+               GROUP BY status ORDER BY status"""
+        ).fetchall()
+        marker = con.execute(
+            "SELECT value FROM app_meta WHERE key='radio_library_seed_20260825_v2'"
+        ).fetchone()
+        downloaded = con.execute(
+            """SELECT COUNT(*) FROM song_notes
+               WHERE status LIKE 'Baza %' AND status<>'Baza Hold' AND downloaded=1"""
+        ).fetchone()[0]
+    counts = {str(r['status']).removeprefix('Baza '): int(r['count']) for r in status_rows}
+    return {
+        "total": sum(counts.values()),
+        "downloaded": int(downloaded or 0),
+        "categories": counts,
+        "seed_marker": str(marker[0]) if marker else "missing",
+    }
 
 
 def _validated_entries(source: str, entries: Iterable[dict]) -> list[dict]:
