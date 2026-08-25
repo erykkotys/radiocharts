@@ -789,6 +789,7 @@ def init_db() -> None:
         "status_taxonomy_v3",
         "song_downloaded_v1",
         "radio_library_seed_20260825_v2",
+        "radio_library_heard_downloaded_v1",
         "airplay_dead_station_cleanup_v1",
         "airplay_eska_jingle_cleanup_v1",
     }
@@ -961,6 +962,26 @@ def init_db() -> None:
                             (seed_value,),
                         )
 
+                    radio_heard_dl = con.execute(
+                        "SELECT value FROM app_meta WHERE key='radio_library_heard_downloaded_v1'"
+                    ).fetchone()
+                    if not radio_heard_dl:
+                        # 0.3.28: all songs imported from the station library are
+                        # necessarily already auditioned and downloaded.  0.3.27
+                        # correctly restored statuses but intentionally preserved
+                        # heard, leaving imported records unchecked.
+                        changed = con.execute(
+                            """UPDATE song_notes
+                               SET heard=1,downloaded=1,updated_at=?
+                               WHERE status LIKE 'Baza %' AND status<>'Baza Hold'
+                                 AND (heard=0 OR downloaded=0)""",
+                            (_utcnow(),),
+                        ).rowcount
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_heard_downloaded_v1',?)",
+                            (f"updated={int(changed or 0)}",),
+                        )
+
                     dead_station_mig = con.execute("SELECT value FROM app_meta WHERE key='airplay_dead_station_cleanup_v1'").fetchone()
                     if not dead_station_mig:
                         # 2026-01-01..2026-04-30 backfill: these stations returned
@@ -1110,11 +1131,12 @@ def parse_radio_library_tsv(text: str) -> tuple[list[dict], dict]:
 def _sync_radio_library_rows(con: sqlite3.Connection, rows: Iterable[dict]) -> dict:
     """Add missing radio-library songs and make the radio category authoritative.
 
-    Existing heard/notatka state is preserved.  ``downloaded`` is set because a
-    song present in this export is, by definition, already in the local radio
-    library.  The status is updated to ``Baza <Cat>``.
+    A song present in this export is, by definition, already listened to and
+    present in the local radio library, so both ``heard`` and ``downloaded`` are
+    set to 1.  Existing notes are preserved.  The status is updated to
+    ``Baza <Cat>``.
     """
-    added = matched = status_updated = downloaded_marked = 0
+    added = matched = status_updated = downloaded_marked = heard_marked = 0
     processed = 0
     for src in rows:
         artist = str(src.get("artist") or "").strip()
@@ -1139,28 +1161,33 @@ def _sync_radio_library_rows(con: sqlite3.Connection, rows: Iterable[dict]) -> d
         if note:
             old_status = str(note["status"] or "Nie słuchałem")
             old_downloaded = bool(note["downloaded"])
-            if old_status != desired or not old_downloaded:
+            old_heard = bool(note["heard"])
+            if old_status != desired or not old_downloaded or not old_heard:
                 con.execute(
-                    "UPDATE song_notes SET status=?,downloaded=1,updated_at=? WHERE song_id=?",
+                    "UPDATE song_notes SET status=?,heard=1,downloaded=1,updated_at=? WHERE song_id=?",
                     (desired, now, int(song_id)),
                 )
             if old_status != desired:
                 status_updated += 1
             if not old_downloaded:
                 downloaded_marked += 1
+            if not old_heard:
+                heard_marked += 1
         else:
             con.execute(
                 "INSERT INTO song_notes(song_id,heard,status,downloaded,note,updated_at) VALUES(?,?,?,?,?,?)",
-                (int(song_id), 0, desired, 1, "", now),
+                (int(song_id), 1, desired, 1, "", now),
             )
             status_updated += 1
             downloaded_marked += 1
+            heard_marked += 1
     return {
         "processed": processed,
         "added": added,
         "matched": matched,
         "status_updated": status_updated,
         "downloaded_marked": downloaded_marked,
+        "heard_marked": heard_marked,
     }
 
 
@@ -1174,10 +1201,10 @@ def sync_radio_library_tsv(text: str) -> dict:
 
 
 def radio_library_catalog() -> list[dict]:
-    """Return every song currently assigned to an active ``Baza <Cat>`` bucket.
+    """Return every song assigned to ``Baza <Cat>`` or ``Baza Hold``.
 
-    ``Baza Hold`` is intentionally excluded: it is a parking/workflow state,
-    not a song confirmed to be present in the station's active library.
+    Hold is included deliberately so the Baza audit can answer whether a parked
+    title may have been removed too aggressively.
     """
     init_db()
     with connect() as con:
@@ -1192,7 +1219,7 @@ def radio_library_catalog() -> list[dict]:
                FROM songs s
                JOIN song_notes n ON n.song_id=s.id
                LEFT JOIN chart_first cf ON cf.song_id=s.id
-               WHERE n.status LIKE 'Baza %' AND n.status<>'Baza Hold'
+               WHERE n.status LIKE 'Baza %'
                ORDER BY n.status COLLATE NOCASE,s.artist COLLATE NOCASE,s.title COLLATE NOCASE,s.id"""
         ).fetchall()
     return [dict(r) for r in rows]
@@ -1215,10 +1242,19 @@ def radio_library_overview() -> dict:
             """SELECT COUNT(*) FROM song_notes
                WHERE status LIKE 'Baza %' AND status<>'Baza Hold' AND downloaded=1"""
         ).fetchone()[0]
+        heard = con.execute(
+            """SELECT COUNT(*) FROM song_notes
+               WHERE status LIKE 'Baza %' AND status<>'Baza Hold' AND heard=1"""
+        ).fetchone()[0]
+        hold = con.execute(
+            "SELECT COUNT(*) FROM song_notes WHERE status='Baza Hold'"
+        ).fetchone()[0]
     counts = {str(r['status']).removeprefix('Baza '): int(r['count']) for r in status_rows}
     return {
         "total": sum(counts.values()),
         "downloaded": int(downloaded or 0),
+        "heard": int(heard or 0),
+        "hold": int(hold or 0),
         "categories": counts,
         "seed_marker": str(marker[0]) if marker else "missing",
     }

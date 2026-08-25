@@ -22,16 +22,16 @@ def test_0327_v2_seed_runs_on_preexisting_db_that_missed_0326_seed(tmp_path, mon
     with db.connect() as con:
         assert con.execute("SELECT COUNT(*) FROM song_notes WHERE status LIKE 'Baza %' AND status<>'Baza Hold'").fetchone()[0] == 928
         row = con.execute(
-            """SELECT n.status,n.downloaded FROM songs s JOIN song_notes n ON n.song_id=s.id
+            """SELECT n.status,n.downloaded,n.heard FROM songs s JOIN song_notes n ON n.song_id=s.id
                WHERE s.artist_key=? AND s.title_key=?""",
             (db.normalize("CELINE DION"), db.normalize("A NEW DAY HAS COME")),
         ).fetchone()
-        assert tuple(row) == ("Baza R2", 1)
+        assert tuple(row) == ("Baza R2", 1, 1)
         marker = con.execute("SELECT value FROM app_meta WHERE key='radio_library_seed_20260825_v2'").fetchone()[0]
         assert "rows=928" in marker
 
 
-def test_0327_library_catalog_excludes_hold(tmp_path, monkeypatch):
+def test_0327_library_catalog_includes_hold(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "catalog.db")
     monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
     monkeypatch.setenv("RADIOCHARTS_AUTO_LIBRARY_SEED", "0")
@@ -42,7 +42,7 @@ def test_0327_library_catalog_excludes_hold(tmp_path, monkeypatch):
     db.update_note(a, True, "Baza CF1", "", downloaded=True)
     db.update_note(b, True, "Baza Hold", "", downloaded=True)
     rows = db.radio_library_catalog()
-    assert [r["song_id"] for r in rows] == [a]
+    assert [r["song_id"] for r in rows] == [a, b]
 
 
 def test_0327_ui_has_library_tab_status_filters_and_paste_sync():

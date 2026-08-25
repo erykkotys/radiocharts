@@ -1,3 +1,15 @@
+## 0.3.28 — Popularity, filtry wielokrotne i pełna synchronizacja bazy
+
+- dodany filtr **Downloaded: Any / Yes / No** w Dashboardzie, Emisjach i Bazie;
+- filtr statusów działa jako popover z checkboxami i pozwala wybrać kilka statusów naraz;
+- Dashboard startuje domyślnie w widoku **Kompaktowym**;
+- zakładka **Baza** obejmuje również `Baza Hold`;
+- synchronizacja katalogu radia ustawia utworom zarówno **Przesłuchany**, jak i **DL**; migracja naprawia też rekordy zaimportowane przez 0.3.27;
+- `Familiarity` w UI zostało przemianowane na **Chart Score**;
+- dodany **Popularity**: 80% percentyl wolumenu emisji z ostatnich 28 dni + 20% bonus chartowy (OLiA 35%, OLiS 25%, RMF 20%, ZET 12%, ESKA 8%);
+- dodany parametr **Emisje 7d** obok **Zasięg 7d** w głównych tabelach i na karcie Utwór;
+- Manual opisuje nowy podział Chart Score / Momentum / Popularity / Radio Presence.
+
 ## 0.3.27 — audyt własnej bazy i naprawiona synchronizacja
 
 - naprawiony jednorazowy import statusów z lokalnej bazy radia po aktualizacji z 0.3.26;
