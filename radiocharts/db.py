@@ -70,6 +70,25 @@ CREATE TABLE IF NOT EXISTS song_notes (
     updated_at TEXT NOT NULL
 );
 
+-- A real Baza category is a hard invariant: if a title is in the local
+-- radio library it has already been auditioned and downloaded.  These triggers
+-- keep the invariant true even if an older UI/client writes stale checkbox values.
+CREATE TRIGGER IF NOT EXISTS trg_song_notes_base_flags_insert
+AFTER INSERT ON song_notes
+WHEN NEW.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB')
+ AND (NEW.heard<>1 OR NEW.downloaded<>1)
+BEGIN
+  UPDATE song_notes SET heard=1, downloaded=1 WHERE song_id=NEW.song_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_song_notes_base_flags_update
+AFTER UPDATE OF status,heard,downloaded ON song_notes
+WHEN NEW.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB')
+ AND (NEW.heard<>1 OR NEW.downloaded<>1)
+BEGIN
+  UPDATE song_notes SET heard=1, downloaded=1 WHERE song_id=NEW.song_id;
+END;
+
 CREATE INDEX IF NOT EXISTS idx_issue_source_date ON chart_issues(source, chart_date);
 CREATE INDEX IF NOT EXISTS idx_entry_song ON chart_entries(song_id);
 CREATE INDEX IF NOT EXISTS idx_song_title_key ON songs(title_key);
@@ -791,6 +810,7 @@ def init_db() -> None:
         "radio_library_seed_20260825_v2",
         "radio_library_heard_downloaded_v1",
         "radio_library_heard_downloaded_v2",
+        "radio_library_heard_downloaded_v3",
         "airplay_dead_station_cleanup_v1",
         "airplay_eska_jingle_cleanup_v1",
     }
@@ -1003,6 +1023,30 @@ def init_db() -> None:
                         con.execute(
                             "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_heard_downloaded_v2',?)",
                             (f"updated={int(changed_v2 or 0)}",),
+                        )
+
+                    radio_heard_dl_v3 = con.execute(
+                        "SELECT value FROM app_meta WHERE key='radio_library_heard_downloaded_v3'"
+                    ).fetchone()
+                    if not radio_heard_dl_v3:
+                        # 0.3.30: production showed a v2 marker while some Baza rows
+                        # still had stale 0/0 flags. Run an unconditional repair and
+                        # install persistent DB triggers (created by SCHEMA above) so
+                        # this invariant no longer depends on one-shot migration state.
+                        real_base_statuses = tuple(
+                            f"Baza {cat}" for cat in ("R2", "R1", "CF2", "CF1", "F1", "G1", "G2", "SP1", "SP2", "NB")
+                        )
+                        placeholders = ",".join("?" for _ in real_base_statuses)
+                        changed_v3 = con.execute(
+                            f"""UPDATE song_notes
+                                SET heard=1,downloaded=1,updated_at=?
+                                WHERE status IN ({placeholders})
+                                  AND (heard<>1 OR downloaded<>1)""",
+                            (_utcnow(), *real_base_statuses),
+                        ).rowcount
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_heard_downloaded_v3',?)",
+                            (f"updated={int(changed_v3 or 0)}",),
                         )
 
                     dead_station_mig = con.execute("SELECT value FROM app_meta WHERE key='airplay_dead_station_cleanup_v1'").fetchone()
@@ -1238,7 +1282,10 @@ def radio_library_catalog() -> list[dict]:
                    GROUP BY ce.song_id
                )
                SELECT s.id AS song_id,s.artist,s.title,s.release_date,cf.first_chart_date,
-                      n.heard,n.status,n.downloaded,n.note,n.updated_at
+                      CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.heard END AS heard,
+                      n.status,
+                      CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.downloaded END AS downloaded,
+                      n.note,n.updated_at
                FROM songs s
                JOIN song_notes n ON n.song_id=s.id
                LEFT JOIN chart_first cf ON cf.song_id=s.id

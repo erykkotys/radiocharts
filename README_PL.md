@@ -1,3 +1,10 @@
+## 0.3.30 — trwała naprawa flag Bazy i równy pasek filtrów
+
+- rekordy z realnym statusem `Baza ...` są ponownie naprawiane przez migrację v3; dodatkowo SQLite ma teraz triggery, które nie pozwalają zapisać `heard=0` lub `downloaded=0` dla aktywnej kategorii Bazy;
+- widok Baza ma dodatkowy bezpiecznik odczytu, a kolumny `heard/downloaded` są jawnie konwertowane z SQLite `0/1` na boolean — to właśnie brak tej konwersji powodował, że AG Grid rysował zapisane `1` jako puste checkboxy;
+- filtr Status sam renderuje etykietę i wszystkie paski filtrów (Dashboard/Emisje/Baza) są wyrównane do dołu;
+- licznik `Utwory (filtr / okres)` używa natywnej kontrolki Streamlita, dzięki czemu etykieta, wysokość i linia bazowa są takie same jak w pozostałych filtrach; poprawione są też marginesy i wysokość popovera Status.
+
 ## 0.3.29 — naprawa flag Bazy i wyrównany pasek filtrów
 
 - Dashboard wyrównuje wszystkie kontrolki w górnym pasku do jednej linii; Status ma własną etykietę i ten sam wymiar kontrolki co sąsiednie filtry.

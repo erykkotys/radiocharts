@@ -57,5 +57,5 @@ def test_0329_hold_remains_neutral(tmp_path, monkeypatch):
 def test_0329_dashboard_toolbar_is_bottom_aligned_and_status_has_label():
     assert 'vertical_alignment="bottom"' in APP
     assert "rc-control-label" in APP
-    assert ">Status</div>" in APP
+    assert 'field_label: str = "Status"' in APP
     assert '"radio_library_heard_downloaded_v2"' in DBSRC

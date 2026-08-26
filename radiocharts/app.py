@@ -63,8 +63,9 @@ st.markdown(
       div[data-baseweb="select"] > div { min-height: 2.1rem !important; }
       input { min-height: 2rem !important; }
       [data-testid="stWidgetLabel"] p { font-size: .76rem !important; margin-bottom: .08rem !important; line-height:1.18 !important; }
-      .rc-control-label { font-size:.76rem; line-height:1.18; margin:0 0 .22rem 0; color:inherit; }
-      [data-testid="stPopover"] button { min-height:2.1rem !important; width:100% !important; }
+      .rc-control-label { font-size:.76rem; line-height:1.18; margin:0 0 .08rem 0; min-height:.90rem; display:flex; align-items:flex-end; color:inherit; }
+      [data-testid="stPopover"] button { min-height:2.1rem !important; height:2.1rem !important; width:100% !important; padding-top:.15rem !important; padding-bottom:.15rem !important; }
+      [data-testid="stTextInput"] input:disabled { color:#f3f4f6 !important; -webkit-text-fill-color:#f3f4f6 !important; opacity:1 !important; font-weight:650 !important; text-align:center !important; }
       [data-testid="stForm"] { padding:.55rem .7rem !important; }
       [data-testid="stVerticalBlock"] { gap: .58rem !important; }
       [data-testid="stHorizontalBlock"] { gap: .6rem !important; }
@@ -703,8 +704,13 @@ def status_filter_options(*, base_only: bool = False) -> list[str]:
     return list(STATUSES)
 
 
-def render_status_checkbox_filter(host, *, key: str, base_only: bool = False) -> list[str]:
+def render_status_checkbox_filter(host, *, key: str, base_only: bool = False, field_label: str = "Status") -> list[str]:
     """Compact popover containing real checkboxes; no selection means all."""
+    if field_label:
+        host.markdown(
+            f'<div class="rc-control-label">{html.escape(field_label)}</div>',
+            unsafe_allow_html=True,
+        )
     options = status_filter_options(base_only=base_only)
     group_base_key = f"{key}__group_base"
     group_cand_key = f"{key}__group_candidate"
@@ -1836,11 +1842,6 @@ if view_key == "dashboard":
             [.88, .96, 1.18, 1.02, .62, .68, .80, .80, .76],
             vertical_alignment="bottom",
         )
-        ctl_count.markdown(
-            '<div style="font-size:.76rem;font-weight:600;line-height:1.18;margin:0 0 .08rem;">Utwory (filtr / okres)</div>',
-            unsafe_allow_html=True,
-        )
-        dashboard_count_slot = ctl_count.empty()
         period_label = ctl_period.selectbox(
             "Okres wskaźników",
             list(period_map),
@@ -1857,9 +1858,6 @@ if view_key == "dashboard":
                 ["W najnowszych notowaniach", "PL w najnowszych", "Zagraniczne w najnowszych", "Cała historia"],
                 index=0,
                 help="„W najnowszych” = utwór jest obecny w najnowszym zapisanym notowaniu co najmniej jednego odpowiedniego źródła. To nie znaczy po prostu „kiedyś ostatnio pobrany”.",
-            )
-            ctl_status.markdown(
-                '<div class="rc-control-label">Status</div>', unsafe_allow_html=True
             )
             selected_statuses = render_status_checkbox_filter(
                 ctl_status, key="dashboard_status_filter", base_only=False
@@ -1906,11 +1904,13 @@ if view_key == "dashboard":
                 view = view[~view.heard]
             view = view.reset_index(drop=True)
 
-            dashboard_count_slot.markdown(
-                f'<div style="display:flex;align-items:center;justify-content:center;border:1px solid #3e4653;'
-                f'border-radius:6px;background:#1d232c;min-height:2.1rem;padding:.22rem .40rem;margin:0;">'
-                f'<strong style="font-size:.95rem;white-space:nowrap;">{len(view)} / {len(period_df)}</strong></div>',
-                unsafe_allow_html=True,
+            count_key = "dashboard_count_display"
+            st.session_state[count_key] = f"{len(view)} / {len(period_df)}"
+            ctl_count.text_input(
+                "Utwory (filtr / okres)",
+                key=count_key,
+                disabled=True,
+                label_visibility="visible",
             )
 
             core_avg_cols = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in view.columns]
@@ -2477,7 +2477,7 @@ elif view_key == "airplay":
             st.info("Brak zapisanych emisji dla wybranych stacji i dat. Pobieranie bieżące i backfill są w zakładce Dane.")
         else:
             st.markdown("### 🔥 Najczęściej grane")
-            r0, rstatus, rdl, r1, r2, r3 = st.columns([1.85, 1.0, .62, .66, .82, .62])
+            r0, rstatus, rdl, r1, r2, r3 = st.columns([1.85, 1.0, .62, .66, .82, .62], vertical_alignment="bottom")
             airplay_query = r0.text_input(
                 "Szukaj w Emisjach",
                 placeholder="wykonawca lub tytuł",
@@ -2635,6 +2635,11 @@ elif view_key == "library":
 
         lib = library_rows.copy()
         lib["song_id"] = lib["song_id"].astype(int)
+        # SQLite returns INTEGER 0/1. AG Grid's checkbox renderer expects real
+        # booleans; leaving int64 here makes a stored 1 look unchecked.
+        for state_col in ["heard", "downloaded"]:
+            if state_col in lib.columns:
+                lib[state_col] = lib[state_col].fillna(0).astype(bool)
         metric_ids = tuple(sorted(int(x) for x in lib["song_id"].tolist()))
         basic = cached_basic_song_metrics(chart_revision(), air_rev, metric_ids)
         if not basic.empty:
@@ -2689,7 +2694,7 @@ elif view_key == "library":
             ("Raportujące stacje", f"{reporting_station_count}/{len(selected_ids)}" if selected_ids else "—"),
         ])
 
-        qcol, scol, dlcol, zerocol, sortcol, showcol = st.columns([1.95, 1.0, .62, .78, .92, .62])
+        qcol, scol, dlcol, zerocol, sortcol, showcol = st.columns([1.95, 1.0, .62, .78, .92, .62], vertical_alignment="bottom")
         library_query = qcol.text_input(
             "Szukaj w Bazie", placeholder="wykonawca lub tytuł", key="library_search"
         )
