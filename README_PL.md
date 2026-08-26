@@ -286,3 +286,7 @@ odSluchane.eu udostępnia dobę w 12 blokach po 2 godziny. RadioCharts pokazuje 
 ## 0.3.11 — pełne logi procesów
 
 Każdy collector i backfill dostaje trwały log `/app/data/jobs/<job_id>.log`. Log nie jest limitowany do ostatnich 50 komunikatów: zapisuje cały progres, stdout/stderr collectorów, tracebacki i końcowe podsumowanie. Po zakończeniu joba również jego plik JSON zachowuje pełne `messages`, a backfill dodaje `source_summary` per źródło (`requested`, `ok`, `errors`, `reported_messages`). W UI można podejrzeć końcówkę logu w sekcji **Log procesu**.
+
+
+### 0.3.31
+Dashboard pokazuje również Emisje okres, odpowiadające wybranemu Okresowi wskaźników. Dashboard, Emisje i Baza mają kolumnę L.p. działającą jako numer wiersza po sortowaniu. Na karcie Utwór wykresy są domyślnie rozwinięte, a status można zmieniać również w tabeli Emisji radiowych.

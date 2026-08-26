@@ -2248,6 +2248,36 @@ def store_airplay_window(
         return inserted
 
 
+def airplay_spin_counts(station_ids: Iterable[int], start_date: date | str, end_date: date | str) -> list[dict]:
+    """Fast spin totals per canonical song for one date/station window.
+
+    This intentionally avoids the per-station/ranking CTEs from ``airplay_summary``.
+    Dashboard only needs one number per song, so a straight GROUP BY keeps the
+    extra metric cheap even for a large airplay history.
+    """
+    init_db()
+    ids = sorted({int(x) for x in station_ids})
+    if not ids:
+        return []
+    start = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    if end < start:
+        start, end = end, start
+    start_ts = datetime.combine(start, dt_time.min).isoformat(timespec="minutes")
+    end_ts = datetime.combine(end + timedelta(days=1), dt_time.min).isoformat(timespec="minutes")
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as con:
+        rows = con.execute(
+            f"""SELECT song_id,COUNT(*) AS spins
+                FROM airplay_plays
+                WHERE station_id IN ({placeholders})
+                  AND played_at>=? AND played_at<? AND song_id IS NOT NULL
+                GROUP BY song_id""",
+            (*ids, start_ts, end_ts),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date: date | str) -> list[dict]:
     """Aggregate stored spins by canonical song_id.
 

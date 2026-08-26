@@ -20,7 +20,7 @@ from radiocharts.freshness import source_cadence_info
 from radiocharts.airplay import completed_windows_in_range
 from radiocharts.db import (
     airplay_coverage, airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
-    airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
+    airplay_spin_counts, airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision,
     parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
@@ -499,6 +499,11 @@ def cached_song_catalog(revision: str) -> pd.DataFrame:
 @st.cache_resource(show_spinner=False, max_entries=24)
 def cached_airplay_summary(revision: str, station_key: tuple[int, ...], start_iso: str, end_iso: str) -> list[dict]:
     return airplay_summary(station_key, start_iso, end_iso)
+
+
+@st.cache_resource(show_spinner=False, max_entries=24)
+def cached_airplay_spin_counts(revision: str, station_key: tuple[int, ...], start_iso: str, end_iso: str) -> list[dict]:
+    return airplay_spin_counts(station_key, start_iso, end_iso)
 
 
 @st.cache_resource(show_spinner=False, max_entries=64)
@@ -1330,9 +1335,14 @@ def render_song_grid(
     source_layout: str = "full",
     station_total: int | None = None,
     floating_hscroll: bool = False,
+    row_numbers: bool = False,
 ) -> pd.DataFrame:
     """AG Grid table: row highlight, editing, responsive source columns and preview player."""
     show = frame.copy()
+    if row_numbers and "_row_number" not in show.columns:
+        # Display-only row header. valueGetter uses the current visual rowIndex,
+        # so after any AG Grid sort the column still reads 1,2,3... top-to-bottom.
+        show.insert(0, "_row_number", 0)
     if show.empty:
         st.info("Brak utworów do pokazania.")
         return show
@@ -1343,6 +1353,12 @@ def render_song_grid(
 
     gb = GridOptionsBuilder.from_dataframe(show)
     gb.configure_default_column(resizable=True, sortable=True, filter=True, editable=False)
+    if "_row_number" in show.columns:
+        gb.configure_column(
+            "_row_number", "L.p.", pinned="left", width=58, minWidth=52, maxWidth=62,
+            sortable=False, filter=False, editable=False, suppressMenu=True,
+            valueGetter=JsCode("function(params){ return params.node ? params.node.rowIndex + 1 : ''; }")
+        )
     gb.configure_selection(selection_mode="single", use_checkbox=False, suppressRowClickSelection=False)
     gb.configure_grid_options(rowHeight=36, animateRows=False, onCellClicked=GRID_CLICK_HANDLER)
     if floating_hscroll:
@@ -1427,6 +1443,11 @@ def render_song_grid(
         gb.configure_column("radio_reach", "Zasięg 7d", width=108, minWidth=98, valueFormatter=PERCENT_FORMATTER)
     if "airplay_spins_7d" in show.columns:
         gb.configure_column("airplay_spins_7d", "Emisje 7d", width=102, minWidth=92)
+    if "airplay_spins_period" in show.columns:
+        gb.configure_column(
+            "airplay_spins_period", "Emisje okres", width=112, minWidth=102,
+            headerTooltip="Liczba emisji ze wszystkich aktywnych stacji w okresie odpowiadającym wybranemu Okresowi wskaźników; dla Całości = cała dostępna historia Emisji.",
+        )
     if "radio_rotation" in show.columns:
         gb.configure_column("radio_rotation", "Rotacja", width=100, minWidth=92, valueFormatter=PERCENT_FORMATTER)
     if "radio_presence_period" in show.columns:
@@ -1850,6 +1871,39 @@ if view_key == "dashboard":
         )
         lookback = int(period_map[period_label])
         period_df = df if lookback == 0 else with_popularity(with_radio_presence(with_notes(cached_scores(REVISION, lookback_days=lookback)), days=7), airplay_revision())
+
+        # Dashboard: exact spin count for the selected indicator period.  Use a
+        # lightweight SQL GROUP BY rather than the richer Emisje summary so this
+        # extra column does not noticeably slow down the page.
+        dash_station_ids = [int(s["station_id"]) for s in list_airplay_stations(active_only=True)]
+        dash_air_rev = airplay_revision()
+        if dash_station_ids:
+            dash_cov = airplay_coverage(dash_station_ids)
+            dash_first = dash_cov.get("first_date")
+            dash_last = dash_cov.get("last_date")
+        else:
+            dash_first = dash_last = None
+        if dash_first and dash_last:
+            dash_air_end = date.fromisoformat(str(dash_last))
+            dash_air_first = date.fromisoformat(str(dash_first))
+            dash_air_start = dash_air_first if lookback == 0 else max(
+                dash_air_first, dash_air_end - timedelta(days=max(0, lookback - 1))
+            )
+            dash_counts = pd.DataFrame(cached_airplay_spin_counts(
+                dash_air_rev, tuple(sorted(dash_station_ids)),
+                dash_air_start.isoformat(), dash_air_end.isoformat(),
+            ))
+            if not dash_counts.empty:
+                dash_counts = dash_counts[["song_id", "spins"]].rename(columns={"spins": "airplay_spins_period"})
+                period_df = period_df.merge(dash_counts, on="song_id", how="left")
+            if "airplay_spins_period" not in period_df.columns:
+                period_df["airplay_spins_period"] = 0
+            period_df["airplay_spins_period"] = pd.to_numeric(
+                period_df["airplay_spins_period"], errors="coerce"
+            ).fillna(0).astype(int)
+        else:
+            period_df["airplay_spins_period"] = 0
+
         if period_df.empty:
             st.info("Brak danych w wybranym okresie.")
         else:
@@ -1938,7 +1992,7 @@ if view_key == "dashboard":
 
             cols = [
                 "song_id", "artist", "title", "release_month", "details", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
-                "popularity", "familiarity", "momentum", "radio_presence", "radio_reach", "airplay_spins_7d", "radio_rotation",
+                "popularity", "familiarity", "momentum", "radio_presence", "radio_reach", "airplay_spins_7d", "airplay_spins_period", "radio_rotation",
                 "avg_position", "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
                 "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
                 "UK_pos", "UK_weeks", "BILLBOARD_pos", "BILLBOARD_weeks", "note",
@@ -1964,6 +2018,7 @@ if view_key == "dashboard":
                 editable_state=True,
                 source_layout=source_layout,
                 floating_hscroll=True,
+                row_numbers=True,
             )
             st.caption("Kompaktowy składa pozycję i tygodnie do jednej komórki, np. #7 (5w). Popularity bazuje głównie na emisjach z ostatnich 28 dni; szczegóły są w Manualu. ▶ 30s otwiera player przyklejony do dołu ekranu.")
 
@@ -2090,9 +2145,9 @@ elif view_key == "song":
                     st.caption("Brak zapisanej historii pozycji dla tego utworu. Jeśli trafił tu z Emisji, może jeszcze nie występować w żadnym naszym notowaniu.")
                 else:
                     available_sources = list(dict.fromkeys(h["source"].tolist()))
-                    default_sources = [x for x in ["RMF", "ZET", "OLIA", "OLIS", "ESKA"] if x in available_sources]
-                    if not default_sources:
-                        default_sources = available_sources[:4]
+                    # Show every available source by default. The user can still
+                    # hide individual series with the multiselect.
+                    default_sources = available_sources
                     hist_src_col, hist_scale_col = st.columns([3, 1])
                     selected_sources = hist_src_col.multiselect("Źródła na wykresie", available_sources, default=default_sources, key=f"history_sources_{song_id}")
                     scale_mode = hist_scale_col.selectbox(
@@ -2207,7 +2262,7 @@ elif view_key == "song":
                         pd.DataFrame([song_air_row]),
                         key=f"song_airplay_grid_{song_id}_{song_air_start}_{song_air_end}",
                         height=92,
-                        editable_state=False,
+                        editable_state=True,
                         source_layout="airplay",
                         station_total=song_reporting_count,
                     )
@@ -2217,7 +2272,7 @@ elif view_key == "song":
                         "Zasięg 7d i Emisje 7d są zawsze liczone globalnie z ostatnich 7 dni; Popularity używa ostatnich 28 dni, niezależnie od wybranego zakresu."
                     )
 
-                    with st.expander("Szczegóły emisji per stacja i dzień", expanded=False):
+                    with st.expander("Szczegóły emisji per stacja i dzień", expanded=True):
                         # Resolve the detail from the currently selected range here
                         # as well. The cached helper is date-keyed, so changing the
                         # preset or either exact date immediately changes both the
@@ -2461,17 +2516,11 @@ elif view_key == "airplay":
             ("Stacje w filtrze", len(selected_ids)),
             ("Pokrycie bloków 2h", f"{ok_windows}/{expected_windows}" if expected_windows else "—"),
         ])
-        st.caption(f"Zakres: {range_start} → {range_end}. Pełna zakończona doba = **12 bloków po 2h na każdą stację**.")
         if expected_windows and ok_windows < expected_windows:
             st.warning(
                 f"Dane w tym zakresie są niepełne: zapisano {ok_windows} z {expected_windows} zakończonych bloków 2h "
                 f"({coverage_pct:.0f}%). Ranking liczy tylko zapisane emisje. Około 20–30 utworów na stację/dzień "
                 "zwykle oznacza, że mamy tylko jeden blok 2h, a nie całą dobę. Uzupełnienie 24h i backfill są w zakładce Dane."
-            )
-        if selected_ids:
-            st.caption(
-                f"Raportujące stacje w tym zakresie: **{reporting_station_count}/{len(selected_ids)}**. "
-                "Raportująca = mamy z niej przynajmniej jedną zapisaną emisję w wybranym okresie."
             )
         if air.empty:
             st.info("Brak zapisanych emisji dla wybranych stacji i dat. Pobieranie bieżące i backfill są w zakładce Dane.")
@@ -2575,16 +2624,8 @@ elif view_key == "airplay":
                 source_layout="airplay",
                 station_total=reporting_station_count,
                 floating_hscroll=True,
+                row_numbers=True,
             )
-            st.caption(
-                "**Zasięg** = procent raportujących stacji, które zagrały utwór w wybranym okresie; w nawiasie liczba stacji, np. 46% (26). "
-                "**Zasięg 7d** = wspólny sygnał z ostatnich 7 dni liczony ze wszystkich aktywnych raportujących stacji, niezależnie od filtra. "
-                "**Emisje 7d** = bezwzględna liczba odtworzeń w tym samym globalnym 7-dniowym oknie. "
-                "**Emisje/dzień łącznie** = suma odtworzeń ze wszystkich wybranych stacji / liczba dni. "
-                "**Śr./grającą stację/dzień** dzieli dodatkowo przez liczbę stacji, które faktycznie zagrały utwór."
-            )
-
-        st.caption("Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zakładce **Dane**.")
 
 elif view_key == "library":
     st.subheader("🎵 Baza")
@@ -2758,7 +2799,7 @@ elif view_key == "library":
             show,
             key=f"library_grid_{range_start}_{range_end}_{library_downloaded}_{quote(','.join(sorted(library_statuses)), safe='')}_{library_sort}_{library_top}_{int(only_zero)}_{normalize(library_query)}_{station_key}",
             height=700, editable_state=True, source_layout="airplay",
-            station_total=reporting_station_count, floating_hscroll=True,
+            station_total=reporting_station_count, floating_hscroll=True, row_numbers=True,
         )
         st.caption(
             "Baza pokazuje wszystkie utwory ze statusem Baza oraz Baza Hold, także gdy w wybranym okresie mają 0 emisji. "
@@ -3120,6 +3161,8 @@ odSluchane udostępnia historię w **blokach po 2 godziny**. Pełna zakończona 
 - **Puste bloki** — serwis odpowiedział poprawnie, ale parser znalazł 0 emisji. To coś innego niż brak pobrania.
 
 Ranking Emisji liczy tylko to, co faktycznie jest zapisane. Przy niepełnym pokryciu wyniki mogą być zaniżone.
+
+Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zakładce **Dane**.
             """
         )
 
