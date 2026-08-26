@@ -790,6 +790,7 @@ def init_db() -> None:
         "song_downloaded_v1",
         "radio_library_seed_20260825_v2",
         "radio_library_heard_downloaded_v1",
+        "radio_library_heard_downloaded_v2",
         "airplay_dead_station_cleanup_v1",
         "airplay_eska_jingle_cleanup_v1",
     }
@@ -967,9 +968,7 @@ def init_db() -> None:
                     ).fetchone()
                     if not radio_heard_dl:
                         # 0.3.28: all songs imported from the station library are
-                        # necessarily already auditioned and downloaded.  0.3.27
-                        # correctly restored statuses but intentionally preserved
-                        # heard, leaving imported records unchecked.
+                        # necessarily already auditioned and downloaded.
                         changed = con.execute(
                             """UPDATE song_notes
                                SET heard=1,downloaded=1,updated_at=?
@@ -980,6 +979,30 @@ def init_db() -> None:
                         con.execute(
                             "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_heard_downloaded_v1',?)",
                             (f"updated={int(changed or 0)}",),
+                        )
+
+                    radio_heard_dl_v2 = con.execute(
+                        "SELECT value FROM app_meta WHERE key='radio_library_heard_downloaded_v2'"
+                    ).fetchone()
+                    if not radio_heard_dl_v2:
+                        # 0.3.29: force a second repair pass on production DBs where
+                        # the first one-shot marker was already present but the rows
+                        # still remained unchecked. Only real library categories are
+                        # touched; Baza Hold stays a neutral parking state.
+                        real_base_statuses = tuple(
+                            f"Baza {cat}" for cat in ("R2", "R1", "CF2", "CF1", "F1", "G1", "G2", "SP1", "SP2", "NB")
+                        )
+                        placeholders = ",".join("?" for _ in real_base_statuses)
+                        changed_v2 = con.execute(
+                            f"""UPDATE song_notes
+                                SET heard=1,downloaded=1,updated_at=?
+                                WHERE status IN ({placeholders})
+                                  AND (heard=0 OR downloaded=0)""",
+                            (_utcnow(), *real_base_statuses),
+                        ).rowcount
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('radio_library_heard_downloaded_v2',?)",
+                            (f"updated={int(changed_v2 or 0)}",),
                         )
 
                     dead_station_mig = con.execute("SELECT value FROM app_meta WHERE key='airplay_dead_station_cleanup_v1'").fetchone()
@@ -1328,6 +1351,12 @@ def update_note(song_id: int, heard: bool, status: str, note: str, downloaded: b
         if downloaded is None:
             existing = con.execute("SELECT downloaded FROM song_notes WHERE song_id=?", (int(song_id),)).fetchone()
             downloaded = bool(existing["downloaded"]) if existing else False
+        # Invariant: assigning a real Baza category means the title has already
+        # been auditioned and exists locally. Keep UI edits consistent with TSV sync.
+        real_base = {f"Baza {cat}" for cat in RADIO_LIBRARY_CATEGORIES}
+        if str(status) in real_base:
+            heard = True
+            downloaded = True
         con.execute(
             """INSERT INTO song_notes(song_id,heard,status,downloaded,note,updated_at) VALUES(?,?,?,?,?,?)
                ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,downloaded=excluded.downloaded,note=excluded.note,updated_at=excluded.updated_at""",

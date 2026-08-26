@@ -1,3 +1,9 @@
+## 0.3.29 — naprawa flag Bazy i wyrównany pasek filtrów
+
+- Dashboard wyrównuje wszystkie kontrolki w górnym pasku do jednej linii; Status ma własną etykietę i ten sam wymiar kontrolki co sąsiednie filtry.
+- nowa migracja `radio_library_heard_downloaded_v2` ponownie naprawia istniejące rekordy `Baza <kategoria>`, ustawiając **Przesłuchany = ✓** i **DL = ✓** nawet wtedy, gdy marker z 0.3.28 był już zapisany;
+- ręczne ustawienie dowolnego realnego statusu `Baza R2/R1/CF2/CF1/F1/G1/G2/SP1/SP2/NB` również automatycznie wymusza Przesłuchany i DL; `Baza Hold` pozostaje neutralny.
+
 ## 0.3.28 — Popularity, filtry wielokrotne i pełna synchronizacja bazy
 
 - dodany filtr **Downloaded: Any / Yes / No** w Dashboardzie, Emisjach i Bazie;

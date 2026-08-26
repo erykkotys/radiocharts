@@ -63,6 +63,8 @@ st.markdown(
       div[data-baseweb="select"] > div { min-height: 2.1rem !important; }
       input { min-height: 2rem !important; }
       [data-testid="stWidgetLabel"] p { font-size: .76rem !important; margin-bottom: .08rem !important; line-height:1.18 !important; }
+      .rc-control-label { font-size:.76rem; line-height:1.18; margin:0 0 .22rem 0; color:inherit; }
+      [data-testid="stPopover"] button { min-height:2.1rem !important; width:100% !important; }
       [data-testid="stForm"] { padding:.55rem .7rem !important; }
       [data-testid="stVerticalBlock"] { gap: .58rem !important; }
       [data-testid="stHorizontalBlock"] { gap: .6rem !important; }
@@ -1830,7 +1832,10 @@ if view_key == "dashboard":
             "6 mies.": 183,
             "Całość": 0,
         }
-        ctl_count, ctl_period, ctl_scope, ctl_status, ctl_dl, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns([.88, .96, 1.18, 1.02, .62, .68, .80, .80, .76])
+        ctl_count, ctl_period, ctl_scope, ctl_status, ctl_dl, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns(
+            [.88, .96, 1.18, 1.02, .62, .68, .80, .80, .76],
+            vertical_alignment="bottom",
+        )
         ctl_count.markdown(
             '<div style="font-size:.76rem;font-weight:600;line-height:1.18;margin:0 0 .08rem;">Utwory (filtr / okres)</div>',
             unsafe_allow_html=True,
@@ -1852,6 +1857,9 @@ if view_key == "dashboard":
                 ["W najnowszych notowaniach", "PL w najnowszych", "Zagraniczne w najnowszych", "Cała historia"],
                 index=0,
                 help="„W najnowszych” = utwór jest obecny w najnowszym zapisanym notowaniu co najmniej jednego odpowiedniego źródła. To nie znaczy po prostu „kiedyś ostatnio pobrany”.",
+            )
+            ctl_status.markdown(
+                '<div class="rc-control-label">Status</div>', unsafe_allow_html=True
             )
             selected_statuses = render_status_checkbox_filter(
                 ctl_status, key="dashboard_status_filter", base_only=False
