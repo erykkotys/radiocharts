@@ -290,3 +290,9 @@ Każdy collector i backfill dostaje trwały log `/app/data/jobs/<job_id>.log`. L
 
 ### 0.3.31
 Dashboard pokazuje również Emisje okres, odpowiadające wybranemu Okresowi wskaźników. Dashboard, Emisje i Baza mają kolumnę L.p. działającą jako numer wiersza po sortowaniu. Na karcie Utwór wykresy są domyślnie rozwinięte, a status można zmieniać również w tabeli Emisji radiowych.
+
+### 0.3.32
+Kolumna L.p. w Dashboardzie, Emisjach i Bazie działa jak numeracja widocznych wierszy: po dowolnym sortowaniu lub filtrowaniu zawsze pokazuje 1, 2, 3, 4... od góry.
+
+### 0.3.33
+Na karcie **Utwór → Emisje radiowe** można wybrać **Wszystkie stacje** albo **Wybrane stacje** i wskazać konkretne rozgłośnie. Filtr stacji obejmuje dane dla wybranego zakresu oraz szczegóły per stacja/dzień; globalne **Zasięg 7d** i **Emisje 7d** zachowują dotychczasowe znaczenie.

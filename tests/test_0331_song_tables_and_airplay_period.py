@@ -34,8 +34,8 @@ def test_0331_fast_airplay_spin_counts(tmp_path, monkeypatch):
 
 
 def test_0331_song_airplay_grid_is_editable_and_charts_open():
-    assert 'key=f"song_airplay_grid_{song_id}_{song_air_start}_{song_air_end}"' in APP
-    chunk = APP.split('key=f"song_airplay_grid_{song_id}_{song_air_start}_{song_air_end}"', 1)[1][:350]
+    assert 'key=f"song_airplay_grid_{song_id}_{song_air_start}_{song_air_end}_' in APP
+    chunk = APP.split('key=f"song_airplay_grid_{song_id}_{song_air_start}_{song_air_end}_', 1)[1][:420]
     assert 'editable_state=True' in chunk
     assert 'with st.expander("Szczegóły emisji per stacja i dzień", expanded=True):' in APP
     assert 'default_sources = available_sources' in APP
