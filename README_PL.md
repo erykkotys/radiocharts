@@ -334,3 +334,8 @@ Na karcie **Utwór → Emisje radiowe** można wybrać **Wszystkie stacje** albo
 ### 0.4.4 — poprawka CI Androida
 
 Naprawiono krok weryfikacji podpisanego APK w GitHub Actions. `apksigner` jest teraz uruchamiany z jawnej ścieżki Android Build Tools 35.0.0, więc workflow nie zależy od obecności narzędzia w `PATH`. Android pozostaje w wersji 0.1.2, ponieważ poprzedni release nie został opublikowany.
+
+
+### 0.4.5 — szybsza praca z listy w Androidzie
+
+Android 0.1.3 pozwala bez otwierania karty Utwór odsłuchać 30-sekundowy preview i zmienić status bezpośrednio z Dashboardu oraz Emisji. W Emisjach dodano wybór konkretnych stacji radiowych; wybrane stacje są przekazywane do API i zawężają emisje, liczbę stacji, zasięg oraz pozostałe metryki okresowe.

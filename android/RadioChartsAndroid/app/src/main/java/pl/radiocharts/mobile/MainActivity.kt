@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -60,6 +61,10 @@ data class ListUiState(
     val sort: String = "popularity",
     val descending: Boolean = true,
     val statuses: Set<String> = emptySet(),
+    val stations: List<Station> = emptyList(),
+    val selectedStationIds: Set<Int> = emptySet(),
+    val reportingStations: Int? = null,
+    val savingSongIds: Set<Int> = emptySet(),
 )
 
 class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel(app) {
@@ -73,6 +78,7 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
         try {
             val api = ApiProvider.api(store)
             val meta = if (before.meta.statuses.isEmpty()) api.meta() else before.meta
+            val stations = if (mode == "airplay" && before.stations.isEmpty()) api.stations() else before.stations
             val offset = if (append) before.rows.size else 0
             val response = api.songs(
                 mode = mode,
@@ -83,12 +89,19 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
                 descending = before.descending,
                 start = start,
                 end = end,
+                stationIds = before.selectedStationIds.takeIf { it.isNotEmpty() }?.sorted()?.joinToString(","),
                 limit = 120,
                 offset = offset,
             )
             val rows = if (append) (before.rows + response.items).distinctBy { it.song_id } else response.items
             _state.value = _state.value.copy(
-                loading = false, loadingMore = false, meta = meta, rows = rows, total = response.total
+                loading = false,
+                loadingMore = false,
+                meta = meta,
+                stations = stations,
+                rows = rows,
+                total = response.total,
+                reportingStations = response.reporting_stations,
             )
         } catch (e: Exception) {
             _state.value = _state.value.copy(
@@ -107,6 +120,47 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
         _state.value = _state.value.copy(statuses = selected)
     }
     fun clearStatuses() { _state.value = _state.value.copy(statuses = emptySet()) }
+    fun toggleStation(id: Int) {
+        val selected = _state.value.selectedStationIds.toMutableSet()
+        if (!selected.add(id)) selected.remove(id)
+        _state.value = _state.value.copy(selectedStationIds = selected)
+    }
+    fun clearStations() { _state.value = _state.value.copy(selectedStationIds = emptySet()) }
+
+    fun changeStatus(row: SongRow, newStatus: String) {
+        if (row.status == newStatus || _state.value.savingSongIds.contains(row.song_id)) return
+        val original = row
+        _state.value = _state.value.copy(
+            rows = _state.value.rows.map { if (it.song_id == row.song_id) it.copy(status = newStatus) else it },
+            savingSongIds = _state.value.savingSongIds + row.song_id,
+            error = null,
+        )
+        viewModelScope.launch {
+            try {
+                val updated = ApiProvider.api(store).patchSong(
+                    row.song_id,
+                    NotePatch(row.heard, newStatus, row.downloaded, row.note),
+                ).song
+                _state.value = _state.value.copy(
+                    rows = _state.value.rows.map {
+                        if (it.song_id == row.song_id) it.copy(
+                            status = updated.status,
+                            heard = updated.heard,
+                            downloaded = updated.downloaded,
+                            note = updated.note,
+                        ) else it
+                    },
+                    savingSongIds = _state.value.savingSongIds - row.song_id,
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    rows = _state.value.rows.map { if (it.song_id == row.song_id) original else it },
+                    savingSongIds = _state.value.savingSongIds - row.song_id,
+                    error = "Zmiana statusu: ${e.message ?: e.javaClass.simpleName}",
+                )
+            }
+        }
+    }
 }
 
 @Composable fun RadioChartsApp() {
@@ -212,6 +266,7 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
     val state by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var statusOpen by remember { mutableStateOf(false) }
+    var stationOpen by remember { mutableStateOf(false) }
     var period by remember { mutableStateOf("7d") }
     fun range(): Pair<String?,String?> {
         if (!withPeriod) return null to null
@@ -245,11 +300,32 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
                 FilterChip(selected=period==k,onClick={period=k;reload()},label={Text(l)})
             }
         }
+        if (mode == "airplay") {
+            OutlinedButton(
+                onClick={stationOpen=true},
+                modifier=Modifier.fillMaxWidth().padding(top=4.dp),
+            ) {
+                val count = state.selectedStationIds.size
+                Text(if(count == 0) "Stacje: wszystkie" else "Stacje: $count wybranych")
+            }
+            state.reportingStations?.let { reporting ->
+                Text("Raportujące w tym zakresie: $reporting", style=MaterialTheme.typography.labelSmall, color=Color(0xFF98A2B3))
+            }
+        }
         Button(onClick={reload()}, modifier=Modifier.fillMaxWidth().padding(vertical=4.dp)) { Text("Odśwież / zastosuj filtry") }
         if (state.loading || state.loadingMore) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text("Błąd: $it", color=MaterialTheme.colorScheme.error, modifier=Modifier.padding(8.dp)) }
         LazyColumn(verticalArrangement=Arrangement.spacedBy(6.dp), modifier=Modifier.fillMaxSize()) {
-            items(state.rows, key={it.song_id}) { row -> SongCard(row, mode) { navigate("song/${row.song_id}") } }
+            items(state.rows, key={it.song_id}) { row ->
+                SongCard(
+                    s = row,
+                    mode = mode,
+                    statuses = state.meta.statuses,
+                    savingStatus = state.savingSongIds.contains(row.song_id),
+                    onStatusChange = { vm.changeStatus(row, it) },
+                    onClick = { navigate("song/${row.song_id}") },
+                )
+            }
             if (state.rows.size < state.total) {
                 item {
                     OutlinedButton(
@@ -267,6 +343,17 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
         text={Column(Modifier.heightIn(max=440.dp).verticalScroll(rememberScrollState())){
             state.meta.statuses.forEach{st->Row(verticalAlignment=Alignment.CenterVertically){
                 Checkbox(checked=state.statuses.contains(st),onCheckedChange={vm.toggleStatus(st)});Text(st)
+            }}
+        }}
+    )
+    if (stationOpen) AlertDialog(
+        onDismissRequest={stationOpen=false},
+        confirmButton={TextButton(onClick={stationOpen=false;reload()}){Text("Zastosuj")}},
+        dismissButton={TextButton(onClick={vm.clearStations();stationOpen=false;reload()}){Text("Wszystkie")}},
+        title={Text("Stacje radiowe")},
+        text={Column(Modifier.heightIn(max=460.dp).verticalScroll(rememberScrollState())){
+            state.stations.forEach{st->Row(verticalAlignment=Alignment.CenterVertically){
+                Checkbox(checked=state.selectedStationIds.contains(st.station_id),onCheckedChange={vm.toggleStation(st.station_id)});Text(st.name)
             }}
         }}
     )
@@ -330,10 +417,23 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     }
 }
 
-@Composable fun SongCard(s:SongRow, mode:String, onClick:()->Unit) {
+@Composable fun SongCard(
+    s:SongRow,
+    mode:String,
+    statuses:List<String>,
+    savingStatus:Boolean,
+    onStatusChange:(String)->Unit,
+    onClick:()->Unit,
+) {
     Card(onClick=onClick, colors=CardDefaults.cardColors(containerColor=CardBg), modifier=Modifier.fillMaxWidth()) {
         Column(Modifier.padding(10.dp)) {
-            Row { Column(Modifier.weight(1f)){Text(s.artist,style=MaterialTheme.typography.labelMedium,color=Color(0xFFB5BDC9));Text(s.title,fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis)};Text(s.status,style=MaterialTheme.typography.labelSmall,color=Accent) }
+            Row {
+                Column(Modifier.weight(1f)){
+                    Text(s.artist,style=MaterialTheme.typography.labelMedium,color=Color(0xFFB5BDC9))
+                    Text(s.title,fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis)
+                }
+                Text(s.status,style=MaterialTheme.typography.labelSmall,color=Accent)
+            }
             Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                 MetricTiny("Pop",s.popularity?.let{"%.0f%%".format(it)}?:"—")
@@ -346,9 +446,46 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
             Row(Modifier.padding(top=5.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 ChartBadge("RMF",s.RMF_pos,s.RMF_weeks);ChartBadge("ZET",s.ZET_pos,s.ZET_weeks);ChartBadge("OLIA",s.OLIA_pos,s.OLIA_weeks);ChartBadge("OLIS",s.OLIS_pos,s.OLIS_weeks);ChartBadge("ESKA",s.ESKA_pos,s.ESKA_weeks)
             }
+            if (mode == "dashboard" || mode == "airplay") {
+                Row(
+                    Modifier.fillMaxWidth().padding(top=7.dp),
+                    horizontalArrangement=Arrangement.spacedBy(7.dp),
+                    verticalAlignment=Alignment.CenterVertically,
+                ) {
+                    PreviewButton(s)
+                    InlineStatusMenu(
+                        value = s.status,
+                        statuses = statuses,
+                        enabled = !savingStatus,
+                        modifier = Modifier.weight(1f),
+                        onValue = onStatusChange,
+                    )
+                }
+            }
         }
     }
 }
+
+@Composable fun InlineStatusMenu(
+    value:String,
+    statuses:List<String>,
+    enabled:Boolean,
+    modifier:Modifier=Modifier,
+    onValue:(String)->Unit,
+) {
+    var open by remember{mutableStateOf(false)}
+    Box(modifier) {
+        OutlinedButton(onClick={open=true},enabled=enabled,modifier=Modifier.fillMaxWidth()) {
+            Text(if(enabled) value else "Zapisuję…",maxLines=1,overflow=TextOverflow.Ellipsis)
+        }
+        DropdownMenu(expanded=open,onDismissRequest={open=false}) {
+            statuses.forEach { status ->
+                DropdownMenuItem(text={Text(status)},onClick={open=false;onValue(status)})
+            }
+        }
+    }
+}
+
 @Composable fun MetricTiny(label:String,value:String){Column{Text(label,style=MaterialTheme.typography.labelSmall,color=Color(0xFF98A2B3));Text(value,style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.Bold)}}
 @Composable fun ChartBadge(label:String,pos:Int?,weeks:Int?){Text(if(pos==null)"$label —" else "$label #$pos (${weeks?:0}w)",style=MaterialTheme.typography.labelSmall,color=Color(0xFFB5BDC9))}
 

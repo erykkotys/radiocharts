@@ -56,8 +56,8 @@ def test_android_012_has_self_update_install_flow_and_permanent_signing_contract
     docker = (root / ".github/workflows/docker.yml").read_text(encoding="utf-8")
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 
-    assert 'versionCode = 3' in gradle
-    assert 'versionName = "0.1.2"' in gradle
+    assert 'versionCode = 4' in gradle
+    assert 'versionName = "0.1.3"' in gradle
     assert "ANDROID_KEYSTORE_FILE" in gradle
     assert "ANDROID_KEYSTORE_BASE64" in docker
     assert "assembleRelease" in docker
@@ -78,4 +78,4 @@ def test_android_012_has_self_update_install_flow_and_permanent_signing_contract
 
 def test_version_0403():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.4"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.5"

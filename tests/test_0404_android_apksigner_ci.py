@@ -12,4 +12,4 @@ def test_android_workflows_use_sdk_apksigner_path():
 
 def test_version_0404():
     root = Path(__file__).resolve().parents[1]
-    assert (root / 'VERSION').read_text(encoding='utf-8').strip() == '0.4.4'
+    assert (root / 'VERSION').read_text(encoding='utf-8').strip() == '0.4.5'
