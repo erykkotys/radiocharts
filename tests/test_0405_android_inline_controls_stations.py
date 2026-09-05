@@ -54,15 +54,15 @@ def test_android_013_has_inline_preview_status_and_airplay_station_picker():
     assert "PreviewButton(s, previewVm)" in main
     assert "InlineStatusMenu(" in main
     assert "changeStatus(row: SongRow, newStatus: String)" in main
-    assert 'Text(if(count == 0) "Stacje: wszystkie" else "Stacje: $count wybranych")' in main
+    assert 'CompactFilterButton(if(count == 0) "Stacje" else "Stacje ($count)")' in main
     assert "selectedStationIds" in main
     assert "api.stations()" in main
     assert "stationIds = before.selectedStationIds" in main
     assert '@Query("station_ids") stationIds: String? = null' in api_kt
-    assert 'versionCode = 5' in gradle
-    assert 'versionName = "0.1.4"' in gradle
+    assert 'versionCode = 7' in gradle
+    assert 'versionName = "0.1.6"' in gradle
 
 
 def test_version_0405():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.6"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.8"

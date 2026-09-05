@@ -343,3 +343,13 @@ Android 0.1.3 pozwala bez otwierania karty Utwór odsłuchać 30-sekundowy previ
 ### 0.4.6 — Android: trwały odsłuch, Baza i dokładne daty
 
 Android 0.1.4 przenosi odtwarzacz 30-sekundowych preview poza wiersze `LazyColumn`, więc scrollowanie nie zatrzymuje audio. W Bazie są teraz te same szybkie kontrolki odsłuchu i zmiany statusu co na Dashboardzie/Emisjach. Emisje startują domyślnie posortowane malejąco po liczbie emisji w wybranym okresie. W Emisjach i Bazie, obok presetów 7/28/90 dni, dodano wybór dokładnych dat **Od** i **Do**.
+
+
+### 0.4.7 — Android: kompaktowe filtry list
+
+Android 0.1.5 zmniejsza panel filtrów w Emisjach i Bazie. Status, DL, sortowanie, kierunek, presety okresu, dokładne daty i stacje są w jednym poziomo przewijanym pasku. Dokładne pola Od/Do rozwijają się dopiero po naciśnięciu przycisku Daty. Usunięto pełnoszerokie przyciski Stacje i Odśwież / zastosuj filtry, dzięki czemu lista utworów dostaje wyraźnie więcej wysokości.
+
+
+### 0.4.8 — Android: Baza CF i Spotify przy utworach
+
+Android 0.1.6 przypina `Baza CF1` i `Baza CF2` na początku rozwijanych list statusów (zarówno filtra, jak i szybkiej zmiany statusu na karcie) i ogranicza wysokość dropdownu, żeby przewijanie było jednoznaczne. Każda karta utworu dostała też bezpośredni przycisk Spotify obok odsłuchu 30 s.

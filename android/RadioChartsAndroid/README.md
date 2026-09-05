@@ -4,7 +4,7 @@ Natywny klient Android (Kotlin + Jetpack Compose) dla prywatnego RadioCharts API
 
 ## Wersja
 
-Android 0.1.4 (`versionCode = 5`).
+Android 0.1.6 (`versionCode = 7`).
 
 ## Release signing
 
@@ -23,7 +23,21 @@ Aplikacja automatycznie sprawdza `GET /api/v1/android/update?current_version_cod
 
 Gdy jest nowsza wersja, aplikacja pobiera `GET /api/v1/android/apk`, weryfikuje SHA-256 i uruchamia systemowy instalator. Po pierwszym włączeniu aktualizacji może być potrzebne jednorazowe zezwolenie **Allow from this source** dla RadioCharts.
 
-Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 0.1.4, aktualizują się w miejscu.
+Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 0.1.6, aktualizują się w miejscu.
+
+
+## 0.1.6
+
+- listy statusów na Androidzie pokazują `Baza CF1` i `Baza CF2` na początku, zamiast chować je na samym dole długiego menu; dropdown ma ograniczoną wysokość i przewijanie,
+- przy każdej karcie utworu jest bezpośredni przycisk Spotify obok odsłuchu 30 s.
+
+## 0.1.5
+
+- Emisje i Baza: filtry są w jednym niskim, poziomo przewijanym pasku zamiast kilku wysokich rzędów.
+- Presety okresu są skrócone do 7d / 28d / 3m.
+- Dokładne daty są schowane pod jednym przyciskiem „Daty”; pola Od/Do rozwijają się tylko na żądanie.
+- Wybór stacji w Emisjach został przeniesiony do tego samego paska filtrów.
+- Usunięto pełnoszeroki przycisk „Odśwież / zastosuj filtry”; wyszukiwanie ma mały przycisk OK, a pozostałe filtry stosują się bezpośrednio.
 
 ## 0.1.4
 

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -351,6 +352,13 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
     }
 }
 
+private fun androidStatusOrder(statuses: List<String>): List<String> {
+    // CF1/CF2 are the most frequently used base statuses on mobile and used to be
+    // the last two entries in the long menu, which made them look missing.
+    val pinned = listOf("Baza CF1", "Baza CF2")
+    return (pinned.filter { it in statuses } + statuses.filterNot { it in pinned }).distinct()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun SongListScreen(mode:String, title:String, navigate:(String)->Unit, withPeriod:Boolean=false, vm:ListVm=viewModel(key="list-$mode"), previewVm:PreviewPlayerVm) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -360,6 +368,7 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
     var period by remember { mutableStateOf("7d") }
     var customStart by remember { mutableStateOf<LocalDate?>(null) }
     var customEnd by remember { mutableStateOf<LocalDate?>(null) }
+    var showExactDates by remember { mutableStateOf(false) }
 
     fun presetRange(): Pair<LocalDate, LocalDate> {
         val end = LocalDate.now()
@@ -388,24 +397,39 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
         }
         OutlinedTextField(
             value=state.search, onValueChange={vm.setSearch(it)}, label={Text("Szukaj wykonawcy / tytułu")},
-            singleLine=true, modifier=Modifier.fillMaxWidth()
+            singleLine=true, modifier=Modifier.fillMaxWidth(),
+            trailingIcon={ TextButton(onClick={reload()}) { Text("OK") } }
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-            Box(Modifier.weight(1f)) { FilterButton("Statusy${if(state.statuses.isEmpty())"" else " (${state.statuses.size})"}"){statusOpen=true} }
+        val (shownStart, shownEnd) = effectiveRange()
+        Row(
+            Modifier.fillMaxWidth().padding(top=2.dp).horizontalScroll(rememberScrollState()),
+            horizontalArrangement=Arrangement.spacedBy(6.dp),
+            verticalAlignment=Alignment.CenterVertically,
+        ) {
+            CompactFilterButton("Statusy${if(state.statuses.isEmpty())"" else " (${state.statuses.size})"}"){statusOpen=true}
             DownloadMenu(state.downloaded) { vm.setDownloaded(it); reload() }
             SortMenu(state.sort, withPeriod) { key, defaultDescending -> vm.setSort(key, defaultDescending); reload() }
-            OutlinedButton(onClick={vm.toggleDirection();reload()}, contentPadding=PaddingValues(horizontal=13.dp)) {
-                Text(if(state.descending) "↓" else "↑")
+            CompactFilterButton(if(state.descending) "↓" else "↑") { vm.toggleDirection(); reload() }
+            if (withPeriod) {
+                listOf("7d" to "7d","28d" to "28d","90d" to "3m").forEach { (k,l) ->
+                    FilterChip(
+                        selected=period==k,
+                        onClick={period=k;showExactDates=false;reload()},
+                        label={Text(l)},
+                    )
+                }
+                CompactFilterButton(
+                    "Daty ${shortDate(shownStart)}–${shortDate(shownEnd)}",
+                    active = period == "custom" || showExactDates,
+                ) { showExactDates = !showExactDates }
+            }
+            if (mode == "airplay") {
+                val count = state.selectedStationIds.size
+                CompactFilterButton(if(count == 0) "Stacje" else "Stacje ($count)") { stationOpen=true }
             }
         }
-        if (withPeriod) {
-            Row(horizontalArrangement=Arrangement.spacedBy(6.dp), modifier=Modifier.padding(top=4.dp)) {
-                listOf("7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach { (k,l) ->
-                    FilterChip(selected=period==k,onClick={period=k;reload()},label={Text(l)})
-                }
-            }
-            val (shownStart, shownEnd) = effectiveRange()
-            Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+        if (withPeriod && showExactDates) {
+            Row(Modifier.fillMaxWidth().padding(top=2.dp), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                 DatePickerButton(
                     label = "Od",
                     value = shownStart,
@@ -431,23 +455,12 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
                     },
                 )
             }
-            if (period == "custom") {
-                Text("Własny zakres", style=MaterialTheme.typography.labelSmall, color=Accent)
-            }
         }
         if (mode == "airplay") {
-            OutlinedButton(
-                onClick={stationOpen=true},
-                modifier=Modifier.fillMaxWidth().padding(top=4.dp),
-            ) {
-                val count = state.selectedStationIds.size
-                Text(if(count == 0) "Stacje: wszystkie" else "Stacje: $count wybranych")
-            }
             state.reportingStations?.let { reporting ->
-                Text("Raportujące w tym zakresie: $reporting", style=MaterialTheme.typography.labelSmall, color=Color(0xFF98A2B3))
+                Text("Raportujące: $reporting", style=MaterialTheme.typography.labelSmall, color=Color(0xFF98A2B3))
             }
         }
-        Button(onClick={reload()}, modifier=Modifier.fillMaxWidth().padding(vertical=4.dp)) { Text("Odśwież / zastosuj filtry") }
         if (state.loading || state.loadingMore) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text("Błąd: $it", color=MaterialTheme.colorScheme.error, modifier=Modifier.padding(8.dp)) }
         LazyColumn(verticalArrangement=Arrangement.spacedBy(6.dp), modifier=Modifier.fillMaxSize()) {
@@ -477,7 +490,7 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
         dismissButton={TextButton(onClick={vm.clearStatuses()}){Text("Wyczyść")}},
         title={Text("Statusy")},
         text={Column(Modifier.heightIn(max=440.dp).verticalScroll(rememberScrollState())){
-            state.meta.statuses.forEach{st->Row(verticalAlignment=Alignment.CenterVertically){
+            androidStatusOrder(state.meta.statuses).forEach{st->Row(verticalAlignment=Alignment.CenterVertically){
                 Checkbox(checked=state.statuses.contains(st),onCheckedChange={vm.toggleStatus(st)});Text(st)
             }}
         }}
@@ -500,9 +513,9 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
     var open by remember { mutableStateOf(false) }
     OutlinedButton(
         onClick={open=true},
-        modifier=modifier,
-        contentPadding=PaddingValues(horizontal=8.dp),
-    ) { Text("$label: $value", maxLines=1, style=MaterialTheme.typography.labelMedium) }
+        modifier=modifier.heightIn(min=36.dp),
+        contentPadding=PaddingValues(horizontal=8.dp, vertical=0.dp),
+    ) { Text("$label ${value.dayOfMonth.toString().padStart(2, '0')}.${value.monthValue.toString().padStart(2, '0')}.${value.year}", maxLines=1, style=MaterialTheme.typography.labelMedium) }
     if (open) {
         val initialMillis = value.atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli()
         val pickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
@@ -521,11 +534,21 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
     }
 }
 
-@Composable fun FilterButton(text:String,onClick:()->Unit){OutlinedButton(onClick=onClick,modifier=Modifier.fillMaxWidth()){Text(text,maxLines=1,overflow=TextOverflow.Ellipsis)}}
+private fun shortDate(value:LocalDate):String = "%02d.%02d".format(value.dayOfMonth, value.monthValue)
+
+@Composable fun CompactFilterButton(text:String, active:Boolean=false, onClick:()->Unit) {
+    OutlinedButton(
+        onClick=onClick,
+        contentPadding=PaddingValues(horizontal=10.dp, vertical=0.dp),
+        modifier=Modifier.heightIn(min=34.dp),
+        colors=if(active) ButtonDefaults.outlinedButtonColors(contentColor=Accent) else ButtonDefaults.outlinedButtonColors(),
+    ) { Text(text,maxLines=1,style=MaterialTheme.typography.labelMedium) }
+}
+
 @Composable fun DownloadMenu(value:String,onValue:(String)->Unit){
     var open by remember{mutableStateOf(false)}
     Box{
-        OutlinedButton(onClick={open=true}){Text("DL: ${value.uppercase()}")}
+        OutlinedButton(onClick={open=true},contentPadding=PaddingValues(horizontal=10.dp,vertical=0.dp),modifier=Modifier.heightIn(min=34.dp)){Text("DL ${value.uppercase()}",style=MaterialTheme.typography.labelMedium)}
         DropdownMenu(expanded=open,onDismissRequest={open=false}){
             listOf("any","yes","no").forEach{DropdownMenuItem(text={Text(it.uppercase())},onClick={open=false;onValue(it)})}
         }
@@ -567,7 +590,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 @Composable fun SortMenu(value:String,withPeriod:Boolean,onValue:(String,Boolean)->Unit){
     var open by remember{mutableStateOf(false)}
     Box{
-        OutlinedButton(onClick={open=true},contentPadding=PaddingValues(horizontal=12.dp)){Text("Sort")}
+        OutlinedButton(onClick={open=true},contentPadding=PaddingValues(horizontal=10.dp,vertical=0.dp),modifier=Modifier.heightIn(min=34.dp)){Text("Sort",style=MaterialTheme.typography.labelMedium)}
         DropdownMenu(expanded=open,onDismissRequest={open=false}){
             sortChoices(withPeriod).forEach{choice->
                 DropdownMenuItem(
@@ -615,6 +638,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
                 verticalAlignment=Alignment.CenterVertically,
             ) {
                 PreviewButton(s, previewVm)
+                SpotifyButton(s, compact = true)
                 InlineStatusMenu(
                     value = s.status,
                     statuses = statuses,
@@ -639,8 +663,12 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         OutlinedButton(onClick={open=true},enabled=enabled,modifier=Modifier.fillMaxWidth()) {
             Text(if(enabled) value else "Zapisuję…",maxLines=1,overflow=TextOverflow.Ellipsis)
         }
-        DropdownMenu(expanded=open,onDismissRequest={open=false}) {
-            statuses.forEach { status ->
+        DropdownMenu(
+            expanded=open,
+            onDismissRequest={open=false},
+            modifier=Modifier.heightIn(max=420.dp),
+        ) {
+            androidStatusOrder(statuses).forEach { status ->
                 DropdownMenuItem(text={Text(status)},onClick={open=false;onValue(status)})
             }
         }
@@ -681,8 +709,26 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     if(stationOpen)AlertDialog(onDismissRequest={stationOpen=false},confirmButton={TextButton(onClick={stationOpen=false;scope.launch{reloadAir()}}){Text("Zastosuj")}},dismissButton={TextButton(onClick={selectedStations=emptySet()}){Text("Wszystkie")}},title={Text("Stacje")},text={Column(Modifier.heightIn(max=460.dp).verticalScroll(rememberScrollState())){stations.forEach{st->Row(verticalAlignment=Alignment.CenterVertically){Checkbox(checked=selectedStations.contains(st.station_id),onCheckedChange={val set=selectedStations.toMutableSet();if(it)set.add(st.station_id)else set.remove(st.station_id);selectedStations=set});Text(st.name)}}}})
 }
 
-@Composable fun StatusMenu(value:String, statuses:List<String>,onValue:(String)->Unit){var open by remember{mutableStateOf(false)};Box{OutlinedButton(onClick={open=true},modifier=Modifier.fillMaxWidth()){Text("Status: $value")};DropdownMenu(expanded=open,onDismissRequest={open=false}){statuses.forEach{DropdownMenuItem(text={Text(it)},onClick={open=false;onValue(it)})}}}}
-@Composable fun SpotifyButton(s:SongRow){val context=LocalContext.current;OutlinedButton(onClick={val q=Uri.encode("${s.artist} ${s.title}");context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://open.spotify.com/search/$q")))}){Text("Spotify ↗")}}
+@Composable fun StatusMenu(value:String, statuses:List<String>,onValue:(String)->Unit){
+    var open by remember{mutableStateOf(false)}
+    Box{
+        OutlinedButton(onClick={open=true},modifier=Modifier.fillMaxWidth()){Text("Status: $value")}
+        DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.heightIn(max=420.dp)){
+            androidStatusOrder(statuses).forEach{DropdownMenuItem(text={Text(it)},onClick={open=false;onValue(it)})}
+        }
+    }
+}
+@Composable fun SpotifyButton(s:SongRow, compact:Boolean=false){
+    val context=LocalContext.current
+    OutlinedButton(
+        onClick={
+            val q=Uri.encode("${s.artist} ${s.title}")
+            context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://open.spotify.com/search/$q")))
+        },
+        modifier=if(compact) Modifier.heightIn(min=36.dp) else Modifier,
+        contentPadding=if(compact) PaddingValues(horizontal=9.dp, vertical=0.dp) else ButtonDefaults.ContentPadding,
+    ){Text(if(compact) "Spotify" else "Spotify ↗",maxLines=1,style=if(compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge)}
+}
 @Composable fun PreviewButton(s:SongRow, previewVm:PreviewPlayerVm) {
     val preview by previewVm.state.collectAsStateWithLifecycle()
     val loading = preview.loadingSongId == s.song_id
