@@ -109,6 +109,25 @@ streamlit run radiocharts/app.py
 
 Otwórz `http://localhost:8501`.
 
+
+## Android / prywatne API (od 0.4.0)
+
+RadioCharts ma teraz osobne, prywatne API na porcie **8502** przeznaczone dla natywnego klienta Android. Streamlit nadal działa na 8501 i korzysta z tej samej bazy SQLite. Android **nie otwiera pliku SQLite bezpośrednio** — wszystkie odczyty i zmiany statusu przechodzą przez API.
+
+W TrueNAS uruchom dodatkowy serwis z tego samego obrazu:
+
+```text
+uvicorn radiocharts.api:app --host 0.0.0.0 --port 8502
+```
+
+i zmapuj `8502:8502`, używając tych samych volume `/app/data`, `/app/config`, `/app/logs`. Gotowy przykład jest w `compose.truenas.example.yml`.
+
+Do połączenia z telefonu używamy Tailscale. W aplikacji Android wpisz adres w rodzaju `http://100.x.y.z:8502/` albo nazwę MagicDNS serwera. **Nie przekierowuj portu 8502 na routerze.** Tailscale szyfruje transport w swojej sieci prywatnej.
+
+Opcjonalnie możesz ustawić `RADIOCHARTS_API_TOKEN` w usłudze API i wpisać ten sam token w aplikacji. Gdy zmienna nie jest ustawiona, API nie wymaga tokenu — jest to wariant przeznaczony wyłącznie do LAN/Tailscale. Dokumentacja testowa API jest dostępna lokalnie pod `/docs`.
+
+Projekt Android Studio znajduje się w `android/RadioChartsAndroid`. MVP zawiera Dashboard, Emisje, Bazę, kartę Utwór, odsłuch 30 s, Spotify, zmianę Przesłuchany/Status/DL/Notatki oraz wybór konkretnych stacji w emisjach utworu.
+
 ## TrueNAS SCALE – proponowany deployment
 
 ### 1. Dataset

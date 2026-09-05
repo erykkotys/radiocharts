@@ -28,3 +28,21 @@ services:
       - /mnt/POOL/apps/radiocharts/data:/app/data
       - /mnt/POOL/apps/radiocharts/config:/app/config
       - /mnt/POOL/apps/radiocharts/logs:/app/logs
+
+  api:
+    image: ghcr.io/REPLACE_ME/radiocharts:latest
+    pull_policy: always
+    command: uvicorn radiocharts.api:app --host 0.0.0.0 --port 8502
+    restart: unless-stopped
+    ports:
+      - "8502:8502"
+    environment:
+      TZ: Europe/Warsaw
+      RADIOCHARTS_DB: /app/data/radiocharts.db
+      RADIOCHARTS_CONFIG: /app/config/config.yml
+      # Optional: set the same token in the Android app settings.
+      # RADIOCHARTS_API_TOKEN: change-me
+    volumes:
+      - /mnt/POOL/apps/radiocharts/data:/app/data
+      - /mnt/POOL/apps/radiocharts/config:/app/config
+      - /mnt/POOL/apps/radiocharts/logs:/app/logs

@@ -30,6 +30,6 @@ COPY VERSION ./VERSION
 RUN mkdir -p /app/data /app/logs
 
 ENV PYTHONPATH=/app
-EXPOSE 8501
+EXPOSE 8501 8502
 
 CMD ["streamlit", "run", "radiocharts/app.py", "--server.address=0.0.0.0", "--server.port=8501"]

@@ -1,7 +1,7 @@
 services:
   web:
     build: .
-    image: radiocharts:0.1.0
+    image: radiocharts:0.4.0
     command: streamlit run radiocharts/app.py --server.address=0.0.0.0 --server.port=8501
     restart: unless-stopped
     ports:
@@ -16,13 +16,31 @@ services:
       - ./logs:/app/logs
 
   worker:
-    image: radiocharts:0.1.0
+    image: radiocharts:0.4.0
     command: python -m radiocharts.scheduler
     restart: unless-stopped
     environment:
       TZ: Europe/Warsaw
       RADIOCHARTS_DB: /app/data/radiocharts.db
       RADIOCHARTS_CONFIG: /app/config/config.yml
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./logs:/app/logs
+
+  api:
+    build: .
+    image: radiocharts:0.4.0
+    command: uvicorn radiocharts.api:app --host 0.0.0.0 --port 8502
+    restart: unless-stopped
+    ports:
+      - "8502:8502"
+    environment:
+      TZ: Europe/Warsaw
+      RADIOCHARTS_DB: /app/data/radiocharts.db
+      RADIOCHARTS_CONFIG: /app/config/config.yml
+      # Optional: set the same token in the Android app settings.
+      # RADIOCHARTS_API_TOKEN: change-me
     volumes:
       - ./data:/app/data
       - ./config:/app/config
