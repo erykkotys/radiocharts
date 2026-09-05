@@ -322,3 +322,10 @@ Na karcie **Utwór → Emisje radiowe** można wybrać **Wszystkie stacje** albo
 - mobilne metryki bazowe są cache'owane, ale Przesłuchany/Status/DL/Notatka nadal są nakładane na żywo;
 - Android 0.1.1 pobiera po 120 pozycji i ma **Pokaż kolejne**, dłuższy timeout dla wolniejszego pierwszego przeliczenia oraz retry po chwilowym zerwaniu połączenia;
 - sortowanie Androida obejmuje m.in. Emisje/Zasięg/Rotację/Radio Presence okresu, Popularity, Chart Score, Momentum, Zasięg/Emisje/Radio Presence 7d, średnią pozycję, RMF/ZET/OLiA/OLiS/ESKA, wykonawcę, tytuł i status; kierunek można odwrócić przyciskiem ↑/↓.
+
+### 0.4.3 — aktualizacje Androida przez RadioCharts API
+- Android 0.1.2 przechodzi z efemerycznego debug-signingu na stały klucz release trzymany wyłącznie w GitHub Actions Secrets. Obecne debug APK 0.1.0/0.1.1 trzeba **jednorazowo odinstalować** przed instalacją pierwszego release 0.1.2; późniejsze wersje instalują się już jako normalne aktualizacje.
+- po uruchomieniu Android automatycznie sprawdza `/api/v1/android/update`; w **Ustawienia → Aktualizacje** jest też ręczne **Sprawdź aktualizacje**;
+- **Aktualizuj** pobiera APK z `/api/v1/android/apk` po tym samym LAN/Tailscale, weryfikuje SHA-256 i przekazuje plik systemowemu instalatorowi Androida. Za pierwszym razem Android może poprosić o `Allow from this source` dla RadioCharts;
+- workflow **Docker + Android release** buduje podpisane APK przed obrazem Dockera, zapisuje APK + `update.json` w obrazie i publikuje obraz do GHCR. Po redeployu TrueNAS nowa wersja APK staje się dostępna dla telefonu bez ręcznego pobierania z GitHuba;
+- wymagane sekrety repozytorium: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Klucza `.jks` nie należy commitować do repozytorium.

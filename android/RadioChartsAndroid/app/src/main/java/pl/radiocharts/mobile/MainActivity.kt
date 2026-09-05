@@ -111,6 +111,59 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
 
 @Composable fun RadioChartsApp() {
     val nav = rememberNavController()
+    val context = LocalContext.current
+    val store = remember { SettingsStore(context) }
+    val scope = rememberCoroutineScope()
+    var pendingUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updateStatus by remember { mutableStateOf("") }
+    var updating by remember { mutableStateOf(false) }
+
+    fun checkUpdates(manual: Boolean) {
+        scope.launch {
+            if (manual) updateStatus = "Sprawdzam aktualizacje…"
+            try {
+                val info = AppUpdater.check(store)
+                if (info.available) {
+                    pendingUpdate = info
+                    updateStatus = "Dostępna wersja ${info.latest_version_name ?: info.latest_version_code}"
+                } else if (manual) {
+                    updateStatus = if (info.reason == "not_published") {
+                        "Serwer nie ma jeszcze opublikowanego APK."
+                    } else {
+                        "Masz najnowszą wersję (${BuildConfig.VERSION_NAME})."
+                    }
+                }
+            } catch (e: Exception) {
+                if (manual) updateStatus = "Błąd sprawdzania aktualizacji: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+    }
+
+    fun installUpdate(info: UpdateInfo) {
+        scope.launch {
+            updating = true
+            updateStatus = "Pobieram RadioCharts ${info.latest_version_name ?: ""}…"
+            try {
+                val apk = AppUpdater.download(context, store, info)
+                val installerStarted = AppUpdater.install(context, apk)
+                updateStatus = if (installerStarted) {
+                    "APK pobrane. Zatwierdź aktualizację w instalatorze Androida."
+                } else {
+                    "Włącz „Allow from this source” dla RadioCharts, wróć do aplikacji i kliknij Aktualizuj ponownie."
+                }
+            } catch (e: Exception) {
+                updateStatus = "Błąd aktualizacji: ${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                updating = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(1200)
+        checkUpdates(manual = false)
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
@@ -124,9 +177,33 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
             composable("dashboard") { SongListScreen("dashboard", "Dashboard", nav::navigate) }
             composable("airplay") { SongListScreen("airplay", "Emisje", nav::navigate, withPeriod=true) }
             composable("library") { SongListScreen("library", "Baza", nav::navigate, withPeriod=true) }
-            composable("settings") { SettingsScreen() }
+            composable("settings") { SettingsScreen(updateStatus = updateStatus, onCheckUpdates = { checkUpdates(true) }) }
             composable("song/{id}", arguments=listOf(navArgument("id"){type=NavType.IntType})) { back -> SongScreen(back.arguments?.getInt("id") ?: 0) }
         }
+    }
+
+    pendingUpdate?.let { info ->
+        AlertDialog(
+            onDismissRequest = { if (!updating) pendingUpdate = null },
+            title = { Text("Dostępna aktualizacja") },
+            text = {
+                Column {
+                    Text("RadioCharts ${BuildConfig.VERSION_NAME} → ${info.latest_version_name ?: info.latest_version_code}")
+                    if (info.size_bytes > 0) {
+                        Text("Rozmiar: %.1f MB".format(info.size_bytes / 1024.0 / 1024.0), style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text("APK zostanie pobrane z Twojego RadioCharts API przez LAN/Tailscale.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = !updating, onClick = { installUpdate(info) }) {
+                    Text(if (updating) "Pobieram…" else "Aktualizuj")
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !updating, onClick = { pendingUpdate = null }) { Text("Później") }
+            }
+        )
     }
 }
 
@@ -310,4 +387,25 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 @Composable fun SpotifyButton(s:SongRow){val context=LocalContext.current;OutlinedButton(onClick={val q=Uri.encode("${s.artist} ${s.title}");context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://open.spotify.com/search/$q")))}){Text("Spotify ↗")}}
 @Composable fun PreviewButton(s:SongRow){val scope=rememberCoroutineScope();var player by remember{mutableStateOf<MediaPlayer?>(null)};var loading by remember{mutableStateOf(false)};DisposableEffect(Unit){onDispose{player?.release()}};OutlinedButton(onClick={scope.launch{if(player?.isPlaying==true){player?.pause();return@launch};loading=true;try{val r=ApiProvider.itunes.search("${s.artist} ${s.title}");val p=r.results.firstOrNull{!it.previewUrl.isNullOrBlank()}?.previewUrl;if(p!=null){player?.release();player=MediaPlayer().apply{setAudioAttributes(AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());setDataSource(p);prepare();start()}}}catch(_:Exception){}finally{loading=false}}}){Text(if(loading)"Szukam…" else "▶ 30s")}}
 
-@Composable fun SettingsScreen(){val context=LocalContext.current;val store=remember{SettingsStore(context)};val scope=rememberCoroutineScope();var url by remember{mutableStateOf(store.serverUrl)};var token by remember{mutableStateOf(store.token)};var result by remember{mutableStateOf("")};Column(Modifier.fillMaxSize().padding(14.dp)){Text("Połączenie",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold);Text("Włącz Tailscale na telefonie i wpisz Tailscale IP lub nazwę MagicDNS serwera z portem 8502. Niczego nie trzeba wystawiać do Internetu.",style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=8.dp));OutlinedTextField(url,{url=it},label={Text("API URL")},placeholder={Text("http://100.x.y.z:8502/")},modifier=Modifier.fillMaxWidth());OutlinedTextField(token,{token=it},label={Text("API token (opcjonalny)")},modifier=Modifier.fillMaxWidth());Button(onClick={store.serverUrl=url;store.token=token;ApiProvider.invalidate();scope.launch{result=try{ApiProvider.api(store).health();"Połączenie OK"}catch(e:Exception){"Błąd: ${e.message}"}}},modifier=Modifier.fillMaxWidth().padding(top=8.dp)){Text("Zapisz i sprawdź")};if(result.isNotBlank())Text(result,modifier=Modifier.padding(top=8.dp));Text("Domyślnie: http://192.168.1.10:8502/",style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=12.dp))}}
+@Composable fun SettingsScreen(updateStatus:String,onCheckUpdates:()->Unit){
+    val context=LocalContext.current
+    val store=remember{SettingsStore(context)}
+    val scope=rememberCoroutineScope()
+    var url by remember{mutableStateOf(store.serverUrl)}
+    var token by remember{mutableStateOf(store.token)}
+    var result by remember{mutableStateOf("")}
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)){
+        Text("Połączenie",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
+        Text("Włącz Tailscale na telefonie i wpisz Tailscale IP lub nazwę MagicDNS serwera z portem 8502. Niczego nie trzeba wystawiać do Internetu.",style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=8.dp))
+        OutlinedTextField(url,{url=it},label={Text("API URL")},placeholder={Text("http://100.x.y.z:8502/")},modifier=Modifier.fillMaxWidth())
+        OutlinedTextField(token,{token=it},label={Text("API token (opcjonalny)")},modifier=Modifier.fillMaxWidth())
+        Button(onClick={store.serverUrl=url;store.token=token;ApiProvider.invalidate();scope.launch{result=try{ApiProvider.api(store).health();"Połączenie OK"}catch(e:Exception){"Błąd: ${e.message}"}}},modifier=Modifier.fillMaxWidth().padding(top=8.dp)){Text("Zapisz i sprawdź")}
+        if(result.isNotBlank())Text(result,modifier=Modifier.padding(top=8.dp))
+        Text("Domyślnie: http://192.168.1.10:8502/",style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=12.dp))
+        HorizontalDivider(Modifier.padding(vertical=16.dp))
+        Text("Aktualizacje",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+        Text("Zainstalowana wersja: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=6.dp))
+        OutlinedButton(onClick=onCheckUpdates,modifier=Modifier.fillMaxWidth()){Text("Sprawdź aktualizacje")}
+        if(updateStatus.isNotBlank())Text(updateStatus,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(top=8.dp))
+    }
+}

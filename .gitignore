@@ -1,0 +1,18 @@
+# Runtime / local data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Android build outputs and signing material
+android/RadioChartsAndroid/.gradle/
+android/RadioChartsAndroid/**/build/
+dist/android/*.apk
+dist/android/update.json
+*.jks
+*.keystore
+
+# Python caches
+__pycache__/
+.pytest_cache/
+*.pyc

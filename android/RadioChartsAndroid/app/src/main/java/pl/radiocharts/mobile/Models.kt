@@ -9,6 +9,19 @@ data class MetaResponse(
     val last_airplay_date: String? = null,
 )
 
+
+data class UpdateInfo(
+    val available: Boolean = false,
+    val latest_version_name: String? = null,
+    val latest_version_code: Int = 0,
+    val download_url: String? = null,
+    val sha256: String? = null,
+    val size_bytes: Long = 0,
+    val git_sha: String? = null,
+    val built_at: String? = null,
+    val reason: String? = null,
+)
+
 data class Station(
     val station_id: Int,
     val name: String,

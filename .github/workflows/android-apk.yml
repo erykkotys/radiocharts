@@ -2,12 +2,9 @@ name: Android APK
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - 'android/RadioChartsAndroid/**'
-      - '.github/workflows/android-apk.yml'
+
+permissions:
+  contents: read
 
 jobs:
   build-apk:
@@ -39,16 +36,38 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Missing Android signing secrets."
+            exit 1
+          fi
+          KEYSTORE_FILE="$RUNNER_TEMP/radiocharts-release.jks"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$KEYSTORE_FILE"
+          echo "ANDROID_KEYSTORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify APK signature
+        run: apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/RadioCharts-Android-debug.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/RadioCharts-Android-release.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RadioCharts-Android-debug
-          path: RadioCharts-Android-debug.apk
+          name: RadioCharts-Android-release
+          path: RadioCharts-Android-release.apk
           if-no-files-found: error
           retention-days: 30

@@ -1,24 +1,26 @@
-# RadioCharts Android 0.1.0
+# RadioCharts Android
 
-Natywny klient Android (Kotlin + Jetpack Compose) do prywatnego `RadioCharts API`.
+Natywny klient Android (Kotlin + Jetpack Compose) dla prywatnego RadioCharts API po LAN/Tailscale.
 
-## Połączenie przez Tailscale
-1. Zainstaluj/uruchom Tailscale na telefonie.
-2. Na serwerze RadioCharts uruchom usługę API na porcie `8502`.
-3. W aplikacji otwórz **Ustawienia** i wpisz np. `http://100.x.y.z:8502/` albo MagicDNS `http://nazwa-serwera:8502/`.
-4. Portu 8502 nie trzeba przekierowywać na routerze ani wystawiać publicznie.
+## Wersja
 
-HTTP jest dozwolone w aplikacji celowo: transport między urządzeniami Tailscale jest szyfrowany przez Tailscale. Jeśli kiedyś API zostanie wystawione poza prywatną sieć, użyj HTTPS i tokenu.
+Android 0.1.2 (`versionCode = 3`).
 
-## Co jest w MVP
-- Dashboard z wyszukiwaniem, sortowaniem, filtrami status/DL;
-- Emisje z zakresem 7/28/90 dni;
-- Baza, w tym `Baza Hold`;
-- karta Utwór: Popularity, Chart Score, Momentum, Zasięg 7d, Emisje 7d;
-- pozycje RMF/ZET/OLiA/OLiS/ESKA;
-- status, Przesłuchany, DL i notatka zapisujące się do tej samej bazy co Streamlit;
-- podgląd 30 s i Spotify;
-- emisje utworu z wyborem konkretnych stacji.
+## Release signing
 
-## Build
-Otwórz katalog `android/RadioChartsAndroid` w Android Studio. Przy pierwszym Sync Android Studio pobierze Gradle/Android dependencies. Następnie **Build > Build APK(s)**.
+Release APK jest podpisywany stałym kluczem z GitHub Actions Secrets:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+Nie commituj pliku keystore do repozytorium. Ten sam klucz musi być używany do wszystkich kolejnych wersji, inaczej Android odrzuci aktualizację.
+
+## Aktualizacje
+
+Aplikacja automatycznie sprawdza `GET /api/v1/android/update?current_version_code=...` przy starcie. Ręczne sprawdzenie jest w **Ustawienia → Aktualizacje**.
+
+Gdy jest nowsza wersja, aplikacja pobiera `GET /api/v1/android/apk`, weryfikuje SHA-256 i uruchamia systemowy instalator. Po pierwszym włączeniu aktualizacji może być potrzebne jednorazowe zezwolenie **Allow from this source** dla RadioCharts.
+
+Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba jednorazowo odinstalować starą aplikację. Potem kolejne wersje aktualizują się w miejscu.

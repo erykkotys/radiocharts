@@ -4,6 +4,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val releaseKeystoreFile = System.getenv("ANDROID_KEYSTORE_FILE")
+val releaseKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    releaseKeystoreFile,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "pl.radiocharts.mobile"
     compileSdk = 35
@@ -12,11 +23,34 @@ android {
         applicationId = "pl.radiocharts.mobile"
         minSdk = 28
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.1.2"
     }
 
-    buildFeatures { compose = true }
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(releaseKeystoreFile!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            isMinifyEnabled = false
+        }
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -41,6 +75,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")

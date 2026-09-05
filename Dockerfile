@@ -26,6 +26,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 COPY radiocharts ./radiocharts
 COPY config ./config
 COPY VERSION ./VERSION
+COPY dist/android /app/android
 
 RUN mkdir -p /app/data /app/logs
 

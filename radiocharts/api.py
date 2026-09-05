@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 from datetime import date, datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, Iterable, Literal
 
 import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from radiocharts.build_info import display_version
@@ -48,6 +51,40 @@ STATUS_ALIASES = {
     "Ignore": "Poza formatem", "Candidate": "CF1 Candidate", "CF Candidate": "CF1 Candidate",
     "Current": "Baza CF2", "Current Familiar": "Baza CF1", "Recurrent": "Baza R1", "Poza bazą": "Baza Hold",
 }
+
+ANDROID_APK_FILENAME = "RadioCharts.apk"
+ANDROID_UPDATE_FILENAME = "update.json"
+
+
+def _android_update_dir() -> Path:
+    return Path(os.getenv("RADIOCHARTS_ANDROID_DIR", "/app/android"))
+
+
+def _android_release_info() -> dict[str, Any] | None:
+    root = _android_update_dir()
+    meta_path = root / ANDROID_UPDATE_FILENAME
+    apk_path = root / ANDROID_APK_FILENAME
+    if not meta_path.is_file() or not apk_path.is_file():
+        return None
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        version_code = int(data.get("version_code") or 0)
+        version_name = str(data.get("version_name") or "").strip()
+        sha256 = str(data.get("sha256") or "").strip().lower()
+        size_bytes = int(data.get("size_bytes") or apk_path.stat().st_size)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if version_code < 1 or not version_name or len(sha256) != 64:
+        return None
+    return {
+        "version_code": version_code,
+        "version_name": version_name,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+        "git_sha": str(data.get("git_sha") or ""),
+        "built_at": str(data.get("built_at") or ""),
+        "_apk_path": apk_path,
+    }
 
 
 def _norm_status(value: Any) -> str:
@@ -439,6 +476,47 @@ def song_airplay(
         "airplay_per_day": round(spins / days, 1), "airplay_per_station_day": round(per_station_day, 2),
     })
     return {k: _clean(v) if not isinstance(v, list) else [{kk: _clean(vv) for kk, vv in x.items()} for x in v] for k, v in detail.items()}
+
+
+@app.get("/api/v1/android/update")
+def android_update(current_version_code: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    info = _android_release_info()
+    if not info:
+        return {
+            "available": False,
+            "latest_version_name": None,
+            "latest_version_code": 0,
+            "download_url": None,
+            "sha256": None,
+            "size_bytes": 0,
+            "reason": "not_published",
+        }
+    latest_code = int(info["version_code"])
+    return {
+        "available": latest_code > int(current_version_code),
+        "latest_version_name": info["version_name"],
+        "latest_version_code": latest_code,
+        "download_url": "/api/v1/android/apk",
+        "sha256": info["sha256"],
+        "size_bytes": info["size_bytes"],
+        "git_sha": info["git_sha"],
+        "built_at": info["built_at"],
+        "reason": None,
+    }
+
+
+@app.get("/api/v1/android/apk")
+def android_apk() -> FileResponse:
+    info = _android_release_info()
+    if not info:
+        raise HTTPException(status_code=404, detail="Android release APK is not published in this image")
+    filename = f"RadioCharts-{info['version_name']}.apk"
+    return FileResponse(
+        path=str(info["_apk_path"]),
+        media_type="application/vnd.android.package-archive",
+        filename=filename,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/")

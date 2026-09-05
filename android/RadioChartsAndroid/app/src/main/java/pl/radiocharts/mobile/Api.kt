@@ -2,6 +2,7 @@ package pl.radiocharts.mobile
 
 import android.content.Context
 import okhttp3.Interceptor
+import okhttp3.ResponseBody
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -13,6 +14,9 @@ interface RadioChartsApi {
     @GET("api/v1/health") suspend fun health(): Map<String, Any?>
     @GET("api/v1/meta") suspend fun meta(): MetaResponse
     @GET("api/v1/stations") suspend fun stations(@Query("active_only") activeOnly: Boolean = true): List<Station>
+    @GET("api/v1/android/update") suspend fun androidUpdate(@Query("current_version_code") currentVersionCode: Int): UpdateInfo
+    @Streaming
+    @GET("api/v1/android/apk") suspend fun downloadApk(): ResponseBody
 
     @GET("api/v1/songs")
     suspend fun songs(
