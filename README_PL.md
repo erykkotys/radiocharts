@@ -329,3 +329,8 @@ Na karcie **Utwór → Emisje radiowe** można wybrać **Wszystkie stacje** albo
 - **Aktualizuj** pobiera APK z `/api/v1/android/apk` po tym samym LAN/Tailscale, weryfikuje SHA-256 i przekazuje plik systemowemu instalatorowi Androida. Za pierwszym razem Android może poprosić o `Allow from this source` dla RadioCharts;
 - workflow **Docker + Android release** buduje podpisane APK przed obrazem Dockera, zapisuje APK + `update.json` w obrazie i publikuje obraz do GHCR. Po redeployu TrueNAS nowa wersja APK staje się dostępna dla telefonu bez ręcznego pobierania z GitHuba;
 - wymagane sekrety repozytorium: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Klucza `.jks` nie należy commitować do repozytorium.
+
+
+### 0.4.4 — poprawka CI Androida
+
+Naprawiono krok weryfikacji podpisanego APK w GitHub Actions. `apksigner` jest teraz uruchamiany z jawnej ścieżki Android Build Tools 35.0.0, więc workflow nie zależy od obecności narzędzia w `PATH`. Android pozostaje w wersji 0.1.2, ponieważ poprzedni release nie został opublikowany.

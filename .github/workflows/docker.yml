@@ -65,7 +65,7 @@ jobs:
 
       - name: Verify signed APK
         working-directory: android/RadioChartsAndroid
-        run: apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
+        run: $ANDROID_HOME/build-tools/35.0.0/apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare Android update payload
         run: |

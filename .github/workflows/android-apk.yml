@@ -59,7 +59,7 @@ jobs:
         run: gradle :app:assembleRelease --stacktrace
 
       - name: Verify APK signature
-        run: apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
+        run: $ANDROID_HOME/build-tools/35.0.0/apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare APK
         run: cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/RadioCharts-Android-release.apk"

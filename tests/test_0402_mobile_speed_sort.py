@@ -69,4 +69,4 @@ def test_android_011_uses_paging_longer_timeout_and_expanded_sorting():
 
 def test_version_0402():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.3"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.4"

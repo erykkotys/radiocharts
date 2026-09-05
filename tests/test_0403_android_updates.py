@@ -78,4 +78,4 @@ def test_android_012_has_self_update_install_flow_and_permanent_signing_contract
 
 def test_version_0403():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.3"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.4"
