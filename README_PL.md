@@ -315,3 +315,10 @@ Kolumna L.p. w Dashboardzie, Emisjach i Bazie działa jak numeracja widocznych w
 
 ### 0.3.33
 Na karcie **Utwór → Emisje radiowe** można wybrać **Wszystkie stacje** albo **Wybrane stacje** i wskazać konkretne rozgłośnie. Filtr stacji obejmuje dane dla wybranego zakresu oraz szczegóły per stacja/dzień; globalne **Zasięg 7d** i **Emisje 7d** zachowują dotychczasowe znaczenie.
+
+### 0.4.2 — szybszy Android i pełniejsze sortowanie
+- endpoint mobilny Emisje/Baza używa lekkiej agregacji SQLite i cache zależnego od rewizji emisji, stacji i zakresu dat; nie wykonuje już dwóch pełnych agregacji wszystkich utworów na każde sortowanie/filtr;
+- karta Utwór liczy liczbę raportujących stacji osobnym lekkim zapytaniem zamiast uruchamiać pełny Radio Presence dla całego katalogu;
+- mobilne metryki bazowe są cache'owane, ale Przesłuchany/Status/DL/Notatka nadal są nakładane na żywo;
+- Android 0.1.1 pobiera po 120 pozycji i ma **Pokaż kolejne**, dłuższy timeout dla wolniejszego pierwszego przeliczenia oraz retry po chwilowym zerwaniu połączenia;
+- sortowanie Androida obejmuje m.in. Emisje/Zasięg/Rotację/Radio Presence okresu, Popularity, Chart Score, Momentum, Zasięg/Emisje/Radio Presence 7d, średnią pozycję, RMF/ZET/OLiA/OLiS/ESKA, wykonawcę, tytuł i status; kierunek można odwrócić przyciskiem ↑/↓.

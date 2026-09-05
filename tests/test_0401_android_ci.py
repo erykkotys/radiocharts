@@ -10,6 +10,6 @@ def test_android_ci_workflow_present_and_builds_apk():
     assert "RadioCharts-Android-debug.apk" in workflow
 
 
-def test_version_0401():
+def test_version_current():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.1"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.2"

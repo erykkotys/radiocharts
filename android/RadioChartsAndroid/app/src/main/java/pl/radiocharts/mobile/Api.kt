@@ -7,6 +7,7 @@ import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.*
+import java.util.concurrent.TimeUnit
 
 interface RadioChartsApi {
     @GET("api/v1/health") suspend fun health(): Map<String, Any?>
@@ -24,7 +25,8 @@ interface RadioChartsApi {
         @Query("start") start: String? = null,
         @Query("end") end: String? = null,
         @Query("station_ids") stationIds: String? = null,
-        @Query("limit") limit: Int = 300,
+        @Query("limit") limit: Int = 120,
+        @Query("offset") offset: Int = 0,
     ): SongsResponse
 
     @GET("api/v1/songs/{id}") suspend fun song(@Path("id") id: Int): SongRow
@@ -78,7 +80,15 @@ object ApiProvider {
                 if (store.token.isNotBlank()) builder.header("Authorization", "Bearer ${store.token}")
                 chain.proceed(builder.build())
             }
-            val client = OkHttpClient.Builder().addInterceptor(auth).addInterceptor(logging).build()
+            val client = OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                .callTimeout(90, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .addInterceptor(auth)
+                .addInterceptor(logging)
+                .build()
             val api = Retrofit.Builder().baseUrl(store.serverUrl).client(client)
                 .addConverterFactory(GsonConverterFactory.create()).build().create(RadioChartsApi::class.java)
             cachedKey = key; cached = api

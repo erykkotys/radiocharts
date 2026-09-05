@@ -1425,6 +1425,16 @@ def chart_revision() -> str:
         return f"{row['charts']}|{row['max_entry_id']}|{row['max_issue_id']}"
 
 
+def catalog_revision() -> str:
+    """Cheap cache key for membership of the shared song catalogue."""
+    init_db()
+    with connect() as con:
+        row = con.execute(
+            "SELECT COALESCE(MAX(id),0) AS max_id,COUNT(*) AS n FROM songs"
+        ).fetchone()
+    return f"{int(row['max_id'] or 0)}|{int(row['n'] or 0)}" if row else "0|0"
+
+
 def list_songs() -> list[dict]:
     """Shared song catalogue used by charts and airplay views."""
     init_db()
@@ -2248,6 +2258,84 @@ def store_airplay_window(
         return inserted
 
 
+def airplay_reporting_station_count(
+    station_ids: Iterable[int], start_date: date | str, end_date: date | str
+) -> int:
+    """Count selected stations that actually reported at least one saved play.
+
+    This is intentionally much cheaper than ``airplay_presence_summary`` when a
+    caller only needs the denominator for reach. Mobile song detail used to run
+    a full GROUP BY for every song in the database just to obtain this number.
+    """
+    init_db()
+    ids = sorted({int(x) for x in station_ids})
+    if not ids:
+        return 0
+    start = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    if end < start:
+        start, end = end, start
+    start_ts = datetime.combine(start, dt_time.min).isoformat(timespec="minutes")
+    end_ts = datetime.combine(end + timedelta(days=1), dt_time.min).isoformat(timespec="minutes")
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as con:
+        row = con.execute(
+            f"""SELECT COUNT(DISTINCT station_id) AS n
+                FROM airplay_plays
+                WHERE station_id IN ({placeholders})
+                  AND played_at>=? AND played_at<?""",
+            (*ids, start_ts, end_ts),
+        ).fetchone()
+    return int(row["n"] or 0) if row else 0
+
+
+def airplay_mobile_summary(
+    station_ids: Iterable[int], start_date: date | str, end_date: date | str
+) -> dict:
+    """Lean period aggregation for API/mobile list views.
+
+    The desktop ``airplay_summary`` also calculates per-station ranking, top
+    station and chart-first metadata. Those are useful in the research UI but
+    expensive and unnecessary for a phone list. This helper only returns the
+    fields needed by Android and avoids the second all-song GROUP BY previously
+    done by ``airplay_presence_summary``.
+    """
+    init_db()
+    ids = sorted({int(x) for x in station_ids})
+    if not ids:
+        return {"reporting_stations": 0, "rows": []}
+    start = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    if end < start:
+        start, end = end, start
+    start_ts = datetime.combine(start, dt_time.min).isoformat(timespec="minutes")
+    end_ts = datetime.combine(end + timedelta(days=1), dt_time.min).isoformat(timespec="minutes")
+    placeholders = ",".join("?" for _ in ids)
+    params = (*ids, start_ts, end_ts)
+    with connect() as con:
+        reporting = con.execute(
+            f"""SELECT COUNT(DISTINCT station_id) AS n
+                FROM airplay_plays
+                WHERE station_id IN ({placeholders})
+                  AND played_at>=? AND played_at<?""",
+            params,
+        ).fetchone()
+        rows = con.execute(
+            f"""SELECT song_id,COUNT(*) AS spins,
+                       COUNT(DISTINCT station_id) AS stations_count,
+                       MAX(played_at) AS last_play
+                FROM airplay_plays
+                WHERE station_id IN ({placeholders})
+                  AND played_at>=? AND played_at<? AND song_id IS NOT NULL
+                GROUP BY song_id""",
+            params,
+        ).fetchall()
+    return {
+        "reporting_stations": int(reporting["n"] or 0) if reporting else 0,
+        "rows": [dict(r) for r in rows],
+    }
+
+
 def airplay_spin_counts(station_ids: Iterable[int], start_date: date | str, end_date: date | str) -> list[dict]:
     """Fast spin totals per canonical song for one date/station window.
 
@@ -2439,11 +2527,14 @@ def airplay_track_detail_by_song(
                 FROM airplay_plays p JOIN airplay_stations s ON s.station_id=p.station_id
                 WHERE {where} GROUP BY play_date,p.station_id,s.name ORDER BY play_date,s.name COLLATE NOCASE""", params
         ).fetchall()]
-        play_rows = [dict(r) for r in con.execute(
-            f"""SELECT p.played_at,s.name AS station FROM airplay_plays p
-                JOIN airplay_stations s ON s.station_id=p.station_id WHERE {where}
-                ORDER BY p.played_at DESC,p.station_id LIMIT ?""", (*params, max(1,int(history_limit)))
-        ).fetchall()]
+        if int(history_limit) > 0:
+            play_rows = [dict(r) for r in con.execute(
+                f"""SELECT p.played_at,s.name AS station FROM airplay_plays p
+                    JOIN airplay_stations s ON s.station_id=p.station_id WHERE {where}
+                    ORDER BY p.played_at DESC,p.station_id LIMIT ?""", (*params, int(history_limit))
+            ).fetchall()]
+        else:
+            play_rows = []
     total = sum(int(r.get('spins') or 0) for r in station_rows)
     first_play = min((str(r.get('first_play') or '') for r in station_rows if r.get('first_play')), default=None)
     last_play = max((str(r.get('last_play') or '') for r in station_rows if r.get('last_play')), default=None)

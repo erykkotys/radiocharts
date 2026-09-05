@@ -50,6 +50,7 @@ private val Accent = Color(0xFF80CBC4)
 
 data class ListUiState(
     val loading: Boolean = false,
+    val loadingMore: Boolean = false,
     val error: String? = null,
     val meta: MetaResponse = MetaResponse(),
     val rows: List<SongRow> = emptyList(),
@@ -57,6 +58,7 @@ data class ListUiState(
     val search: String = "",
     val downloaded: String = "any",
     val sort: String = "popularity",
+    val descending: Boolean = true,
     val statuses: Set<String> = emptySet(),
 )
 
@@ -64,21 +66,46 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
     private val store = SettingsStore(app)
     private val _state = MutableStateFlow(ListUiState())
     val state: StateFlow<ListUiState> = _state
-    suspend fun load(mode: String, start: String? = null, end: String? = null) {
-        _state.value = _state.value.copy(loading = true, error = null)
+
+    suspend fun load(mode: String, start: String? = null, end: String? = null, append: Boolean = false) {
+        val before = _state.value
+        _state.value = before.copy(loading = !append, loadingMore = append, error = null)
         try {
             val api = ApiProvider.api(store)
-            val meta = if (_state.value.meta.statuses.isEmpty()) api.meta() else _state.value.meta
-            val response = api.songs(mode, _state.value.search, _state.value.statuses.toList(), _state.value.downloaded, _state.value.sort, true, start, end)
-            _state.value = _state.value.copy(loading = false, meta = meta, rows = response.items, total = response.total)
+            val meta = if (before.meta.statuses.isEmpty()) api.meta() else before.meta
+            val offset = if (append) before.rows.size else 0
+            val response = api.songs(
+                mode = mode,
+                search = before.search,
+                statuses = before.statuses.toList(),
+                downloaded = before.downloaded,
+                sort = before.sort,
+                descending = before.descending,
+                start = start,
+                end = end,
+                limit = 120,
+                offset = offset,
+            )
+            val rows = if (append) (before.rows + response.items).distinctBy { it.song_id } else response.items
+            _state.value = _state.value.copy(
+                loading = false, loadingMore = false, meta = meta, rows = rows, total = response.total
+            )
         } catch (e: Exception) {
-            _state.value = _state.value.copy(loading = false, error = e.message ?: e.javaClass.simpleName)
+            _state.value = _state.value.copy(
+                loading = false, loadingMore = false, error = e.message ?: e.javaClass.simpleName
+            )
         }
     }
+
     fun setSearch(v: String) { _state.value = _state.value.copy(search = v) }
     fun setDownloaded(v: String) { _state.value = _state.value.copy(downloaded = v) }
-    fun setSort(v: String) { _state.value = _state.value.copy(sort = v) }
-    fun toggleStatus(v: String) { val s=_state.value.statuses.toMutableSet(); if(!s.add(v))s.remove(v); _state.value=_state.value.copy(statuses=s) }
+    fun setSort(v: String, descending: Boolean) { _state.value = _state.value.copy(sort = v, descending = descending) }
+    fun toggleDirection() { _state.value = _state.value.copy(descending = !_state.value.descending) }
+    fun toggleStatus(v: String) {
+        val selected = _state.value.statuses.toMutableSet()
+        if (!selected.add(v)) selected.remove(v)
+        _state.value = _state.value.copy(statuses = selected)
+    }
     fun clearStatuses() { _state.value = _state.value.copy(statuses = emptySet()) }
 }
 
@@ -111,7 +138,12 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
     var period by remember { mutableStateOf("7d") }
     fun range(): Pair<String?,String?> {
         if (!withPeriod) return null to null
-        val end = LocalDate.now(); val days = when(period){"28d"->28;"90d"->90;else->7}; return end.minusDays((days-1).toLong()).toString() to end.toString()
+        val end = LocalDate.now()
+        val days = when(period){"28d"->28;"90d"->90;else->7}
+        return end.minusDays((days-1).toLong()).toString() to end.toString()
+    }
+    fun reload(append:Boolean=false) {
+        scope.launch { val (s,e)=range(); vm.load(mode,s,e,append=append) }
     }
     LaunchedEffect(Unit) { val (s,e)=range(); vm.load(mode,s,e) }
     Column(Modifier.fillMaxSize().padding(horizontal=10.dp, vertical=6.dp)) {
@@ -119,28 +151,107 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
             Text(title, style=MaterialTheme.typography.headlineSmall, fontWeight=FontWeight.Bold, modifier=Modifier.weight(1f))
             Text("${state.rows.size}/${state.total}", style=MaterialTheme.typography.labelMedium)
         }
-        OutlinedTextField(value=state.search, onValueChange={vm.setSearch(it)}, label={Text("Szukaj wykonawcy / tytułu")}, singleLine=true, modifier=Modifier.fillMaxWidth())
+        OutlinedTextField(
+            value=state.search, onValueChange={vm.setSearch(it)}, label={Text("Szukaj wykonawcy / tytułu")},
+            singleLine=true, modifier=Modifier.fillMaxWidth()
+        )
         Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
             Box(Modifier.weight(1f)) { FilterButton("Statusy${if(state.statuses.isEmpty())"" else " (${state.statuses.size})"}"){statusOpen=true} }
-            DownloadMenu(state.downloaded) { vm.setDownloaded(it); scope.launch { val(s,e)=range();vm.load(mode,s,e) } }
-            SortMenu(state.sort) { vm.setSort(it); scope.launch { val(s,e)=range();vm.load(mode,s,e) } }
+            DownloadMenu(state.downloaded) { vm.setDownloaded(it); reload() }
+            SortMenu(state.sort, withPeriod) { key, defaultDescending -> vm.setSort(key, defaultDescending); reload() }
+            OutlinedButton(onClick={vm.toggleDirection();reload()}, contentPadding=PaddingValues(horizontal=13.dp)) {
+                Text(if(state.descending) "↓" else "↑")
+            }
         }
         if (withPeriod) Row(horizontalArrangement=Arrangement.spacedBy(6.dp), modifier=Modifier.padding(top=4.dp)) {
-            listOf("7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach { (k,l) -> FilterChip(selected=period==k,onClick={period=k;scope.launch{val(s,e)=range();vm.load(mode,s,e)}},label={Text(l)}) }
+            listOf("7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach { (k,l) ->
+                FilterChip(selected=period==k,onClick={period=k;reload()},label={Text(l)})
+            }
         }
-        Button(onClick={scope.launch{val(s,e)=range();vm.load(mode,s,e)}}, modifier=Modifier.fillMaxWidth().padding(vertical=4.dp)) { Text("Odśwież / zastosuj filtry") }
-        if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        Button(onClick={reload()}, modifier=Modifier.fillMaxWidth().padding(vertical=4.dp)) { Text("Odśwież / zastosuj filtry") }
+        if (state.loading || state.loadingMore) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text("Błąd: $it", color=MaterialTheme.colorScheme.error, modifier=Modifier.padding(8.dp)) }
         LazyColumn(verticalArrangement=Arrangement.spacedBy(6.dp), modifier=Modifier.fillMaxSize()) {
             items(state.rows, key={it.song_id}) { row -> SongCard(row, mode) { navigate("song/${row.song_id}") } }
+            if (state.rows.size < state.total) {
+                item {
+                    OutlinedButton(
+                        enabled=!state.loadingMore, onClick={reload(append=true)}, modifier=Modifier.fillMaxWidth().padding(vertical=6.dp)
+                    ) { Text(if(state.loadingMore) "Ładuję…" else "Pokaż kolejne") }
+                }
+            }
         }
     }
-    if (statusOpen) AlertDialog(onDismissRequest={statusOpen=false}, confirmButton={TextButton(onClick={statusOpen=false;scope.launch{val(s,e)=range();vm.load(mode,s,e)}}){Text("Zastosuj")}}, dismissButton={TextButton(onClick={vm.clearStatuses()}){Text("Wyczyść")}}, title={Text("Statusy")}, text={Column(Modifier.heightIn(max=440.dp).verticalScroll(rememberScrollState())){state.meta.statuses.forEach{st->Row(verticalAlignment=Alignment.CenterVertically){Checkbox(checked=state.statuses.contains(st),onCheckedChange={vm.toggleStatus(st)});Text(st)}}}})
+    if (statusOpen) AlertDialog(
+        onDismissRequest={statusOpen=false},
+        confirmButton={TextButton(onClick={statusOpen=false;reload()}){Text("Zastosuj")}},
+        dismissButton={TextButton(onClick={vm.clearStatuses()}){Text("Wyczyść")}},
+        title={Text("Statusy")},
+        text={Column(Modifier.heightIn(max=440.dp).verticalScroll(rememberScrollState())){
+            state.meta.statuses.forEach{st->Row(verticalAlignment=Alignment.CenterVertically){
+                Checkbox(checked=state.statuses.contains(st),onCheckedChange={vm.toggleStatus(st)});Text(st)
+            }}
+        }}
+    )
 }
 
 @Composable fun FilterButton(text:String,onClick:()->Unit){OutlinedButton(onClick=onClick,modifier=Modifier.fillMaxWidth()){Text(text,maxLines=1,overflow=TextOverflow.Ellipsis)}}
-@Composable fun DownloadMenu(value:String,onValue:(String)->Unit){var open by remember{mutableStateOf(false)};Box{OutlinedButton(onClick={open=true}){Text("DL: ${value.uppercase()}")};DropdownMenu(expanded=open,onDismissRequest={open=false}){listOf("any","yes","no").forEach{DropdownMenuItem(text={Text(it.uppercase())},onClick={open=false;onValue(it)})}}}}
-@Composable fun SortMenu(value:String,onValue:(String)->Unit){var open by remember{mutableStateOf(false)};Box{OutlinedButton(onClick={open=true}){Text("Sort")};DropdownMenu(expanded=open,onDismissRequest={open=false}){listOf("popularity" to "Popularity","chart_score" to "Chart Score","momentum" to "Momentum","reach7" to "Zasięg 7d","spins7" to "Emisje 7d","spins" to "Emisje okres").forEach{(k,l)->DropdownMenuItem(text={Text(l)},onClick={open=false;onValue(k)})}}}}
+@Composable fun DownloadMenu(value:String,onValue:(String)->Unit){
+    var open by remember{mutableStateOf(false)}
+    Box{
+        OutlinedButton(onClick={open=true}){Text("DL: ${value.uppercase()}")}
+        DropdownMenu(expanded=open,onDismissRequest={open=false}){
+            listOf("any","yes","no").forEach{DropdownMenuItem(text={Text(it.uppercase())},onClick={open=false;onValue(it)})}
+        }
+    }
+}
+
+data class SortChoice(val key:String, val label:String, val descending:Boolean)
+
+private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
+    val common = listOf(
+        SortChoice("popularity","Popularity",true),
+        SortChoice("chart_score","Chart Score",true),
+        SortChoice("momentum","Momentum",true),
+        SortChoice("reach7","Zasięg 7d",true),
+        SortChoice("spins7","Emisje 7d",true),
+        SortChoice("radio_presence7","Radio Presence 7d",true),
+        SortChoice("avg_position","Śr. pozycja",false),
+        SortChoice("rmf","RMF",false),
+        SortChoice("zet","ZET",false),
+        SortChoice("olia","OLiA",false),
+        SortChoice("olis","OLiS",false),
+        SortChoice("eska","ESKA",false),
+        SortChoice("artist","Wykonawca",false),
+        SortChoice("title","Tytuł",false),
+        SortChoice("status","Status",false),
+    )
+    if (!withPeriod) return common
+    return listOf(
+        SortChoice("spins","Emisje okres",true),
+        SortChoice("stations","Liczba stacji",true),
+        SortChoice("reach","Zasięg okres",true),
+        SortChoice("rotation","Rotacja okres",true),
+        SortChoice("radio_presence","Radio Presence okres",true),
+        SortChoice("airplay_per_day","Emisje / dzień",true),
+        SortChoice("last_play","Ostatnia emisja",true),
+    ) + common
+}
+
+@Composable fun SortMenu(value:String,withPeriod:Boolean,onValue:(String,Boolean)->Unit){
+    var open by remember{mutableStateOf(false)}
+    Box{
+        OutlinedButton(onClick={open=true},contentPadding=PaddingValues(horizontal=12.dp)){Text("Sort")}
+        DropdownMenu(expanded=open,onDismissRequest={open=false}){
+            sortChoices(withPeriod).forEach{choice->
+                DropdownMenuItem(
+                    text={Text(choice.label + if(choice.descending) " ↓" else " ↑")},
+                    onClick={open=false;onValue(choice.key,choice.descending)}
+                )
+            }
+        }
+    }
+}
 
 @Composable fun SongCard(s:SongRow, mode:String, onClick:()->Unit) {
     Card(onClick=onClick, colors=CardDefaults.cardColors(containerColor=CardBg), modifier=Modifier.fillMaxWidth()) {

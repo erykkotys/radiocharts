@@ -13,11 +13,13 @@ from pydantic import BaseModel, Field
 
 from radiocharts.build_info import display_version
 from radiocharts.db import (
+    airplay_mobile_summary,
     airplay_presence_summary,
+    airplay_reporting_station_count,
     airplay_revision,
-    airplay_summary,
     airplay_track_detail_by_song,
     canonical_song_id,
+    catalog_revision,
     chart_revision,
     connect,
     get_song,
@@ -143,38 +145,23 @@ def _chart_bonus(frame: pd.DataFrame) -> pd.Series:
     return out / total
 
 
-def _base_song_frame() -> pd.DataFrame:
-    scores = _score_frame_cached(chart_revision()).copy()
-    notes = pd.DataFrame(load_notes())
+def _base_metrics_uncached(chart_rev: str, air_rev: str, catalog_rev: str) -> pd.DataFrame:
+    scores = _score_frame_cached(chart_rev).copy()
     catalogue = pd.DataFrame(list_songs())
     if scores.empty:
-        base = catalogue.copy()
+        base = catalogue[[c for c in ["song_id", "artist", "title", "release_date"] if c in catalogue.columns]].copy()
         if base.empty:
             base = pd.DataFrame(columns=["song_id", "artist", "title", "release_date"])
     else:
         base = scores.copy()
         if not catalogue.empty:
             cols = [c for c in ["song_id", "artist", "title", "release_date"] if c in catalogue.columns]
-            # score frame already has metadata; catalogue is primarily needed for library-only titles later.
             missing_ids = set(catalogue["song_id"].astype(int)) - set(base["song_id"].astype(int))
             if missing_ids:
                 extra = catalogue[catalogue["song_id"].astype(int).isin(missing_ids)][cols].copy()
                 base = pd.concat([base, extra], ignore_index=True, sort=False)
-    if notes.empty:
-        base["heard"] = False
-        base["status"] = "Nie słuchałem"
-        base["downloaded"] = False
-        base["note"] = ""
-    else:
-        overlay = notes[["song_id", "heard", "status", "downloaded", "note"]].copy()
-        base = base.merge(overlay, on="song_id", how="left", suffixes=("", "_note"))
-        for col, default in [("heard", False), ("status", "Nie słuchałem"), ("downloaded", False), ("note", "")]:
-            base[col] = base[col].fillna(default)
-    base["status"] = base["status"].map(_norm_status)
-    base["heard"] = base["heard"].fillna(False).astype(bool)
-    base["downloaded"] = base["downloaded"].fillna(False).astype(bool)
 
-    presence7 = pd.DataFrame(_presence_cached(airplay_revision(), 7).get("rows") or [])
+    presence7 = pd.DataFrame(_presence_cached(air_rev, 7).get("rows") or [])
     if not presence7.empty:
         presence7 = presence7[[c for c in ["song_id", "spins", "radio_reach", "radio_rotation", "radio_presence", "stations_count"] if c in presence7.columns]].copy()
         presence7 = presence7.rename(columns={"spins": "airplay_spins_7d", "stations_count": "stations_7d"})
@@ -184,7 +171,7 @@ def _base_song_frame() -> pd.DataFrame:
             base[col] = 0
         base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0)
 
-    presence28 = pd.DataFrame(_presence_cached(airplay_revision(), 28).get("rows") or [])
+    presence28 = pd.DataFrame(_presence_cached(air_rev, 28).get("rows") or [])
     volume = pd.DataFrame(columns=["song_id", "volume_index"])
     if not presence28.empty:
         p = presence28[["song_id", "spins"]].copy()
@@ -209,6 +196,32 @@ def _base_song_frame() -> pd.DataFrame:
     return base
 
 
+@lru_cache(maxsize=8)
+def _base_metrics_cached(chart_rev: str, air_rev: str, catalog_rev: str) -> pd.DataFrame:
+    # The revision arguments make this cache self-invalidating when chart or
+    # airplay data changes in another container. User notes are overlaid live.
+    return _base_metrics_uncached(chart_rev, air_rev, catalog_rev).copy(deep=False)
+
+
+def _base_song_frame() -> pd.DataFrame:
+    base = _base_metrics_cached(chart_revision(), airplay_revision(), catalog_revision()).copy()
+    notes = pd.DataFrame(load_notes())
+    if notes.empty:
+        base["heard"] = False
+        base["status"] = "Nie słuchałem"
+        base["downloaded"] = False
+        base["note"] = ""
+    else:
+        overlay = notes[["song_id", "heard", "status", "downloaded", "note"]].copy()
+        base = base.merge(overlay, on="song_id", how="left")
+        for col, default in [("heard", False), ("status", "Nie słuchałem"), ("downloaded", False), ("note", "")]:
+            base[col] = base[col].fillna(default)
+    base["status"] = base["status"].map(_norm_status)
+    base["heard"] = base["heard"].fillna(False).astype(bool)
+    base["downloaded"] = base["downloaded"].fillna(False).astype(bool)
+    return base
+
+
 def _apply_common_filters(frame: pd.DataFrame, search: str, statuses: list[str], downloaded: str) -> pd.DataFrame:
     out = frame
     q = normalize(str(search or "").strip())
@@ -229,9 +242,12 @@ def _apply_common_filters(frame: pd.DataFrame, search: str, statuses: list[str],
 def _sort_frame(frame: pd.DataFrame, sort: str, descending: bool) -> pd.DataFrame:
     aliases = {
         "popularity": "popularity", "chart_score": "familiarity", "momentum": "momentum",
-        "reach7": "radio_reach", "spins7": "airplay_spins_7d", "avg_position": "avg_position",
-        "artist": "artist", "title": "title", "status": "status", "spins": "spins",
-        "reach": "period_reach", "radio_presence": "period_radio_presence",
+        "reach7": "radio_reach", "spins7": "airplay_spins_7d", "radio_presence7": "radio_presence",
+        "avg_position": "avg_position", "rmf": "RMF_pos", "zet": "ZET_pos", "eska": "ESKA_pos",
+        "olia": "OLIA_pos", "olis": "OLIS_pos", "artist": "artist", "title": "title", "status": "status",
+        "spins": "spins", "stations": "stations_count", "reach": "period_reach",
+        "rotation": "period_rotation", "radio_presence": "period_radio_presence",
+        "airplay_per_day": "airplay_per_day", "last_play": "last_play",
     }
     col = aliases.get(sort, "popularity")
     if col not in frame.columns:
@@ -240,30 +256,34 @@ def _sort_frame(frame: pd.DataFrame, sort: str, descending: bool) -> pd.DataFram
     return frame.sort_values(col, ascending=not descending, na_position=na_pos, kind="stable")
 
 
+@lru_cache(maxsize=64)
+def _period_airplay_cached(
+    revision: str, station_ids: tuple[int, ...], start_iso: str, end_iso: str
+) -> dict:
+    return airplay_mobile_summary(station_ids, start_iso, end_iso)
+
+
 def _add_period_airplay(frame: pd.DataFrame, station_ids: list[int], start: date, end: date) -> tuple[pd.DataFrame, int]:
-    rows = pd.DataFrame(airplay_summary(station_ids, start, end))
     days = max(1, (end - start).days + 1)
-    presence = airplay_presence_summary(station_ids=station_ids, days=days, end_date=end)
-    reporting = int(presence.get("reporting_stations") or 0)
-    period = pd.DataFrame(presence.get("rows") or [])
-    if not period.empty:
-        keep = [c for c in ["song_id", "radio_reach", "radio_rotation", "radio_presence"] if c in period.columns]
-        period = period[keep].rename(columns={"radio_reach": "period_reach", "radio_rotation": "period_rotation", "radio_presence": "period_radio_presence"})
+    summary = _period_airplay_cached(
+        airplay_revision(), tuple(sorted({int(x) for x in station_ids})), start.isoformat(), end.isoformat()
+    )
+    reporting = int(summary.get("reporting_stations") or 0)
+    rows = pd.DataFrame(summary.get("rows") or [])
     if rows.empty:
-        rows = pd.DataFrame(columns=["song_id", "spins", "stations_count", "top_station", "last_play"])
-    keep_rows = [c for c in ["song_id", "spins", "stations_count", "top_station", "last_play"] if c in rows.columns]
+        rows = pd.DataFrame(columns=["song_id", "spins", "stations_count", "last_play"])
+    keep_rows = [c for c in ["song_id", "spins", "stations_count", "last_play"] if c in rows.columns]
     merged = frame.merge(rows[keep_rows], on="song_id", how="left")
-    if not period.empty:
-        merged = merged.merge(period, on="song_id", how="left")
-    for col in ["spins", "stations_count", "period_reach", "period_rotation", "period_radio_presence"]:
+    for col in ["spins", "stations_count"]:
         if col not in merged.columns:
             merged[col] = 0
-        merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
-    merged["spins"] = merged["spins"].astype(int)
-    merged["stations_count"] = merged["stations_count"].astype(int)
+        merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0).astype(int)
+    merged["period_reach"] = (100.0 * merged["stations_count"] / reporting if reporting else 0.0)
     merged["airplay_per_day"] = (merged["spins"] / days).round(1)
     denom = merged["stations_count"].replace(0, 1) * days
     merged["airplay_per_station_day"] = (merged["spins"] / denom).where(merged["stations_count"] > 0, 0).round(2)
+    merged["period_rotation"] = (100.0 * merged["airplay_per_station_day"] / 6.0).clip(upper=100.0).round(1)
+    merged["period_radio_presence"] = (0.70 * merged["period_reach"] + 0.30 * merged["period_rotation"]).round(1)
     return merged, reporting
 
 
@@ -404,10 +424,9 @@ def song_airplay(
 ) -> dict[str, Any]:
     resolved_start, resolved_end = _parse_date_range(start, end)
     ids = _station_ids(station_ids)
-    detail = airplay_track_detail_by_song(ids, resolved_start, resolved_end, song_id, history_limit=500)
+    detail = airplay_track_detail_by_song(ids, resolved_start, resolved_end, song_id, history_limit=0)
     days = max(1, (resolved_end - resolved_start).days + 1)
-    presence = airplay_presence_summary(station_ids=ids, days=days, end_date=resolved_end)
-    reporting = int(presence.get("reporting_stations") or 0)
+    reporting = airplay_reporting_station_count(ids, resolved_start, resolved_end)
     stations_count = int(detail.get("stations_count") or 0)
     spins = int(detail.get("total_spins") or 0)
     reach = 100.0 * stations_count / reporting if reporting else 0.0
