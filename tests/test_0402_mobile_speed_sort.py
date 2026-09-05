@@ -64,9 +64,9 @@ def test_android_011_uses_paging_longer_timeout_and_expanded_sorting():
     for key in ["rmf", "zet", "olia", "olis", "eska", "rotation", "stations", "radio_presence7", "last_play"]:
         assert f'SortChoice("{key}"' in main
     assert "toggleDirection" in main
-    assert 'versionName = "0.1.3"' in gradle
+    assert 'versionName = "0.1.4"' in gradle
 
 
 def test_version_0402():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.5"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.4.6"

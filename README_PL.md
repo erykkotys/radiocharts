@@ -339,3 +339,7 @@ Naprawiono krok weryfikacji podpisanego APK w GitHub Actions. `apksigner` jest t
 ### 0.4.5 — szybsza praca z listy w Androidzie
 
 Android 0.1.3 pozwala bez otwierania karty Utwór odsłuchać 30-sekundowy preview i zmienić status bezpośrednio z Dashboardu oraz Emisji. W Emisjach dodano wybór konkretnych stacji radiowych; wybrane stacje są przekazywane do API i zawężają emisje, liczbę stacji, zasięg oraz pozostałe metryki okresowe.
+
+### 0.4.6 — Android: trwały odsłuch, Baza i dokładne daty
+
+Android 0.1.4 przenosi odtwarzacz 30-sekundowych preview poza wiersze `LazyColumn`, więc scrollowanie nie zatrzymuje audio. W Bazie są teraz te same szybkie kontrolki odsłuchu i zmiany statusu co na Dashboardzie/Emisjach. Emisje startują domyślnie posortowane malejąco po liczbie emisji w wybranym okresie. W Emisjach i Bazie, obok presetów 7/28/90 dni, dodano wybór dokładnych dat **Od** i **Do**.

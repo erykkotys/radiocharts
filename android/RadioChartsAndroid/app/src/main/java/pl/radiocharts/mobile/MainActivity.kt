@@ -29,10 +29,13 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneOffset
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,9 +74,17 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
     private val store = SettingsStore(app)
     private val _state = MutableStateFlow(ListUiState())
     val state: StateFlow<ListUiState> = _state
+    private var modeDefaultsApplied = false
 
     suspend fun load(mode: String, start: String? = null, end: String? = null, append: Boolean = false) {
-        val before = _state.value
+        var before = _state.value
+        if (!modeDefaultsApplied) {
+            modeDefaultsApplied = true
+            if (mode == "airplay") {
+                before = before.copy(sort = "spins", descending = true)
+                _state.value = before
+            }
+        }
         _state.value = before.copy(loading = !append, loadingMore = append, error = null)
         try {
             val api = ApiProvider.api(store)
@@ -163,11 +174,90 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
     }
 }
 
+data class PreviewUiState(
+    val loadingSongId: Int? = null,
+    val playingSongId: Int? = null,
+    val error: String? = null,
+)
+
+class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel(app) {
+    private val _state = MutableStateFlow(PreviewUiState())
+    val state: StateFlow<PreviewUiState> = _state
+    private var player: MediaPlayer? = null
+    private var loadJob: Job? = null
+    private var requestedSongId: Int? = null
+
+    fun toggle(song: SongRow) {
+        if (_state.value.playingSongId == song.song_id) {
+            player?.pause()
+            _state.value = _state.value.copy(playingSongId = null, loadingSongId = null)
+            return
+        }
+        if (_state.value.loadingSongId == song.song_id) {
+            loadJob?.cancel()
+            requestedSongId = null
+            _state.value = PreviewUiState()
+            return
+        }
+
+        loadJob?.cancel()
+        requestedSongId = song.song_id
+        player?.release()
+        player = null
+        _state.value = PreviewUiState(loadingSongId = song.song_id)
+        loadJob = viewModelScope.launch {
+            try {
+                val result = ApiProvider.itunes.search("${song.artist} ${song.title}")
+                val previewUrl = result.results.firstOrNull { !it.previewUrl.isNullOrBlank() }?.previewUrl
+                    ?: error("Brak podglądu 30 s")
+                if (requestedSongId != song.song_id) return@launch
+                val newPlayer = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()
+                    )
+                    setDataSource(previewUrl)
+                    setOnPreparedListener { prepared ->
+                        if (requestedSongId == song.song_id) {
+                            prepared.start()
+                            _state.value = PreviewUiState(playingSongId = song.song_id)
+                        }
+                    }
+                    setOnCompletionListener {
+                        if (requestedSongId == song.song_id) {
+                            _state.value = PreviewUiState()
+                        }
+                    }
+                    setOnErrorListener { _, _, _ ->
+                        if (requestedSongId == song.song_id) {
+                            _state.value = PreviewUiState(error = "Błąd odtwarzania")
+                        }
+                        true
+                    }
+                    prepareAsync()
+                }
+                player = newPlayer
+            } catch (e: Exception) {
+                if (requestedSongId == song.song_id) {
+                    _state.value = PreviewUiState(error = e.message ?: e.javaClass.simpleName)
+                }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        loadJob?.cancel()
+        player?.release()
+        player = null
+        super.onCleared()
+    }
+}
+
 @Composable fun RadioChartsApp() {
     val nav = rememberNavController()
     val context = LocalContext.current
     val store = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
+    val previewVm: PreviewPlayerVm = viewModel()
     var pendingUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
     var updateStatus by remember { mutableStateOf("") }
     var updating by remember { mutableStateOf(false) }
@@ -228,11 +318,11 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
         }
     ) { pad ->
         NavHost(navController = nav, startDestination = "dashboard", modifier = Modifier.padding(pad)) {
-            composable("dashboard") { SongListScreen("dashboard", "Dashboard", nav::navigate) }
-            composable("airplay") { SongListScreen("airplay", "Emisje", nav::navigate, withPeriod=true) }
-            composable("library") { SongListScreen("library", "Baza", nav::navigate, withPeriod=true) }
+            composable("dashboard") { SongListScreen("dashboard", "Dashboard", nav::navigate, previewVm = previewVm) }
+            composable("airplay") { SongListScreen("airplay", "Emisje", nav::navigate, withPeriod=true, previewVm = previewVm) }
+            composable("library") { SongListScreen("library", "Baza", nav::navigate, withPeriod=true, previewVm = previewVm) }
             composable("settings") { SettingsScreen(updateStatus = updateStatus, onCheckUpdates = { checkUpdates(true) }) }
-            composable("song/{id}", arguments=listOf(navArgument("id"){type=NavType.IntType})) { back -> SongScreen(back.arguments?.getInt("id") ?: 0) }
+            composable("song/{id}", arguments=listOf(navArgument("id"){type=NavType.IntType})) { back -> SongScreen(back.arguments?.getInt("id") ?: 0, previewVm) }
         }
     }
 
@@ -262,17 +352,30 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable fun SongListScreen(mode:String, title:String, navigate:(String)->Unit, withPeriod:Boolean=false, vm:ListVm=viewModel(key="list-$mode")) {
+@Composable fun SongListScreen(mode:String, title:String, navigate:(String)->Unit, withPeriod:Boolean=false, vm:ListVm=viewModel(key="list-$mode"), previewVm:PreviewPlayerVm) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var statusOpen by remember { mutableStateOf(false) }
     var stationOpen by remember { mutableStateOf(false) }
     var period by remember { mutableStateOf("7d") }
-    fun range(): Pair<String?,String?> {
-        if (!withPeriod) return null to null
+    var customStart by remember { mutableStateOf<LocalDate?>(null) }
+    var customEnd by remember { mutableStateOf<LocalDate?>(null) }
+
+    fun presetRange(): Pair<LocalDate, LocalDate> {
         val end = LocalDate.now()
         val days = when(period){"28d"->28;"90d"->90;else->7}
-        return end.minusDays((days-1).toLong()).toString() to end.toString()
+        return end.minusDays((days-1).toLong()) to end
+    }
+    fun effectiveRange(): Pair<LocalDate, LocalDate> {
+        if (period == "custom" && customStart != null && customEnd != null) {
+            return customStart!! to customEnd!!
+        }
+        return presetRange()
+    }
+    fun range(): Pair<String?,String?> {
+        if (!withPeriod) return null to null
+        val (start, end) = effectiveRange()
+        return start.toString() to end.toString()
     }
     fun reload(append:Boolean=false) {
         scope.launch { val (s,e)=range(); vm.load(mode,s,e,append=append) }
@@ -295,9 +398,41 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
                 Text(if(state.descending) "↓" else "↑")
             }
         }
-        if (withPeriod) Row(horizontalArrangement=Arrangement.spacedBy(6.dp), modifier=Modifier.padding(top=4.dp)) {
-            listOf("7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach { (k,l) ->
-                FilterChip(selected=period==k,onClick={period=k;reload()},label={Text(l)})
+        if (withPeriod) {
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp), modifier=Modifier.padding(top=4.dp)) {
+                listOf("7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach { (k,l) ->
+                    FilterChip(selected=period==k,onClick={period=k;reload()},label={Text(l)})
+                }
+            }
+            val (shownStart, shownEnd) = effectiveRange()
+            Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                DatePickerButton(
+                    label = "Od",
+                    value = shownStart,
+                    modifier = Modifier.weight(1f),
+                    onValue = { picked ->
+                        val currentEnd = if (period == "custom") customEnd ?: shownEnd else shownEnd
+                        customStart = picked
+                        customEnd = if (picked > currentEnd) picked else currentEnd
+                        period = "custom"
+                        reload()
+                    },
+                )
+                DatePickerButton(
+                    label = "Do",
+                    value = shownEnd,
+                    modifier = Modifier.weight(1f),
+                    onValue = { picked ->
+                        val currentStart = if (period == "custom") customStart ?: shownStart else shownStart
+                        customEnd = picked
+                        customStart = if (picked < currentStart) picked else currentStart
+                        period = "custom"
+                        reload()
+                    },
+                )
+            }
+            if (period == "custom") {
+                Text("Własny zakres", style=MaterialTheme.typography.labelSmall, color=Accent)
             }
         }
         if (mode == "airplay") {
@@ -323,6 +458,7 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
                     statuses = state.meta.statuses,
                     savingStatus = state.savingSongIds.contains(row.song_id),
                     onStatusChange = { vm.changeStatus(row, it) },
+                    previewVm = previewVm,
                     onClick = { navigate("song/${row.song_id}") },
                 )
             }
@@ -357,6 +493,32 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
             }}
         }}
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable fun DatePickerButton(label:String, value:LocalDate, modifier:Modifier=Modifier, onValue:(LocalDate)->Unit) {
+    var open by remember { mutableStateOf(false) }
+    OutlinedButton(
+        onClick={open=true},
+        modifier=modifier,
+        contentPadding=PaddingValues(horizontal=8.dp),
+    ) { Text("$label: $value", maxLines=1, style=MaterialTheme.typography.labelMedium) }
+    if (open) {
+        val initialMillis = value.atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli()
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+        DatePickerDialog(
+            onDismissRequest={open=false},
+            confirmButton={
+                TextButton(onClick={
+                    pickerState.selectedDateMillis?.let { millis ->
+                        onValue(Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate())
+                    }
+                    open=false
+                }) { Text("OK") }
+            },
+            dismissButton={TextButton(onClick={open=false}){Text("Anuluj")}},
+        ) { DatePicker(state=pickerState) }
+    }
 }
 
 @Composable fun FilterButton(text:String,onClick:()->Unit){OutlinedButton(onClick=onClick,modifier=Modifier.fillMaxWidth()){Text(text,maxLines=1,overflow=TextOverflow.Ellipsis)}}
@@ -423,6 +585,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     statuses:List<String>,
     savingStatus:Boolean,
     onStatusChange:(String)->Unit,
+    previewVm:PreviewPlayerVm,
     onClick:()->Unit,
 ) {
     Card(onClick=onClick, colors=CardDefaults.cardColors(containerColor=CardBg), modifier=Modifier.fillMaxWidth()) {
@@ -446,21 +609,19 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
             Row(Modifier.padding(top=5.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 ChartBadge("RMF",s.RMF_pos,s.RMF_weeks);ChartBadge("ZET",s.ZET_pos,s.ZET_weeks);ChartBadge("OLIA",s.OLIA_pos,s.OLIA_weeks);ChartBadge("OLIS",s.OLIS_pos,s.OLIS_weeks);ChartBadge("ESKA",s.ESKA_pos,s.ESKA_weeks)
             }
-            if (mode == "dashboard" || mode == "airplay") {
-                Row(
-                    Modifier.fillMaxWidth().padding(top=7.dp),
-                    horizontalArrangement=Arrangement.spacedBy(7.dp),
-                    verticalAlignment=Alignment.CenterVertically,
-                ) {
-                    PreviewButton(s)
-                    InlineStatusMenu(
-                        value = s.status,
-                        statuses = statuses,
-                        enabled = !savingStatus,
-                        modifier = Modifier.weight(1f),
-                        onValue = onStatusChange,
-                    )
-                }
+            Row(
+                Modifier.fillMaxWidth().padding(top=7.dp),
+                horizontalArrangement=Arrangement.spacedBy(7.dp),
+                verticalAlignment=Alignment.CenterVertically,
+            ) {
+                PreviewButton(s, previewVm)
+                InlineStatusMenu(
+                    value = s.status,
+                    statuses = statuses,
+                    enabled = !savingStatus,
+                    modifier = Modifier.weight(1f),
+                    onValue = onStatusChange,
+                )
             }
         }
     }
@@ -490,7 +651,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 @Composable fun ChartBadge(label:String,pos:Int?,weeks:Int?){Text(if(pos==null)"$label —" else "$label #$pos (${weeks?:0}w)",style=MaterialTheme.typography.labelSmall,color=Color(0xFFB5BDC9))}
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable fun SongScreen(id:Int) {
+@Composable fun SongScreen(id:Int, previewVm:PreviewPlayerVm) {
     val context=LocalContext.current; val store=remember{SettingsStore(context)}; val scope=rememberCoroutineScope()
     var song by remember{id.let{mutableStateOf<SongRow?>(null)}};var charts by remember{mutableStateOf<List<ChartPoint>>(emptyList())};var air by remember{mutableStateOf<AirplayDetail?>(null)};var stations by remember{mutableStateOf<List<Station>>(emptyList())};var selectedStations by remember{mutableStateOf<Set<Int>>(emptySet())};var meta by remember{mutableStateOf(MetaResponse())};var error by remember{mutableStateOf<String?>(null)};var stationOpen by remember{mutableStateOf(false)};var period by remember{mutableStateOf("28d")};var saving by remember{mutableStateOf(false)}
     suspend fun reloadAir(){try{val api=ApiProvider.api(store);val end=LocalDate.now();val days=when(period){"7d"->7;"90d"->90;else->28};val ids=selectedStations.takeIf{it.isNotEmpty()}?.joinToString(",");air=api.airplay(id,end.minusDays((days-1).toLong()).toString(),end.toString(),ids)}catch(e:Exception){error=e.message}}
@@ -500,7 +661,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp)) {
         Text(s.artist,style=MaterialTheme.typography.titleMedium,color=Color(0xFFB5BDC9));Text(s.title,style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
         Row(Modifier.fillMaxWidth().padding(vertical=8.dp),horizontalArrangement=Arrangement.SpaceBetween){MetricTiny("Popularity",s.popularity?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Chart Score",s.familiarity?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Momentum",s.momentum?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Zasięg 7d",s.radio_reach?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Emisje 7d",(s.airplay_spins_7d?:0).toString())}
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){PreviewButton(s);SpotifyButton(s)}
+        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){PreviewButton(s, previewVm);SpotifyButton(s)}
         HorizontalDivider(Modifier.padding(vertical=8.dp))
         var heard by remember(s.song_id,s.heard){mutableStateOf(s.heard)};var dl by remember(s.song_id,s.downloaded){mutableStateOf(s.downloaded)};var status by remember(s.song_id,s.status){mutableStateOf(s.status)};var note by remember(s.song_id,s.note){mutableStateOf(s.note)}
         Row(verticalAlignment=Alignment.CenterVertically){Checkbox(heard,{heard=it});Text("Przesłuchany");Checkbox(dl,{dl=it});Text("DL")}
@@ -522,7 +683,18 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 
 @Composable fun StatusMenu(value:String, statuses:List<String>,onValue:(String)->Unit){var open by remember{mutableStateOf(false)};Box{OutlinedButton(onClick={open=true},modifier=Modifier.fillMaxWidth()){Text("Status: $value")};DropdownMenu(expanded=open,onDismissRequest={open=false}){statuses.forEach{DropdownMenuItem(text={Text(it)},onClick={open=false;onValue(it)})}}}}
 @Composable fun SpotifyButton(s:SongRow){val context=LocalContext.current;OutlinedButton(onClick={val q=Uri.encode("${s.artist} ${s.title}");context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://open.spotify.com/search/$q")))}){Text("Spotify ↗")}}
-@Composable fun PreviewButton(s:SongRow){val scope=rememberCoroutineScope();var player by remember{mutableStateOf<MediaPlayer?>(null)};var loading by remember{mutableStateOf(false)};DisposableEffect(Unit){onDispose{player?.release()}};OutlinedButton(onClick={scope.launch{if(player?.isPlaying==true){player?.pause();return@launch};loading=true;try{val r=ApiProvider.itunes.search("${s.artist} ${s.title}");val p=r.results.firstOrNull{!it.previewUrl.isNullOrBlank()}?.previewUrl;if(p!=null){player?.release();player=MediaPlayer().apply{setAudioAttributes(AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());setDataSource(p);prepare();start()}}}catch(_:Exception){}finally{loading=false}}}){Text(if(loading)"Szukam…" else "▶ 30s")}}
+@Composable fun PreviewButton(s:SongRow, previewVm:PreviewPlayerVm) {
+    val preview by previewVm.state.collectAsStateWithLifecycle()
+    val loading = preview.loadingSongId == s.song_id
+    val playing = preview.playingSongId == s.song_id
+    OutlinedButton(onClick={previewVm.toggle(s)}) {
+        Text(when {
+            loading -> "Szukam…"
+            playing -> "⏸ 30s"
+            else -> "▶ 30s"
+        })
+    }
+}
 
 @Composable fun SettingsScreen(updateStatus:String,onCheckUpdates:()->Unit){
     val context=LocalContext.current
