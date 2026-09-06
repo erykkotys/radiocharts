@@ -1,12 +1,17 @@
 package pl.radiocharts.mobile
 
+import android.app.Activity
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,7 +22,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -27,6 +35,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
@@ -309,11 +318,16 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
         checkUpdates(manual = false)
     }
 
+    val currentBackStackEntry by nav.currentBackStackEntryAsState()
+    val chartOpen = currentBackStackEntry?.destination?.route?.startsWith("chart/") == true
+
     Scaffold(
         bottomBar = {
-            NavigationBar {
-                listOf("dashboard" to "Dashboard", "airplay" to "Emisje", "library" to "Baza", "settings" to "Ustawienia").forEach { (route,label) ->
-                    NavigationBarItem(selected=false, onClick={nav.navigate(route){launchSingleTop=true}}, icon={Text(when(route){"dashboard"->"▦";"airplay"->"◉";"library"->"★";else->"⚙"})}, label={Text(label)})
+            if (!chartOpen) {
+                NavigationBar {
+                    listOf("dashboard" to "Dashboard", "airplay" to "Emisje", "library" to "Baza", "settings" to "Ustawienia").forEach { (route,label) ->
+                        NavigationBarItem(selected=false, onClick={nav.navigate(route){launchSingleTop=true}}, icon={Text(when(route){"dashboard"->"▦";"airplay"->"◉";"library"->"★";else->"⚙"})}, label={Text(label)})
+                    }
                 }
             }
         }
@@ -323,7 +337,22 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
             composable("airplay") { SongListScreen("airplay", "Emisje", nav::navigate, withPeriod=true, previewVm = previewVm) }
             composable("library") { SongListScreen("library", "Baza", nav::navigate, withPeriod=true, previewVm = previewVm) }
             composable("settings") { SettingsScreen(updateStatus = updateStatus, onCheckUpdates = { checkUpdates(true) }) }
-            composable("song/{id}", arguments=listOf(navArgument("id"){type=NavType.IntType})) { back -> SongScreen(back.arguments?.getInt("id") ?: 0, previewVm) }
+            composable("song/{id}", arguments=listOf(navArgument("id"){type=NavType.IntType})) { back ->
+                SongScreen(back.arguments?.getInt("id") ?: 0, previewVm, nav::navigate)
+            }
+            composable(
+                "chart/{id}/{source}",
+                arguments=listOf(
+                    navArgument("id"){type=NavType.IntType},
+                    navArgument("source"){type=NavType.StringType},
+                ),
+            ) { back ->
+                ToplistChartScreen(
+                    id = back.arguments?.getInt("id") ?: 0,
+                    source = Uri.decode(back.arguments?.getString("source").orEmpty()),
+                    onBack = { nav.popBackStack() },
+                )
+            }
         }
     }
 
@@ -352,12 +381,7 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
     }
 }
 
-private fun androidStatusOrder(statuses: List<String>): List<String> {
-    // CF1/CF2 are the most frequently used base statuses on mobile and used to be
-    // the last two entries in the long menu, which made them look missing.
-    val pinned = listOf("Baza CF1", "Baza CF2")
-    return (pinned.filter { it in statuses } + statuses.filterNot { it in pinned }).distinct()
-}
+private fun androidStatusOrder(statuses: List<String>): List<String> = statuses.distinct()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun SongListScreen(mode:String, title:String, navigate:(String)->Unit, withPeriod:Boolean=false, vm:ListVm=viewModel(key="list-$mode"), previewVm:PreviewPlayerVm) {
@@ -489,8 +513,8 @@ private fun androidStatusOrder(statuses: List<String>): List<String> {
         confirmButton={TextButton(onClick={statusOpen=false;reload()}){Text("Zastosuj")}},
         dismissButton={TextButton(onClick={vm.clearStatuses()}){Text("Wyczyść")}},
         title={Text("Statusy")},
-        text={Column(Modifier.heightIn(max=440.dp).verticalScroll(rememberScrollState())){
-            androidStatusOrder(state.meta.statuses).forEach{st->Row(verticalAlignment=Alignment.CenterVertically){
+        text={LazyColumn(Modifier.heightIn(max=440.dp)){
+            items(androidStatusOrder(state.meta.statuses)){st->Row(verticalAlignment=Alignment.CenterVertically){
                 Checkbox(checked=state.statuses.contains(st),onCheckedChange={vm.toggleStatus(st)});Text(st)
             }}
         }}
@@ -651,6 +675,32 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     }
 }
 
+@Composable fun StatusPickerDialog(
+    value:String,
+    statuses:List<String>,
+    onDismiss:()->Unit,
+    onValue:(String)->Unit,
+) {
+    AlertDialog(
+        onDismissRequest=onDismiss,
+        confirmButton={TextButton(onClick=onDismiss){Text("Anuluj")}},
+        title={Text("Wybierz status")},
+        text={
+            LazyColumn(Modifier.heightIn(max=460.dp)) {
+                items(androidStatusOrder(statuses)) { status ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable{onValue(status)}.padding(vertical=10.dp, horizontal=4.dp),
+                        verticalAlignment=Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected=status==value,onClick={onValue(status)})
+                        Text(status,modifier=Modifier.padding(start=6.dp))
+                    }
+                }
+            }
+        },
+    )
+}
+
 @Composable fun InlineStatusMenu(
     value:String,
     statuses:List<String>,
@@ -663,15 +713,14 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         OutlinedButton(onClick={open=true},enabled=enabled,modifier=Modifier.fillMaxWidth()) {
             Text(if(enabled) value else "Zapisuję…",maxLines=1,overflow=TextOverflow.Ellipsis)
         }
-        DropdownMenu(
-            expanded=open,
-            onDismissRequest={open=false},
-            modifier=Modifier.heightIn(max=420.dp),
-        ) {
-            androidStatusOrder(statuses).forEach { status ->
-                DropdownMenuItem(text={Text(status)},onClick={open=false;onValue(status)})
-            }
-        }
+    }
+    if(open) {
+        StatusPickerDialog(
+            value=value,
+            statuses=statuses,
+            onDismiss={open=false},
+            onValue={open=false;onValue(it)},
+        )
     }
 }
 
@@ -679,7 +728,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 @Composable fun ChartBadge(label:String,pos:Int?,weeks:Int?){Text(if(pos==null)"$label —" else "$label #$pos (${weeks?:0}w)",style=MaterialTheme.typography.labelSmall,color=Color(0xFFB5BDC9))}
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable fun SongScreen(id:Int, previewVm:PreviewPlayerVm) {
+@Composable fun SongScreen(id:Int, previewVm:PreviewPlayerVm, navigate:(String)->Unit) {
     val context=LocalContext.current; val store=remember{SettingsStore(context)}; val scope=rememberCoroutineScope()
     var song by remember{id.let{mutableStateOf<SongRow?>(null)}};var charts by remember{mutableStateOf<List<ChartPoint>>(emptyList())};var air by remember{mutableStateOf<AirplayDetail?>(null)};var stations by remember{mutableStateOf<List<Station>>(emptyList())};var selectedStations by remember{mutableStateOf<Set<Int>>(emptySet())};var meta by remember{mutableStateOf(MetaResponse())};var error by remember{mutableStateOf<String?>(null)};var stationOpen by remember{mutableStateOf(false)};var period by remember{mutableStateOf("28d")};var saving by remember{mutableStateOf(false)}
     suspend fun reloadAir(){try{val api=ApiProvider.api(store);val end=LocalDate.now();val days=when(period){"7d"->7;"90d"->90;else->28};val ids=selectedStations.takeIf{it.isNotEmpty()}?.joinToString(",");air=api.airplay(id,end.minusDays((days-1).toLong()).toString(),end.toString(),ids)}catch(e:Exception){error=e.message}}
@@ -698,7 +747,27 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         Button(enabled=!saving,onClick={scope.launch{saving=true;try{song=ApiProvider.api(store).patchSong(id,NotePatch(heard,status,dl,note)).song}catch(e:Exception){error=e.message}finally{saving=false}}},modifier=Modifier.fillMaxWidth()){Text(if(saving)"Zapisuję…" else "Zapisz")}
         HorizontalDivider(Modifier.padding(vertical=8.dp))
         Text("Pozycje na listach",style=MaterialTheme.typography.titleMedium)
-        val grouped=charts.groupBy{it.source};if(grouped.isEmpty())Text("Brak historii") else grouped.forEach{(src,pts)->val last=pts.lastOrNull();val peak=pts.minOfOrNull{it.position};Text("$src: ${last?.position?.let{"#$it"}?:"—"} · peak ${peak?.let{"#$it"}?:"—"} · ${pts.size} notowań",modifier=Modifier.padding(vertical=2.dp))}
+        val grouped=charts.groupBy{it.source}
+        if(grouped.isEmpty()) {
+            Text("Brak historii")
+        } else {
+            grouped.forEach{(src,rawPts)->
+                val pts=rawPts.sortedBy{it.chart_date}
+                val last=pts.lastOrNull()
+                val peak=pts.minOfOrNull{it.position}
+                Row(
+                    modifier=Modifier.fillMaxWidth().clickable{navigate("chart/$id/${Uri.encode(src)}")}.padding(vertical=8.dp, horizontal=4.dp),
+                    verticalAlignment=Alignment.CenterVertically,
+                ){
+                    Text(
+                        "$src: ${last?.position?.let{"#$it"}?:"—"} · peak ${peak?.let{"#$it"}?:"—"} · ${pts.size} notowań",
+                        modifier=Modifier.weight(1f),
+                    )
+                    Text("Wykres ›",style=MaterialTheme.typography.labelMedium,color=Accent)
+                }
+                HorizontalDivider()
+            }
+        }
         HorizontalDivider(Modifier.padding(vertical=8.dp))
         Row(verticalAlignment=Alignment.CenterVertically){Text("Emisje radiowe",style=MaterialTheme.typography.titleMedium,modifier=Modifier.weight(1f));OutlinedButton(onClick={stationOpen=true}){Text(if(selectedStations.isEmpty())"Wszystkie stacje" else "Stacje: ${selectedStations.size}")}}
         Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){listOf("7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach{(k,l)->FilterChip(selected=period==k,onClick={period=k;scope.launch{reloadAir()}},label={Text(l)})}}
@@ -709,13 +778,140 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     if(stationOpen)AlertDialog(onDismissRequest={stationOpen=false},confirmButton={TextButton(onClick={stationOpen=false;scope.launch{reloadAir()}}){Text("Zastosuj")}},dismissButton={TextButton(onClick={selectedStations=emptySet()}){Text("Wszystkie")}},title={Text("Stacje")},text={Column(Modifier.heightIn(max=460.dp).verticalScroll(rememberScrollState())){stations.forEach{st->Row(verticalAlignment=Alignment.CenterVertically){Checkbox(checked=selectedStations.contains(st.station_id),onCheckedChange={val set=selectedStations.toMutableSet();if(it)set.add(st.station_id)else set.remove(st.station_id);selectedStations=set});Text(st.name)}}}})
 }
 
+@Composable fun ToplistChartScreen(id:Int, source:String, onBack:()->Unit) {
+    val context=LocalContext.current
+    val activity=context as? Activity
+    val store=remember{SettingsStore(context)}
+    var song by remember{mutableStateOf<SongRow?>(null)}
+    var points by remember{mutableStateOf<List<ChartPoint>>(emptyList())}
+    var loading by remember{mutableStateOf(true)}
+    var error by remember{mutableStateOf<String?>(null)}
+
+    fun leaveChart() {
+        activity?.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        onBack()
+    }
+
+    BackHandler { leaveChart() }
+    LaunchedEffect(Unit) {
+        activity?.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+    }
+    LaunchedEffect(id,source) {
+        loading=true
+        error=null
+        try {
+            val api=ApiProvider.api(store)
+            song=api.song(id)
+            points=api.charts(id).filter{it.source==source}.sortedBy{it.chart_date}
+        } catch(e:Exception) {
+            error=e.message ?: e.javaClass.simpleName
+        } finally {
+            loading=false
+        }
+    }
+
+    val s=song
+    Column(Modifier.fillMaxSize().padding(horizontal=12.dp,vertical=8.dp)) {
+        Row(verticalAlignment=Alignment.CenterVertically) {
+            OutlinedButton(onClick={leaveChart}){Text("‹ Wróć")}
+            Column(Modifier.padding(start=10.dp).weight(1f)) {
+                Text(source,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+                Text(
+                    if(s==null) "Toplista" else "${s.artist} — ${s.title}",
+                    style=MaterialTheme.typography.bodyMedium,
+                    color=Color(0xFFB5BDC9),
+                    maxLines=1,
+                    overflow=TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if(loading) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().padding(top=8.dp))
+            return@Column
+        }
+        error?.let {
+            Text("Błąd: $it",color=MaterialTheme.colorScheme.error,modifier=Modifier.padding(top=12.dp))
+            return@Column
+        }
+        if(points.isEmpty()) {
+            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){Text("Brak historii dla $source")}
+            return@Column
+        }
+
+        val latest=points.last()
+        val peak=points.minOf{it.position}
+        Row(Modifier.fillMaxWidth().padding(vertical=6.dp),horizontalArrangement=Arrangement.spacedBy(24.dp)) {
+            MetricTiny("Ostatnia","#${latest.position}")
+            MetricTiny("Peak","#$peak")
+            MetricTiny("Notowania",points.size.toString())
+            MetricTiny("Zakres","${shortChartDate(points.first().chart_date)} – ${shortChartDate(points.last().chart_date)}")
+        }
+        ToplistLineChart(points=points,modifier=Modifier.fillMaxWidth().weight(1f))
+    }
+}
+
+private fun shortChartDate(raw:String):String {
+    return runCatching {
+        val d=LocalDate.parse(raw)
+        "${d.dayOfMonth.toString().padStart(2,'0')}.${d.monthValue.toString().padStart(2,'0')}.${d.year}"
+    }.getOrDefault(raw)
+}
+
+@Composable fun ToplistLineChart(points:List<ChartPoint>, modifier:Modifier=Modifier) {
+    val maxRank=(points.maxOfOrNull{maxOf(it.chart_size,it.position)} ?: 20).coerceAtLeast(2)
+    val middleRank=((maxRank+1)/2).coerceAtLeast(2)
+    val middlePoint=points[points.size/2]
+    Row(modifier.padding(top=2.dp,bottom=4.dp)) {
+        Column(
+            Modifier.width(42.dp).fillMaxHeight().padding(bottom=24.dp),
+            verticalArrangement=Arrangement.SpaceBetween,
+            horizontalAlignment=Alignment.End,
+        ) {
+            Text("#1",style=MaterialTheme.typography.labelSmall)
+            Text("#$middleRank",style=MaterialTheme.typography.labelSmall)
+            Text("#$maxRank",style=MaterialTheme.typography.labelSmall)
+        }
+        Column(Modifier.fillMaxSize().padding(start=7.dp)) {
+            Canvas(Modifier.fillMaxWidth().weight(1f)) {
+                val w=size.width
+                val h=size.height
+                val grid=Color.White.copy(alpha=0.12f)
+                listOf(0f,0.25f,0.5f,0.75f,1f).forEach { ratio ->
+                    val y=h*ratio
+                    drawLine(grid,Offset(0f,y),Offset(w,y),strokeWidth=1f)
+                }
+                val path=Path()
+                points.forEachIndexed { index,p ->
+                    val x=if(points.size==1) w/2f else w*index.toFloat()/(points.size-1).toFloat()
+                    val y=h*(p.position-1).toFloat()/(maxRank-1).toFloat()
+                    if(index==0) path.moveTo(x,y) else path.lineTo(x,y)
+                }
+                drawPath(path,Accent,style=Stroke(width=3.5f))
+                points.forEachIndexed { index,p ->
+                    val x=if(points.size==1) w/2f else w*index.toFloat()/(points.size-1).toFloat()
+                    val y=h*(p.position-1).toFloat()/(maxRank-1).toFloat()
+                    drawCircle(Accent,radius=4.5f,center=Offset(x,y))
+                }
+            }
+            Row(Modifier.fillMaxWidth().height(24.dp),horizontalArrangement=Arrangement.SpaceBetween) {
+                Text(shortChartDate(points.first().chart_date),style=MaterialTheme.typography.labelSmall)
+                if(points.size>2) Text(shortChartDate(middlePoint.chart_date),style=MaterialTheme.typography.labelSmall)
+                Text(shortChartDate(points.last().chart_date),style=MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
 @Composable fun StatusMenu(value:String, statuses:List<String>,onValue:(String)->Unit){
     var open by remember{mutableStateOf(false)}
-    Box{
-        OutlinedButton(onClick={open=true},modifier=Modifier.fillMaxWidth()){Text("Status: $value")}
-        DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.heightIn(max=420.dp)){
-            androidStatusOrder(statuses).forEach{DropdownMenuItem(text={Text(it)},onClick={open=false;onValue(it)})}
-        }
+    OutlinedButton(onClick={open=true},modifier=Modifier.fillMaxWidth()){Text("Status: $value")}
+    if(open) {
+        StatusPickerDialog(
+            value=value,
+            statuses=statuses,
+            onDismiss={open=false},
+            onValue={open=false;onValue(it)},
+        )
     }
 }
 @Composable fun SpotifyButton(s:SongRow, compact:Boolean=false){

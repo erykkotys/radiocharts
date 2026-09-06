@@ -4,7 +4,7 @@ Natywny klient Android (Kotlin + Jetpack Compose) dla prywatnego RadioCharts API
 
 ## Wersja
 
-Android 0.1.6 (`versionCode = 7`).
+Android 0.1.7 (`versionCode = 8`).
 
 ## Release signing
 
@@ -23,8 +23,14 @@ Aplikacja automatycznie sprawdza `GET /api/v1/android/update?current_version_cod
 
 Gdy jest nowsza wersja, aplikacja pobiera `GET /api/v1/android/apk`, weryfikuje SHA-256 i uruchamia systemowy instalator. Po pierwszym włączeniu aktualizacji może być potrzebne jednorazowe zezwolenie **Allow from this source** dla RadioCharts.
 
-Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 0.1.6, aktualizują się w miejscu.
+Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 0.1.7, aktualizują się w miejscu.
 
+
+## 0.1.7
+
+- `Baza CF1` i `Baza CF2` wracają do naturalnej kolejności statusów; szybki wybór statusu jest teraz przewijalnym dialogiem, więc końcowe pozycje nie znikają poza menu.
+- W Utworze kliknięcie konkretnej pozycji w sekcji „Pozycje na listach” otwiera wykres historii tej toplisty.
+- Ekran wykresu przełącza się w landscape, chowa dolną nawigację i pokazuje aktualną pozycję, peak, liczbę notowań oraz historię pozycji w czasie.
 
 ## 0.1.6
 

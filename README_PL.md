@@ -353,3 +353,8 @@ Android 0.1.5 zmniejsza panel filtrów w Emisjach i Bazie. Status, DL, sortowani
 ### 0.4.8 — Android: Baza CF i Spotify przy utworach
 
 Android 0.1.6 przypina `Baza CF1` i `Baza CF2` na początku rozwijanych list statusów (zarówno filtra, jak i szybkiej zmiany statusu na karcie) i ogranicza wysokość dropdownu, żeby przewijanie było jednoznaczne. Każda karta utworu dostała też bezpośredni przycisk Spotify obok odsłuchu 30 s.
+
+
+### 0.4.9 — Android: poprawione statusy i wykresy toplist
+
+Android 0.1.7 przywraca `Baza CF1` i `Baza CF2` do naturalnej kolejności statusów zwracanej przez API. Szybka zmiana statusu korzysta teraz z przewijalnego okna wyboru, dzięki czemu wszystkie pozycje — także końcowe CF1/CF2 — są dostępne bez przepinania ich na początek. W ekranie Utwór wiersze sekcji **Pozycje na listach** są klikalne i otwierają pełny wykres historii wybranej toplisty. Ekran wykresu przełącza Androida w orientację poziomą, chowa dolną nawigację, pokazuje aktualną pozycję, peak, liczbę notowań i przebieg pozycji w czasie.
