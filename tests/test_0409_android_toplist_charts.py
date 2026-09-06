@@ -10,7 +10,7 @@ def test_android_toplist_rows_open_landscape_chart_screen():
     assert 'ToplistChartScreen(' in main
     assert 'SCREEN_ORIENTATION_SENSOR_LANDSCAPE' in main
     assert 'ToplistLineChart(points=points' in main
-    assert 'drawPath(path,Accent' in main
+    assert 'drawPath(path,color' in main
     assert 'val chartOpen = currentBackStackEntry?.destination?.route?.startsWith("chart/") == true' in main
     assert 'if (!chartOpen)' in main
     assert 'OutlinedButton(onClick={ leaveChart() })' in main

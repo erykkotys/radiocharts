@@ -358,3 +358,8 @@ Android 0.1.6 przypina `Baza CF1` i `Baza CF2` na początku rozwijanych list sta
 ### 0.4.9 — Android: poprawione statusy i wykresy toplist
 
 Android 0.1.7 przywraca `Baza CF1` i `Baza CF2` do naturalnej kolejności statusów zwracanej przez API. Szybka zmiana statusu korzysta teraz z przewijalnego okna wyboru, dzięki czemu wszystkie pozycje — także końcowe CF1/CF2 — są dostępne bez przepinania ich na początek. W ekranie Utwór wiersze sekcji **Pozycje na listach** są klikalne i otwierają pełny wykres historii wybranej toplisty. Ekran wykresu przełącza Androida w orientację poziomą, chowa dolną nawigację, pokazuje aktualną pozycję, peak, liczbę notowań i przebieg pozycji w czasie.
+
+### 0.4.10 — Android: wspólny wykres toplist i szczegóły punktów
+
+Android 0.1.8 dodaje w Utworze wspólny wykres wszystkich toplist obok pozostawionych osobnych wykresów RMF/ZET/ESKA/OLIA/OLIS. Wspólny widok używa jednej osi dat, osobnej linii i legendy dla każdej listy. Na punktach wykresu po najechaniu kursorem lub dotknięciu pokazywane są dokładna lista, miejsce i data. Ekran wykresu nadal działa w orientacji poziomej.
+

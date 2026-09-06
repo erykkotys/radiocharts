@@ -26,6 +26,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -751,6 +753,18 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         if(grouped.isEmpty()) {
             Text("Brak historii")
         } else {
+            Row(
+                modifier=Modifier.fillMaxWidth().clickable{navigate("chart/$id/__ALL__")}.padding(vertical=9.dp, horizontal=4.dp),
+                verticalAlignment=Alignment.CenterVertically,
+            ){
+                Text(
+                    "Wszystkie listy · ${grouped.size}",
+                    modifier=Modifier.weight(1f),
+                    fontWeight=FontWeight.SemiBold,
+                )
+                Text("Wspólny wykres ›",style=MaterialTheme.typography.labelMedium,color=Accent)
+            }
+            HorizontalDivider()
             grouped.forEach{(src,rawPts)->
                 val pts=rawPts.sortedBy{it.chart_date}
                 val last=pts.lastOrNull()
@@ -782,6 +796,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     val context=LocalContext.current
     val activity=context as? Activity
     val store=remember{SettingsStore(context)}
+    val allSources=source=="__ALL__"
     var song by remember{mutableStateOf<SongRow?>(null)}
     var points by remember{mutableStateOf<List<ChartPoint>>(emptyList())}
     var loading by remember{mutableStateOf(true)}
@@ -802,7 +817,8 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         try {
             val api=ApiProvider.api(store)
             song=api.song(id)
-            points=api.charts(id).filter{it.source==source}.sortedBy{it.chart_date}
+            val all=api.charts(id).sortedBy{it.chart_date}
+            points=if(allSources) all else all.filter{it.source==source}
         } catch(e:Exception) {
             error=e.message ?: e.javaClass.simpleName
         } finally {
@@ -815,9 +831,9 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         Row(verticalAlignment=Alignment.CenterVertically) {
             OutlinedButton(onClick={ leaveChart() }){Text("‹ Wróć")}
             Column(Modifier.padding(start=10.dp).weight(1f)) {
-                Text(source,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+                Text(if(allSources) "Wszystkie listy" else source,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
                 Text(
-                    if(s==null) "Toplista" else "${s.artist} — ${s.title}",
+                    if(s==null) "Toplisty" else "${s.artist} — ${s.title}",
                     style=MaterialTheme.typography.bodyMedium,
                     color=Color(0xFFB5BDC9),
                     maxLines=1,
@@ -834,17 +850,34 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
             return@Column
         }
         if(points.isEmpty()) {
-            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){Text("Brak historii dla $source")}
+            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){Text(if(allSources) "Brak historii toplist" else "Brak historii dla $source")}
             return@Column
         }
 
-        val latest=points.last()
+        val latest=points.maxByOrNull{it.chart_date}!!
         val peak=points.minOf{it.position}
+        val sources=points.map{it.source}.distinct()
         Row(Modifier.fillMaxWidth().padding(vertical=6.dp),horizontalArrangement=Arrangement.spacedBy(24.dp)) {
-            MetricTiny("Ostatnia","#${latest.position}")
-            MetricTiny("Peak","#$peak")
-            MetricTiny("Notowania",points.size.toString())
-            MetricTiny("Zakres","${shortChartDate(points.first().chart_date)} – ${shortChartDate(points.last().chart_date)}")
+            if(allSources) {
+                MetricTiny("Listy",sources.size.toString())
+                MetricTiny("Punkty",points.size.toString())
+                MetricTiny("Peak","#$peak")
+            } else {
+                MetricTiny("Ostatnia","#${latest.position}")
+                MetricTiny("Peak","#$peak")
+                MetricTiny("Notowania",points.size.toString())
+            }
+            MetricTiny("Zakres","${shortChartDate(points.minBy{it.chart_date}.chart_date)} – ${shortChartDate(points.maxBy{it.chart_date}.chart_date)}")
+        }
+        if(allSources) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom=3.dp),
+                horizontalArrangement=Arrangement.spacedBy(14.dp),
+            ) {
+                sources.forEachIndexed { index,src ->
+                    Text("● $src",color=toplistSeriesColor(index),style=MaterialTheme.typography.labelMedium)
+                }
+            }
         }
         ToplistLineChart(points=points,modifier=Modifier.fillMaxWidth().weight(1f))
     }
@@ -857,10 +890,41 @@ private fun shortChartDate(raw:String):String {
     }.getOrDefault(raw)
 }
 
+private val ToplistSeriesColors=listOf(
+    Accent,
+    Color(0xFFFFB74D),
+    Color(0xFF64B5F6),
+    Color(0xFFE57373),
+    Color(0xFFBA68C8),
+    Color(0xFFAED581),
+    Color(0xFFFF8A65),
+    Color(0xFF4DD0E1),
+)
+private fun toplistSeriesColor(index:Int)=ToplistSeriesColors[index % ToplistSeriesColors.size]
+
+private fun chartOffset(
+    point:ChartPoint,
+    dateIndex:Map<String,Int>,
+    dateCount:Int,
+    maxRank:Int,
+    width:Float,
+    height:Float,
+):Offset {
+    val idx=dateIndex[point.chart_date] ?: 0
+    val x=if(dateCount<=1) width/2f else width*idx.toFloat()/(dateCount-1).toFloat()
+    val y=height*(point.position-1).toFloat()/(maxRank-1).toFloat()
+    return Offset(x,y)
+}
+
 @Composable fun ToplistLineChart(points:List<ChartPoint>, modifier:Modifier=Modifier) {
     val maxRank=(points.maxOfOrNull{maxOf(it.chart_size,it.position)} ?: 20).coerceAtLeast(2)
     val middleRank=((maxRank+1)/2).coerceAtLeast(2)
-    val middlePoint=points[points.size/2]
+    val dates=points.map{it.chart_date}.distinct().sorted()
+    val dateIndex=dates.withIndex().associate{it.value to it.index}
+    val sources=points.map{it.source}.distinct()
+    val bySource=points.groupBy{it.source}.mapValues{(_,pts)->pts.sortedBy{it.chart_date}}
+    var selected by remember(points){mutableStateOf<ChartPoint?>(null)}
+
     Row(modifier.padding(top=2.dp,bottom=4.dp)) {
         Column(
             Modifier.width(42.dp).fillMaxHeight().padding(bottom=24.dp),
@@ -872,32 +936,83 @@ private fun shortChartDate(raw:String):String {
             Text("#$maxRank",style=MaterialTheme.typography.labelSmall)
         }
         Column(Modifier.fillMaxSize().padding(start=7.dp)) {
-            Canvas(Modifier.fillMaxWidth().weight(1f)) {
-                val w=size.width
-                val h=size.height
-                val grid=Color.White.copy(alpha=0.12f)
-                listOf(0f,0.25f,0.5f,0.75f,1f).forEach { ratio ->
-                    val y=h*ratio
-                    drawLine(grid,Offset(0f,y),Offset(w,y),strokeWidth=1f)
+            Box(Modifier.fillMaxWidth().weight(1f)) {
+                Canvas(
+                    Modifier.fillMaxSize().pointerInput(points,dates,maxRank) {
+                        awaitPointerEventScope {
+                            while(true) {
+                                val event=awaitPointerEvent()
+                                if(event.type==PointerEventType.Move || event.type==PointerEventType.Press) {
+                                    val pos=event.changes.firstOrNull()?.position ?: continue
+                                    val w=size.width.toFloat().coerceAtLeast(1f)
+                                    val h=size.height.toFloat().coerceAtLeast(1f)
+                                    selected=points.minByOrNull { p ->
+                                        val o=chartOffset(p,dateIndex,dates.size,maxRank,w,h)
+                                        val dx=o.x-pos.x
+                                        val dy=o.y-pos.y
+                                        dx*dx+dy*dy
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ) {
+                    val w=size.width
+                    val h=size.height
+                    val grid=Color.White.copy(alpha=0.12f)
+                    listOf(0f,0.25f,0.5f,0.75f,1f).forEach { ratio ->
+                        val y=h*ratio
+                        drawLine(grid,Offset(0f,y),Offset(w,y),strokeWidth=1f)
+                    }
+                    sources.forEachIndexed { sourceIndex,src ->
+                        val color=toplistSeriesColor(sourceIndex)
+                        val srcPoints=bySource[src].orEmpty()
+                        if(srcPoints.isNotEmpty()) {
+                            val path=Path()
+                            srcPoints.forEachIndexed { index,p ->
+                                val o=chartOffset(p,dateIndex,dates.size,maxRank,w,h)
+                                if(index==0) path.moveTo(o.x,o.y) else path.lineTo(o.x,o.y)
+                            }
+                            drawPath(path,color,style=Stroke(width=3.5f))
+                            srcPoints.forEach { p ->
+                                val o=chartOffset(p,dateIndex,dates.size,maxRank,w,h)
+                                drawCircle(color,radius=4.5f,center=o)
+                            }
+                        }
+                    }
+                    selected?.let { p ->
+                        val o=chartOffset(p,dateIndex,dates.size,maxRank,w,h)
+                        drawLine(Color.White.copy(alpha=0.35f),Offset(o.x,0f),Offset(o.x,h),strokeWidth=1.5f)
+                        drawCircle(Color.White,radius=8f,center=o,style=Stroke(width=2.5f))
+                    }
                 }
-                val path=Path()
-                points.forEachIndexed { index,p ->
-                    val x=if(points.size==1) w/2f else w*index.toFloat()/(points.size-1).toFloat()
-                    val y=h*(p.position-1).toFloat()/(maxRank-1).toFloat()
-                    if(index==0) path.moveTo(x,y) else path.lineTo(x,y)
-                }
-                drawPath(path,Accent,style=Stroke(width=3.5f))
-                points.forEachIndexed { index,p ->
-                    val x=if(points.size==1) w/2f else w*index.toFloat()/(points.size-1).toFloat()
-                    val y=h*(p.position-1).toFloat()/(maxRank-1).toFloat()
-                    drawCircle(Accent,radius=4.5f,center=Offset(x,y))
+                selected?.let { p ->
+                    Surface(
+                        modifier=Modifier.align(Alignment.TopEnd).padding(8.dp),
+                        shape=MaterialTheme.shapes.small,
+                        tonalElevation=5.dp,
+                    ) {
+                        Text(
+                            "${p.source} · miejsce #${p.position} · ${shortChartDate(p.chart_date)}",
+                            modifier=Modifier.padding(horizontal=10.dp,vertical=6.dp),
+                            style=MaterialTheme.typography.labelLarge,
+                            maxLines=1,
+                        )
+                    }
                 }
             }
+            val middleDate=dates[dates.size/2]
             Row(Modifier.fillMaxWidth().height(24.dp),horizontalArrangement=Arrangement.SpaceBetween) {
-                Text(shortChartDate(points.first().chart_date),style=MaterialTheme.typography.labelSmall)
-                if(points.size>2) Text(shortChartDate(middlePoint.chart_date),style=MaterialTheme.typography.labelSmall)
-                Text(shortChartDate(points.last().chart_date),style=MaterialTheme.typography.labelSmall)
+                Text(shortChartDate(dates.first()),style=MaterialTheme.typography.labelSmall)
+                if(dates.size>2) Text(shortChartDate(middleDate),style=MaterialTheme.typography.labelSmall)
+                Text(shortChartDate(dates.last()),style=MaterialTheme.typography.labelSmall)
             }
+            Text(
+                "Najedź myszą lub dotknij punktu, aby zobaczyć dokładną datę i miejsce.",
+                style=MaterialTheme.typography.labelSmall,
+                color=Color(0xFFB5BDC9),
+                modifier=Modifier.padding(top=2.dp),
+            )
         }
     }
 }
