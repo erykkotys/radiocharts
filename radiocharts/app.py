@@ -496,6 +496,35 @@ def cached_song_catalog(revision: str) -> pd.DataFrame:
     return pd.DataFrame(song_catalog())
 
 
+@st.cache_resource(show_spinner=False, max_entries=12)
+def cached_airplay_stations(revision: str, active_only: bool = True) -> list[dict]:
+    # Station metadata changes much less often than Streamlit reruns. Keeping it
+    # behind the airplay revision removes several SQLite opens on every tab switch.
+    return list_airplay_stations(active_only=bool(active_only))
+
+
+@st.cache_resource(show_spinner=False, max_entries=48)
+def cached_airplay_coverage(
+    revision: str, station_key: tuple[int, ...], start_iso: str = "", end_iso: str = ""
+) -> dict:
+    return airplay_coverage(station_key, start_iso or None, end_iso or None)
+
+
+@st.cache_resource(show_spinner=False, max_entries=48)
+def cached_airplay_station_coverage(
+    revision: str, station_key: tuple[int, ...], start_iso: str, end_iso: str
+) -> list[dict]:
+    return airplay_station_coverage(station_key, start_iso, end_iso)
+
+
+@st.cache_resource(show_spinner=False, max_entries=12)
+def cached_radio_library_catalog(revision: str) -> pd.DataFrame:
+    # The library query also resolves first chart appearances. Cache the complete
+    # frame and copy before view-specific mutations. The revision changes after
+    # notes/status edits or new chart entries.
+    return pd.DataFrame(radio_library_catalog())
+
+
 @st.cache_resource(show_spinner=False, max_entries=24)
 def cached_airplay_summary(revision: str, station_key: tuple[int, ...], start_iso: str, end_iso: str) -> list[dict]:
     return airplay_summary(station_key, start_iso, end_iso)
@@ -1692,7 +1721,7 @@ def render_airplay_data_management(running: bool) -> None:
     st.markdown("### Emisje — pobieranie i backfill")
     st.caption("Cała techniczna obsługa odSluchane jest tutaj. Zakładka Emisje służy już tylko do analizy zapisanych danych.")
 
-    stations = list_airplay_stations(active_only=True)
+    stations = cached_airplay_stations(AIR_REV, True)
     all_known = list_airplay_stations(active_only=False)
     active_ids = [int(s["station_id"]) for s in stations]
     labels = {int(s["station_id"]): str(s["name"]) for s in stations}
@@ -1832,18 +1861,19 @@ if view_key not in {"dashboard", "song", "archive", "airplay", "library", "data"
 render_nav_tabs(view_key)
 install_client_helpers()
 
-# Keep heavy scoring out of views that do not need it.  In particular the
-# Utwór view now scores only the selected song; this matters once the airplay
-# catalogue contains tens of thousands of titles.
-if view_key in {"dashboard", "archive", "song"}:
-    REVISION = chart_revision()
-else:
-    REVISION = ""
+# Resolve each revision at most once per Streamlit rerun.  Tab changes rerun the
+# script, so repeated revision queries used to add visible latency before the
+# actual page query even started.
+_chart_views = {"dashboard", "archive", "song", "airplay", "library"}
+_air_views = {"dashboard", "archive", "song", "airplay", "library"}
+CHART_REV = chart_revision() if view_key in _chart_views else ""
+AIR_REV = airplay_revision() if view_key in _air_views else ""
+REVISION = CHART_REV
 
 if view_key in {"dashboard", "archive"}:
     df = with_notes(cached_scores(REVISION))
     if view_key == "dashboard":
-        df = with_popularity(with_radio_presence(df, days=7), airplay_revision())
+        df = with_popularity(with_radio_presence(df, days=7), AIR_REV)
 else:
     df = pd.DataFrame()
 
@@ -1885,15 +1915,15 @@ if view_key == "dashboard":
             help="Chart Score i Momentum są liczone ponownie tylko z obserwacji z wybranego okresu. Widok Całość najlepiej oddaje historię list; krótsze okresy służą do analizy świeżego zachowania.",
         )
         lookback = int(period_map[period_label])
-        period_df = df if lookback == 0 else with_popularity(with_radio_presence(with_notes(cached_scores(REVISION, lookback_days=lookback)), days=7), airplay_revision())
+        period_df = df if lookback == 0 else with_popularity(with_radio_presence(with_notes(cached_scores(REVISION, lookback_days=lookback)), days=7), AIR_REV)
 
         # Dashboard: exact spin count for the selected indicator period.  Use a
         # lightweight SQL GROUP BY rather than the richer Emisje summary so this
         # extra column does not noticeably slow down the page.
-        dash_station_ids = [int(s["station_id"]) for s in list_airplay_stations(active_only=True)]
-        dash_air_rev = airplay_revision()
+        dash_station_ids = [int(s["station_id"]) for s in cached_airplay_stations(AIR_REV, True)]
+        dash_air_rev = AIR_REV
         if dash_station_ids:
-            dash_cov = airplay_coverage(dash_station_ids)
+            dash_cov = cached_airplay_coverage(AIR_REV, tuple(sorted(dash_station_ids)))
             dash_first = dash_cov.get("first_date")
             dash_last = dash_cov.get("last_date")
         else:
@@ -2099,7 +2129,7 @@ elif view_key == "song":
                 row["downloaded"] = bool(song_meta.get("downloaded", False))
                 row["note"] = str(song_meta.get("note") or "")
 
-                radio = cached_airplay_song_presence(airplay_revision(), song_id, 7)
+                radio = cached_airplay_song_presence(AIR_REV, song_id, 7)
                 reporting = int(radio.get("reporting_stations") or 0)
                 spotify_url = spotify_search_url(str(row.artist), str(row.title))
 
@@ -2116,7 +2146,7 @@ elif view_key == "song":
                     with head3:
                         st.link_button("Spotify ↗", spotify_url, use_container_width=True)
 
-                    pop_frame = with_popularity(pd.DataFrame([row.to_dict()]), airplay_revision())
+                    pop_frame = with_popularity(pd.DataFrame([row.to_dict()]), AIR_REV)
                     popularity_label = f"{float(pop_frame.iloc[0].get('popularity', 0)):.0f}%" if not pop_frame.empty else "—"
                     fam_label = f"{float(row.familiarity):.0f}%" if has_chart_data else "—"
                     mom_label = f"{float(row.momentum):.0f}%" if has_chart_data else "—"
@@ -2134,6 +2164,30 @@ elif view_key == "song":
                     if row.note:
                         st.caption(f"Notatka: {row.note}")
 
+                # Load history once. It is reused by the source summary and the
+                # interactive chart, so peak dates are exact when that peak is
+                # present in our stored archive.
+                h = cached_song_history(REVISION, song_id)
+
+                def _source_peak_label(src: str) -> str:
+                    peak_value = row.get(f"{src}_peak")
+                    label = position_display(peak_value)
+                    if h.empty or label == "—":
+                        return label
+                    try:
+                        peak_pos = int(float(peak_value))
+                    except (TypeError, ValueError):
+                        return label
+                    src_h = h[h["source"] == src].copy()
+                    if src_h.empty:
+                        return label
+                    pos = pd.to_numeric(src_h["position"], errors="coerce")
+                    dates = pd.to_datetime(src_h.loc[pos == peak_pos, "chart_date"], errors="coerce").dropna()
+                    if dates.empty:
+                        # A source can report a historical peak older than our archive.
+                        return label
+                    return f"{label} · {dates.min().strftime('%d.%m.%Y')}"
+
                 def _source_frame(sources: list[str]) -> pd.DataFrame:
                     rows = []
                     for src in sources:
@@ -2141,7 +2195,7 @@ elif view_key == "song":
                             "Źródło": src,
                             "Pozycja": position_display(row.get(f"{src}_pos")),
                             "Tygodnie": int(row.get(f"{src}_weeks", 0) or 0),
-                            "Peak": position_display(row.get(f"{src}_peak")),
+                            "Peak": _source_peak_label(src),
                         })
                     return pd.DataFrame(rows)
 
@@ -2152,16 +2206,13 @@ elif view_key == "song":
                 ], ignore_index=True)
                 source_table = source_table[["Źródło", "Rola", "Pozycja", "Tygodnie", "Peak"]]
                 render_info_grid(source_table, key=f"song_sources_{song_id}", height=258)
-                st.caption("UK/Billboard są sygnałami pomocniczymi i nie zmieniają wag Chart Score.")
+                st.caption("Peak pokazuje też datę pierwszego osiągnięcia tej pozycji, jeśli ten punkt znajduje się w naszym archiwum. UK/Billboard są sygnałami pomocniczymi i nie zmieniają wag Chart Score.")
 
                 st.markdown("### Historia pozycji")
-                h = cached_song_history(REVISION, song_id)
                 if h.empty:
                     st.caption("Brak zapisanej historii pozycji dla tego utworu. Jeśli trafił tu z Emisji, może jeszcze nie występować w żadnym naszym notowaniu.")
                 else:
                     available_sources = list(dict.fromkeys(h["source"].tolist()))
-                    # Show every available source by default. The user can still
-                    # hide individual series with the multiselect.
                     default_sources = available_sources
                     hist_src_col, hist_scale_col = st.columns([3, 1])
                     selected_sources = hist_src_col.multiselect("Źródła na wykresie", available_sources, default=default_sources, key=f"history_sources_{song_id}")
@@ -2173,10 +2224,15 @@ elif view_key == "song":
                         st.caption("Wybierz przynajmniej jedno źródło do wykresu.")
                     else:
                         plot_df = hp.copy()
-                        maxpos = max(20, int(plot_df.position.max()))
+                        plot_df["chart_date"] = pd.to_datetime(plot_df["chart_date"], errors="coerce").dt.normalize()
+                        plot_df = plot_df.dropna(subset=["chart_date", "position"]).sort_values(["source", "chart_date"])
+                        maxpos = max(20, int(pd.to_numeric(plot_df.position, errors="coerce").max()))
                         if scale_mode.startswith("Nieliniowa"):
-                            plot_df["position_plot"] = plot_df["position"].astype(float).map(math.sqrt)
-                            fig = px.line(plot_df, x="chart_date", y="position_plot", color="source", markers=True)
+                            plot_df["position_plot"] = pd.to_numeric(plot_df["position"], errors="coerce").astype(float).map(math.sqrt)
+                            fig = px.line(
+                                plot_df, x="chart_date", y="position_plot", color="source", markers=True,
+                                custom_data=["position"],
+                            )
                             ticks = [x for x in [1, 2, 3, 5, 10, 20, 40, 60, 80, 100, 150, 200] if x <= maxpos]
                             if maxpos not in ticks:
                                 ticks.append(maxpos)
@@ -2185,15 +2241,43 @@ elif view_key == "song":
                                 tickvals=[math.sqrt(x) for x in ticks], ticktext=[str(x) for x in ticks],
                                 title="Pozycja (skala nieliniowa)",
                             )
-                            fig.update_traces(customdata=plot_df[["position"]], hovertemplate="%{x|%Y-%m-%d}<br>Pozycja #%{customdata[0]}<extra></extra>")
                         else:
-                            fig = px.line(plot_df, x="chart_date", y="position", color="source", markers=True)
+                            fig = px.line(
+                                plot_df, x="chart_date", y="position", color="source", markers=True,
+                                custom_data=["position"],
+                            )
                             fig.update_yaxes(autorange="reversed", range=[maxpos + 3, 1], dtick=5, title="Pozycja")
-                        fig.update_layout(height=430, legend=dict(orientation="h", yanchor="top", y=-0.12, x=0), margin=dict(t=12,b=65,l=35,r=20))
+
+                        # custom_data is attached per trace by Plotly Express. The
+                        # old code assigned one global DataFrame to every trace,
+                        # which could show e.g. '#1' while hovering a completely
+                        # different vertical position.
+                        fig.update_traces(
+                            hovertemplate="%{fullData.name} · #%{customdata[0]}<extra></extra>",
+                            marker=dict(size=7),
+                        )
+                        fig.update_layout(
+                            height=430,
+                            hovermode="x unified",
+                            hoverdistance=100,
+                            spikedistance=-1,
+                            legend=dict(orientation="h", yanchor="top", y=-0.12, x=0),
+                            margin=dict(t=12, b=65, l=35, r=20),
+                        )
+                        fig.update_xaxes(
+                            title=None,
+                            hoverformat="%d.%m.%Y",
+                            showspikes=True,
+                            spikemode="across",
+                            spikesnap="cursor",
+                            spikethickness=1,
+                            spikecolor="rgba(255,255,255,0.45)",
+                        )
                         st.plotly_chart(fig, use_container_width=True)
+                        st.caption("Najedź na datę: pionowa linia pokazuje wspólny przekrój, a dymek wszystkie listy mające punkt tego dnia. Data jest dzienna — bez godziny.")
 
                 st.markdown("### Emisje radiowe")
-                song_airplay_stations = list_airplay_stations(active_only=True)
+                song_airplay_stations = cached_airplay_stations(AIR_REV, True)
                 all_song_station_ids = [int(s["station_id"]) for s in song_airplay_stations]
                 song_station_labels = {int(s["station_id"]): str(s["name"]) for s in song_airplay_stations}
                 song_core_ids = [
@@ -2226,7 +2310,7 @@ elif view_key == "song":
                     if not song_station_ids:
                         st.info("Wybierz przynajmniej jedną stację.")
                     else:
-                        song_cov = airplay_coverage(all_song_station_ids)
+                        song_cov = cached_airplay_coverage(AIR_REV, tuple(sorted(all_song_station_ids)))
                         song_last_date = song_cov.get("last_date")
                         song_first_date = song_cov.get("first_date")
                         song_air_end = date.fromisoformat(str(song_last_date)) if song_last_date else date.today()
@@ -2238,7 +2322,7 @@ elif view_key == "song":
                             default_preset="Ostatni tydzień",
                         )
                         song_air_detail = cached_airplay_track_detail(
-                            airplay_revision(),
+                            AIR_REV,
                             tuple(sorted(song_station_ids)),
                             song_air_start.isoformat(),
                             song_air_end.isoformat(),
@@ -2250,7 +2334,7 @@ elif view_key == "song":
                         song_avg_day = song_spins / song_air_days
                         song_avg_station_day = song_spins / song_air_days / max(1, song_station_count)
                         song_last_play = str(song_air_detail.get("last_play") or "—").replace("T", " ")
-                        song_station_cov = airplay_station_coverage(song_station_ids, song_air_start, song_air_end)
+                        song_station_cov = cached_airplay_station_coverage(AIR_REV, tuple(sorted(song_station_ids)), song_air_start.isoformat(), song_air_end.isoformat())
                         song_reporting_count = sum(1 for x in song_station_cov if int(x.get("plays") or 0) > 0)
                         range_reach = (100.0 * song_station_count / song_reporting_count) if song_reporting_count else float("nan")
                         range_rotation = min(100.0, 100.0 * song_avg_station_day / 6.0)
@@ -2327,7 +2411,7 @@ elif view_key == "song":
                             # preset or either exact date immediately changes both the
                             # one-row summary above and these station/day details.
                             detail_for_range = cached_airplay_track_detail(
-                                airplay_revision(),
+                                AIR_REV,
                                 tuple(sorted(song_station_ids)),
                                 song_air_start.isoformat(),
                                 song_air_end.isoformat(),
@@ -2420,7 +2504,7 @@ elif view_key == "archive":
                     historical_scores[score_cols], on="song_id", how="left",
                 )
             hist_presence = pd.DataFrame(
-                cached_airplay_presence_at(airplay_revision(), 7, str(meta["chart_date"])).get("rows") or []
+                cached_airplay_presence_at(AIR_REV, 7, str(meta["chart_date"])).get("rows") or []
             )
             if not hist_presence.empty and "radio_reach" in hist_presence.columns:
                 hist_keep = [c for c in ["song_id", "radio_reach", "spins"] if c in hist_presence.columns]
@@ -2432,7 +2516,7 @@ elif view_key == "archive":
                 entries["airplay_spins_7d"] = 0
 
             hist_pop = pd.DataFrame(
-                cached_airplay_presence_at(airplay_revision(), 28, str(meta["chart_date"])).get("rows") or []
+                cached_airplay_presence_at(AIR_REV, 28, str(meta["chart_date"])).get("rows") or []
             )
             if not hist_pop.empty and {"song_id", "spins"}.issubset(hist_pop.columns):
                 hist_pop = hist_pop[hist_pop["song_id"].notna()].copy()
@@ -2486,8 +2570,7 @@ elif view_key == "archive":
 
 elif view_key == "airplay":
     st.subheader("📡 Emisje")
-    stations = list_airplay_stations(active_only=True)
-    all_known_stations = list_airplay_stations(active_only=False)
+    stations = cached_airplay_stations(AIR_REV, True)
     running = active_job() is not None
 
     if not stations:
@@ -2503,7 +2586,7 @@ elif view_key == "airplay":
             sid for sid, name in station_labels.items()
             if name.casefold() in {"rmf fm", "zet", "eska", "radio zet", "radio eska"}
         ]
-        all_coverage = airplay_coverage(all_station_ids)
+        all_coverage = cached_airplay_coverage(AIR_REV, tuple(sorted(all_station_ids)))
         first_date = all_coverage.get("first_date")
         last_date = all_coverage.get("last_date")
         default_end = date.fromisoformat(str(last_date)) if last_date else date.today()
@@ -2538,19 +2621,19 @@ elif view_key == "airplay":
         )
 
         expected_windows = len(completed_windows_in_range(range_start, range_end)) * len(selected_ids) if selected_ids else 0
-        range_coverage = airplay_coverage(selected_ids, range_start, range_end) if selected_ids else {}
+        range_coverage = cached_airplay_coverage(AIR_REV, tuple(sorted(selected_ids)), range_start.isoformat(), range_end.isoformat()) if selected_ids else {}
         ok_windows = int(range_coverage.get("ok_windows") or 0)
         coverage_pct = (100.0 * ok_windows / expected_windows) if expected_windows else 0.0
         per_station_expected = len(completed_windows_in_range(range_start, range_end)) if selected_ids else 0
-        station_cov_rows = airplay_station_coverage(selected_ids, range_start, range_end) if selected_ids else []
+        station_cov_rows = cached_airplay_station_coverage(AIR_REV, tuple(sorted(selected_ids)), range_start.isoformat(), range_end.isoformat()) if selected_ids else []
         reporting_station_count = sum(1 for r in station_cov_rows if int(r.get("plays") or 0) > 0)
 
         if not selected_ids:
             st.info("Wybierz przynajmniej jedną stację.")
             summary_rows = []
-            air_rev = airplay_revision()
+            air_rev = AIR_REV
         else:
-            air_rev = airplay_revision()
+            air_rev = AIR_REV
             summary_rows = cached_airplay_summary(
                 air_rev, tuple(sorted(int(x) for x in selected_ids)),
                 range_start.isoformat(), range_end.isoformat(),
@@ -2643,7 +2726,7 @@ elif view_key == "airplay":
             # not force compute_scores() across the whole catalogue. Zasięg 7d
             # is global: all active/reporting stations, independent of this filter.
             basic = cached_basic_song_metrics(
-                chart_revision(), air_rev, tuple(sorted(int(x) for x in ranked["song_id"].tolist()))
+                CHART_REV, air_rev, tuple(sorted(int(x) for x in ranked["song_id"].tolist()))
             )
             if not basic.empty:
                 ranked = ranked.merge(basic, on="song_id", how="left")
@@ -2678,14 +2761,14 @@ elif view_key == "airplay":
 
 elif view_key == "library":
     st.subheader("🎵 Baza")
-    library_rows = pd.DataFrame(radio_library_catalog())
+    library_rows = cached_radio_library_catalog(song_catalog_revision()).copy()
     if library_rows.empty:
         st.warning("Nie ma jeszcze utworów ze statusem Baza. W zakładce Dane → Synchronizacja bazy radia wklej eksport i uruchom synchronizację.")
     else:
-        stations = list_airplay_stations(active_only=True)
+        stations = cached_airplay_stations(AIR_REV, True)
         all_station_ids = [int(s["station_id"]) for s in stations]
         station_labels = {int(s["station_id"]): str(s["name"]) for s in stations}
-        coverage_all = airplay_coverage(all_station_ids) if all_station_ids else {}
+        coverage_all = cached_airplay_coverage(AIR_REV, tuple(sorted(all_station_ids))) if all_station_ids else {}
         last_date = coverage_all.get("last_date")
         first_date = coverage_all.get("first_date")
         default_end = date.fromisoformat(str(last_date)) if last_date else date.today()
@@ -2714,12 +2797,12 @@ elif view_key == "library":
             earliest=earliest,
             default_preset="Ostatni tydzień",
         )
-        air_rev = airplay_revision()
+        air_rev = AIR_REV
         summary_rows = cached_airplay_summary(
             air_rev, tuple(sorted(selected_ids)), range_start.isoformat(), range_end.isoformat()
         ) if selected_ids else []
         air = pd.DataFrame(summary_rows)
-        station_cov_rows = airplay_station_coverage(selected_ids, range_start, range_end) if selected_ids else []
+        station_cov_rows = cached_airplay_station_coverage(AIR_REV, tuple(sorted(selected_ids)), range_start.isoformat(), range_end.isoformat()) if selected_ids else []
         reporting_station_count = sum(1 for r in station_cov_rows if int(r.get("plays") or 0) > 0)
         period_days = max(1, (range_end - range_start).days + 1)
 
@@ -2731,7 +2814,7 @@ elif view_key == "library":
             if state_col in lib.columns:
                 lib[state_col] = lib[state_col].fillna(0).astype(bool)
         metric_ids = tuple(sorted(int(x) for x in lib["song_id"].tolist()))
-        basic = cached_basic_song_metrics(chart_revision(), air_rev, metric_ids)
+        basic = cached_basic_song_metrics(CHART_REV, air_rev, metric_ids)
         if not basic.empty:
             lib = lib.merge(basic, on="song_id", how="left")
 

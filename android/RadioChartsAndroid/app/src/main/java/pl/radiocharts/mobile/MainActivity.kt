@@ -856,15 +856,16 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 
         val latest=points.maxByOrNull{it.chart_date}!!
         val peak=points.minOf{it.position}
+        val peakPoint=points.filter{it.position==peak}.minByOrNull{it.chart_date}!!
         val sources=points.map{it.source}.distinct()
         Row(Modifier.fillMaxWidth().padding(vertical=6.dp),horizontalArrangement=Arrangement.spacedBy(24.dp)) {
             if(allSources) {
                 MetricTiny("Listy",sources.size.toString())
                 MetricTiny("Punkty",points.size.toString())
-                MetricTiny("Peak","#$peak")
+                MetricTiny("Peak ${peakPoint.source}","#$peak · ${shortChartDate(peakPoint.chart_date)}")
             } else {
                 MetricTiny("Ostatnia","#${latest.position}")
-                MetricTiny("Peak","#$peak")
+                MetricTiny("Peak","#$peak · ${shortChartDate(peakPoint.chart_date)}")
                 MetricTiny("Notowania",points.size.toString())
             }
             MetricTiny("Zakres","${shortChartDate(points.minBy{it.chart_date}.chart_date)} – ${shortChartDate(points.maxBy{it.chart_date}.chart_date)}")
@@ -885,9 +886,9 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 
 private fun shortChartDate(raw:String):String {
     return runCatching {
-        val d=LocalDate.parse(raw)
+        val d=LocalDate.parse(raw.take(10))
         "${d.dayOfMonth.toString().padStart(2,'0')}.${d.monthValue.toString().padStart(2,'0')}.${d.year}"
-    }.getOrDefault(raw)
+    }.getOrDefault(raw.take(10))
 }
 
 private val ToplistSeriesColors=listOf(
@@ -923,7 +924,13 @@ private fun chartOffset(
     val dateIndex=dates.withIndex().associate{it.value to it.index}
     val sources=points.map{it.source}.distinct()
     val bySource=points.groupBy{it.source}.mapValues{(_,pts)->pts.sortedBy{it.chart_date}}
-    var selected by remember(points){mutableStateOf<ChartPoint?>(null)}
+    var selectedDate by remember(points){mutableStateOf<String?>(null)}
+    val selectedPoints=selectedDate?.let { d ->
+        points.filter{it.chart_date==d}.sortedBy { p ->
+            val i=sources.indexOf(p.source)
+            if(i<0) Int.MAX_VALUE else i
+        }
+    }.orEmpty()
 
     Row(modifier.padding(top=2.dp,bottom=4.dp)) {
         Column(
@@ -945,12 +952,10 @@ private fun chartOffset(
                                 if(event.type==PointerEventType.Move || event.type==PointerEventType.Press) {
                                     val pos=event.changes.firstOrNull()?.position ?: continue
                                     val w=size.width.toFloat().coerceAtLeast(1f)
-                                    val h=size.height.toFloat().coerceAtLeast(1f)
-                                    selected=points.minByOrNull { p ->
-                                        val o=chartOffset(p,dateIndex,dates.size,maxRank,w,h)
-                                        val dx=o.x-pos.x
-                                        val dy=o.y-pos.y
-                                        dx*dx+dy*dy
+                                    if(dates.isNotEmpty()) {
+                                        val raw=((pos.x.coerceIn(0f,w)/w)*(dates.size-1).coerceAtLeast(0).toFloat())
+                                        val idx=(raw+0.5f).toInt().coerceIn(0,dates.lastIndex)
+                                        selectedDate=dates[idx]
                                     }
                                 }
                             }
@@ -980,24 +985,32 @@ private fun chartOffset(
                             }
                         }
                     }
-                    selected?.let { p ->
-                        val o=chartOffset(p,dateIndex,dates.size,maxRank,w,h)
-                        drawLine(Color.White.copy(alpha=0.35f),Offset(o.x,0f),Offset(o.x,h),strokeWidth=1.5f)
-                        drawCircle(Color.White,radius=8f,center=o,style=Stroke(width=2.5f))
+                    selectedDate?.let { d ->
+                        val idx=dateIndex[d] ?: 0
+                        val x=if(dates.size<=1) w/2f else w*idx.toFloat()/(dates.size-1).toFloat()
+                        drawLine(Color.White.copy(alpha=0.42f),Offset(x,0f),Offset(x,h),strokeWidth=1.5f)
+                        selectedPoints.forEach { p ->
+                            val o=chartOffset(p,dateIndex,dates.size,maxRank,w,h)
+                            drawCircle(Color.White,radius=8f,center=o,style=Stroke(width=2.5f))
+                        }
                     }
                 }
-                selected?.let { p ->
+                selectedDate?.let { d ->
                     Surface(
                         modifier=Modifier.align(Alignment.TopEnd).padding(8.dp),
                         shape=MaterialTheme.shapes.small,
                         tonalElevation=5.dp,
                     ) {
-                        Text(
-                            "${p.source} · miejsce #${p.position} · ${shortChartDate(p.chart_date)}",
-                            modifier=Modifier.padding(horizontal=10.dp,vertical=6.dp),
-                            style=MaterialTheme.typography.labelLarge,
-                            maxLines=1,
-                        )
+                        Column(Modifier.padding(horizontal=10.dp,vertical=7.dp)) {
+                            Text(shortChartDate(d),style=MaterialTheme.typography.labelLarge,fontWeight=FontWeight.Bold)
+                            selectedPoints.forEach { p ->
+                                Text(
+                                    "${p.source}  #${p.position}",
+                                    style=MaterialTheme.typography.labelMedium,
+                                    color=toplistSeriesColor(sources.indexOf(p.source).coerceAtLeast(0)),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1008,7 +1021,7 @@ private fun chartOffset(
                 Text(shortChartDate(dates.last()),style=MaterialTheme.typography.labelSmall)
             }
             Text(
-                "Najedź myszą lub dotknij punktu, aby zobaczyć dokładną datę i miejsce.",
+                "Najedź lub dotknij daty: pionowa linia zaznaczy wszystkie punkty toplist z tego dnia.",
                 style=MaterialTheme.typography.labelSmall,
                 color=Color(0xFFB5BDC9),
                 modifier=Modifier.padding(top=2.dp),

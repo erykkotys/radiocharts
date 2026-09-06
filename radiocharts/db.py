@@ -1276,19 +1276,16 @@ def radio_library_catalog() -> list[dict]:
     init_db()
     with connect() as con:
         rows = con.execute(
-            """WITH chart_first AS (
-                   SELECT ce.song_id,MIN(i.chart_date) AS first_chart_date
-                   FROM chart_entries ce JOIN chart_issues i ON i.id=ce.issue_id
-                   GROUP BY ce.song_id
-               )
-               SELECT s.id AS song_id,s.artist,s.title,s.release_date,cf.first_chart_date,
+            """SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+                      (SELECT MIN(i.chart_date)
+                         FROM chart_entries ce JOIN chart_issues i ON i.id=ce.issue_id
+                        WHERE ce.song_id=s.id) AS first_chart_date,
                       CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.heard END AS heard,
                       n.status,
                       CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.downloaded END AS downloaded,
                       n.note,n.updated_at
                FROM songs s
                JOIN song_notes n ON n.song_id=s.id
-               LEFT JOIN chart_first cf ON cf.song_id=s.id
                WHERE n.status LIKE 'Baza %'
                ORDER BY n.status COLLATE NOCASE,s.artist COLLATE NOCASE,s.title COLLATE NOCASE,s.id"""
         ).fetchall()
@@ -2404,19 +2401,16 @@ def airplay_summary(station_ids: Iterable[int], start_date: date | str, end_date
                     SELECT song_id,SUM(station_spins) AS spins,COUNT(*) AS stations_count,
                            MAX(station_spins) AS max_station_spins,MAX(station_last) AS last_play
                     FROM per_station GROUP BY song_id
-                ), chart_first AS (
-                    SELECT ce.song_id,MIN(i.chart_date) AS first_chart_date
-                    FROM chart_entries ce JOIN chart_issues i ON i.id=ce.issue_id
-                    GROUP BY ce.song_id
                 )
                 SELECT t.song_id,s.artist,s.title,s.release_date,s.artist_key,s.title_key,
-                       cf.first_chart_date,
+                       (SELECT MIN(i2.chart_date)
+                          FROM chart_entries ce2 JOIN chart_issues i2 ON i2.id=ce2.issue_id
+                         WHERE ce2.song_id=t.song_id) AS first_chart_date,
                        t.spins,t.stations_count,t.max_station_spins,
                        COALESCE(r.station_name,'') AS top_station,t.last_play,
                        ROUND(1.0*t.spins/CASE WHEN t.stations_count>0 THEN t.stations_count ELSE 1 END,1) AS avg_per_station
                 FROM totals t JOIN songs s ON s.id=t.song_id
                 LEFT JOIN ranked r ON r.song_id=t.song_id AND r.rn=1
-                LEFT JOIN chart_first cf ON cf.song_id=t.song_id
                 ORDER BY t.spins DESC,t.stations_count DESC,s.artist COLLATE NOCASE,s.title COLLATE NOCASE""",
             (*ids, start_ts, end_ts),
         ).fetchall()

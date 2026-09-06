@@ -359,6 +359,10 @@ Android 0.1.6 przypina `Baza CF1` i `Baza CF2` na początku rozwijanych list sta
 
 Android 0.1.7 przywraca `Baza CF1` i `Baza CF2` do naturalnej kolejności statusów zwracanej przez API. Szybka zmiana statusu korzysta teraz z przewijalnego okna wyboru, dzięki czemu wszystkie pozycje — także końcowe CF1/CF2 — są dostępne bez przepinania ich na początek. W ekranie Utwór wiersze sekcji **Pozycje na listach** są klikalne i otwierają pełny wykres historii wybranej toplisty. Ekran wykresu przełącza Androida w orientację poziomą, chowa dolną nawigację, pokazuje aktualną pozycję, peak, liczbę notowań i przebieg pozycji w czasie.
 
+### 0.4.11 — wspólny crosshair toplist + szybsza nawigacja
+
+Web i Android pokazują teraz po jednej dacie wszystkie realne punkty toplist na wspólnym pionowym crosshairze. Tooltip nie pokazuje godziny, tylko datę oraz listę i miejsce. Naprawiono też błąd webowego tooltipa, który przy wielu seriach potrafił wyświetlać pozycję z innego wiersza niż wskazywany punkt. Peak ma datę pierwszego osiągnięcia najlepszej zapisanej pozycji. Web cache'uje metadane airplay/Bazy i używa lżejszych zapytań `first_chart_date`, dzięki czemu przełączanie Dashboard → Emisje/Baza jest szybsze po pierwszym wejściu.
+
 ### 0.4.10 — Android: wspólny wykres toplist i szczegóły punktów
 
 Android 0.1.8 dodaje w Utworze wspólny wykres wszystkich toplist obok pozostawionych osobnych wykresów RMF/ZET/ESKA/OLIA/OLIS. Wspólny widok używa jednej osi dat, osobnej linii i legendy dla każdej listy. Na punktach wykresu po najechaniu kursorem lub dotknięciu pokazywane są dokładna lista, miejsce i data. Ekran wykresu nadal działa w orientacji poziomej.

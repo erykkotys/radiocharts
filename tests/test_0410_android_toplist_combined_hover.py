@@ -15,11 +15,12 @@ def test_chart_point_details_support_hover_and_touch():
     text = MAIN.read_text(encoding="utf-8")
     assert 'PointerEventType.Move' in text
     assert 'PointerEventType.Press' in text
-    assert 'miejsce #${p.position}' in text
-    assert 'shortChartDate(p.chart_date)' in text
+    assert 'selectedDate' in text
+    assert '"${p.source}  #${p.position}"' in text
+    assert 'shortChartDate(d)' in text
 
 def test_versions_0410():
     gradle=(ROOT/"android/RadioChartsAndroid/app/build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 9' in gradle
-    assert 'versionName = "0.1.8"' in gradle
-    assert (ROOT/"VERSION").read_text(encoding="utf-8").strip()=="0.4.10"
+    assert 'versionCode = 10' in gradle
+    assert 'versionName = "0.1.9"' in gradle
+    assert (ROOT/"VERSION").read_text(encoding="utf-8").strip()=="0.4.11"
