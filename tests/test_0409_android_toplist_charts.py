@@ -13,3 +13,5 @@ def test_android_toplist_rows_open_landscape_chart_screen():
     assert 'drawPath(path,Accent' in main
     assert 'val chartOpen = currentBackStackEntry?.destination?.route?.startsWith("chart/") == true' in main
     assert 'if (!chartOpen)' in main
+    assert 'OutlinedButton(onClick={ leaveChart() })' in main
+    assert 'OutlinedButton(onClick={leaveChart})' not in main

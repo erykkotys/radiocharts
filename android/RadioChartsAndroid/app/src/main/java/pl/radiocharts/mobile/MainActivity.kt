@@ -813,7 +813,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     val s=song
     Column(Modifier.fillMaxSize().padding(horizontal=12.dp,vertical=8.dp)) {
         Row(verticalAlignment=Alignment.CenterVertically) {
-            OutlinedButton(onClick={leaveChart}){Text("‹ Wróć")}
+            OutlinedButton(onClick={ leaveChart() }){Text("‹ Wróć")}
             Column(Modifier.padding(start=10.dp).weight(1f)) {
                 Text(source,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
                 Text(
