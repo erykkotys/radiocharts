@@ -1034,6 +1034,25 @@ function(params) {
 """)
 
 
+GRID_CELL_VALUE_CHANGED_HANDLER = JsCode("""
+function(params) {
+  try {
+    const field = params && params.colDef ? String(params.colDef.field || '') : '';
+    if (field !== 'status') return;
+    const row = params && params.data ? params.data : {};
+    const listened = String(row.status || 'Nie słuchałem') !== 'Nie słuchałem';
+    // Update the derived listened indicator immediately in the browser.
+    // Streamlit persists it from Status on the rerun; this client-side refresh
+    // prevents the checkbox from lagging behind the just-selected status.
+    row.heard = listened;
+    if (params.api && params.node) {
+      params.api.refreshCells({rowNodes: [params.node], columns: ['heard'], force: true});
+    }
+  } catch(e) {}
+}
+""")
+
+
 GRID_SHOULD_RETURN = JsCode("""
 function(params) {
   const trigger = String((params && params.streamlitRerunEventTriggerName) || '');
@@ -1460,6 +1479,7 @@ def render_song_grid(
         rowHeight=36, animateRows=False,
         onCellClicked=GRID_CLICK_HANDLER,
         onCellDoubleClicked=GRID_DOUBLE_CLICK_HANDLER,
+        onCellValueChanged=GRID_CELL_VALUE_CHANGED_HANDLER,
     )
     if "_row_number" in show.columns:
         row_number_refresh = JsCode("""
@@ -1526,6 +1546,7 @@ def render_song_grid(
             "heard", "✓", width=62, minWidth=58, maxWidth=68,
             editable=False, sortable=True, filter=False, cellDataType="boolean",
             cellRenderer="agCheckboxCellRenderer",
+            cellClass="rc-listened-checkbox",
             headerTooltip="Przesłuchany — zaznacza się automatycznie, gdy Status jest inny niż „Nie słuchałem”.",
             cellStyle={"textAlign": "center"},
         )
@@ -1540,6 +1561,7 @@ def render_song_grid(
             "downloaded", "Downloaded", width=108, minWidth=98,
             editable=bool(editable_state), cellDataType="boolean",
             cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor",
+            cellClass="rc-downloaded-checkbox",
             headerTooltip="Utwór pobrany / dodany do lokalnej biblioteki po odsłuchu.",
         )
     if "note" in show.columns:
@@ -1664,6 +1686,17 @@ def render_song_grid(
         custom_css={
             ".ag-row-selected": {"background-color": "rgba(74, 126, 187, 0.34) !important"},
             ".ag-cell-focus": {"border": "none !important", "outline": "none !important"},
+            # Keep both state columns visually strong, but distinct. AG Grid uses
+            # the wrapper's foreground color for both the checked glyph and its
+            # outline in the Streamlit theme.
+            ".rc-listened-checkbox .ag-checkbox-input-wrapper.ag-checked": {
+                "color": "#ff3b3b !important",
+                "--ag-checkbox-checked-color": "#ff3b3b",
+            },
+            ".rc-downloaded-checkbox .ag-checkbox-input-wrapper.ag-checked": {
+                "color": "#22c55e !important",
+                "--ag-checkbox-checked-color": "#22c55e",
+            },
         },
         key=key,
     )

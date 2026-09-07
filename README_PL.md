@@ -369,6 +369,12 @@ Android 0.1.8 dodaje w Utworze wspólny wykres wszystkich toplist obok pozostawi
 
 
 
+### 1.0.2 — natychmiastowy stan Przesłuchany i rozróżnione checkboxy
+
+Kolumna **✓ (Przesłuchany)** reaguje teraz od razu po zmianie Statusu w tabeli: **Nie słuchałem** odznacza checkbox, a każdy inny status zaznacza go bez czekania na kolejne przeładowanie widoku. Stan nadal jest pochodny od Statusu i nie może zostać ustawiony sprzecznie ręcznie.
+
+Dla szybszego odczytu wizualnego oba checkboxy mają osobne kolory: **Przesłuchany = czerwony**, **Downloaded = zielony**. Niezaznaczone pola pozostają neutralne.
+
 ### 1.0.1 — prostsze otwieranie utworu i czytelny stan przesłuchania
 
 Usunięto osobną kolumnę **Otwórz** z tabel. Kartę konkretnego utworu otwiera teraz **dwuklik na tytule lub wykonawcy**, dzięki czemu odzyskane miejsce zostaje dla właściwych danych.

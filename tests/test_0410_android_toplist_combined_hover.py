@@ -21,6 +21,6 @@ def test_chart_point_details_support_hover_and_touch():
 
 def test_versions_0410():
     gradle=(ROOT/"android/RadioChartsAndroid/app/build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 12' in gradle
-    assert 'versionName = "1.0.1"' in gradle
-    assert (ROOT/"VERSION").read_text(encoding="utf-8").strip()=="1.0.1"
+    assert 'versionCode = 13' in gradle
+    assert 'versionName = "1.0.2"' in gradle
+    assert (ROOT/"VERSION").read_text(encoding="utf-8").strip()=="1.0.2"

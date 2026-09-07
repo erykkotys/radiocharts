@@ -14,10 +14,10 @@ def test_android_015_compacts_song_list_filters():
     assert 'CompactFilterButton(if(count == 0) "Stacje" else "Stacje ($count)")' in main
     assert 'Text("Odśwież / zastosuj filtry")' not in main
     assert 'trailingIcon={ TextButton(onClick={reload()}) { Text("OK") } }' in main
-    assert 'versionCode = 12' in gradle
-    assert 'versionName = "1.0.1"' in gradle
+    assert 'versionCode = 13' in gradle
+    assert 'versionName = "1.0.2"' in gradle
 
 
 def test_version_0407():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.0.1"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.0.2"
