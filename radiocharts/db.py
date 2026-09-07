@@ -1395,11 +1395,13 @@ def update_note(song_id: int, heard: bool, status: str, note: str, downloaded: b
         if downloaded is None:
             existing = con.execute("SELECT downloaded FROM song_notes WHERE song_id=?", (int(song_id),)).fetchone()
             downloaded = bool(existing["downloaded"]) if existing else False
-        # Invariant: assigning a real Baza category means the title has already
-        # been auditioned and exists locally. Keep UI edits consistent with TSV sync.
+        # v1.0 keeps the legacy ``heard`` column for compatibility, but the UI no
+        # longer exposes a separate listened checkbox. Any editorial status other
+        # than the default means the title has been auditioned.
+        heard = str(status) != "Nie słuchałem"
+        # Assigning a real Baza category additionally means the title exists locally.
         real_base = {f"Baza {cat}" for cat in RADIO_LIBRARY_CATEGORIES}
         if str(status) in real_base:
-            heard = True
             downloaded = True
         con.execute(
             """INSERT INTO song_notes(song_id,heard,status,downloaded,note,updated_at) VALUES(?,?,?,?,?,?)

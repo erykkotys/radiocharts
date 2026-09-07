@@ -238,6 +238,7 @@ def render_compact_metrics(items: list[tuple[str, object]], columns: int | None 
 
 
 AIRPLAY_QUICK_RANGES = [
+    "Dzisiaj (1d)",
     "Ostatni tydzień",
     "Ostatnie 2 tyg.",
     "Ostatni miesiąc",
@@ -266,7 +267,9 @@ def _subtract_months(anchor: date, months: int) -> date:
 def airplay_quick_range(preset: str, end_date: date, earliest: date | None = None) -> tuple[date, date]:
     """Resolve a compact preset to an inclusive date range."""
     label = str(preset or "")
-    if label == "Ostatni tydzień":
+    if label == "Dzisiaj (1d)":
+        start = end_date
+    elif label == "Ostatni tydzień":
         start = end_date - timedelta(days=6)
     elif label == "Ostatnie 2 tyg.":
         start = end_date - timedelta(days=13)
@@ -1311,31 +1314,89 @@ def render_preview_button(song_id: int | str, artist: str, title: str, spotify: 
 @st.fragment
 def render_song_note_editor(
     song_id: int,
-    heard_value: bool,
     status_value: str,
     downloaded_value: bool,
     note_value: str,
 ) -> None:
-    """Small fragment so editing one song does not rerun/repaint the whole detail page."""
+    """Song editor: status/downloaded autosave; the Save button is only for notes."""
+    current_status = normalized_status(status_value)
+    status_key = f"song_status_{song_id}"
+    downloaded_key = f"song_downloaded_{song_id}"
+    note_key = f"song_note_{song_id}"
+    saved_note_key = f"song_saved_note_{song_id}"
+
+    if status_key not in st.session_state:
+        st.session_state[status_key] = current_status
+    if downloaded_key not in st.session_state:
+        st.session_state[downloaded_key] = bool(downloaded_value)
+    if note_key not in st.session_state:
+        st.session_state[note_key] = note_value or ""
+    if saved_note_key not in st.session_state:
+        st.session_state[saved_note_key] = note_value or ""
+
+    real_base = set(BASE_STATUSES)
+
+    def _save_status() -> None:
+        status = normalized_status(st.session_state.get(status_key))
+        downloaded = bool(st.session_state.get(downloaded_key, False))
+        if status in real_base:
+            downloaded = True
+            st.session_state[downloaded_key] = True
+        update_note(
+            song_id,
+            status != "Nie słuchałem",
+            status,
+            str(st.session_state.get(saved_note_key, note_value or "")),
+            downloaded=downloaded,
+        )
+        st.toast("Status zapisany")
+
+    def _save_downloaded() -> None:
+        status = normalized_status(st.session_state.get(status_key))
+        downloaded = bool(st.session_state.get(downloaded_key, False))
+        if status in real_base:
+            # Real Baza statuses always imply a local download. Keep the UI in
+            # sync with the invariant enforced by update_note().
+            downloaded = True
+            st.session_state[downloaded_key] = True
+        update_note(
+            song_id,
+            status != "Nie słuchałem",
+            status,
+            str(st.session_state.get(saved_note_key, note_value or "")),
+            downloaded=downloaded,
+        )
+        st.toast("Downloaded zapisany")
+
     with st.container(border=True):
+        n1, n2 = st.columns([1.65, 1.15])
+        n1.selectbox(
+            "Status",
+            STATUSES,
+            key=status_key,
+            on_change=_save_status,
+            help="Zmiana statusu zapisuje się automatycznie. Każdy status poza „Nie słuchałem” oznacza, że utwór został przesłuchany.",
+        )
+        n2.checkbox(
+            "Downloaded",
+            key=downloaded_key,
+            on_change=_save_downloaded,
+            help="Utwór pobrany / dodany do lokalnej biblioteki.",
+        )
         with st.form(f"note_form_{song_id}"):
-            n1, n2, n3, n4, n5 = st.columns([1.0, 1.6, .75, 4.5, .8])
-            heard = n1.checkbox("Przesłuchany", value=bool(heard_value))
-            current_status = normalized_status(status_value)
-            idx = STATUSES.index(current_status) if current_status in STATUSES else 0
-            status = n2.selectbox("Status", STATUSES, index=idx)
-            downloaded = n3.checkbox(
-                "DL",
-                value=bool(downloaded_value),
-                help="Utwór pobrany / dodany do lokalnej biblioteki po odsłuchu.",
-            )
-            note = n4.text_input("Notatka", value=note_value or "")
-            with n5:
-                st.caption("Zapis")
-                save_note = st.form_submit_button("Zapisz", use_container_width=True)
+            note = st.text_input("Notatka", key=note_key)
+            save_note = st.form_submit_button("Zapisz", use_container_width=True)
             if save_note:
-                update_note(song_id, heard, status, note, downloaded=downloaded)
-                st.toast("Zapisano")
+                status = normalized_status(st.session_state.get(status_key))
+                update_note(
+                    song_id,
+                    status != "Nie słuchałem",
+                    status,
+                    note,
+                    downloaded=bool(st.session_state.get(downloaded_key, False)),
+                )
+                st.session_state[saved_note_key] = note
+                st.toast("Notatka zapisana")
 
 
 PERCENT_FORMATTER = JsCode("""
@@ -1450,12 +1511,6 @@ def render_song_grid(
         )
     if "preview" in show.columns:
         gb.configure_column("preview", "Odsłuch", minWidth=90, width=98, sortable=False, filter=False, valueFormatter=PREVIEW_LABEL_FORMATTER, cellStyle={"cursor": "pointer"})
-    if "heard" in show.columns:
-        gb.configure_column(
-            "heard", "✓", width=65, minWidth=58,
-            editable=bool(editable_state), cellDataType="boolean",
-            cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor",
-        )
     if "status" in show.columns:
         gb.configure_column(
             "status", "Status", minWidth=150, width=165,
@@ -1464,7 +1519,7 @@ def render_song_grid(
         )
     if "downloaded" in show.columns:
         gb.configure_column(
-            "downloaded", "DL", width=62, minWidth=56,
+            "downloaded", "Downloaded", width=108, minWidth=98,
             editable=bool(editable_state), cellDataType="boolean",
             cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor",
             headerTooltip="Utwór pobrany / dodany do lokalnej biblioteki po odsłuchu.",
@@ -1576,7 +1631,7 @@ def render_song_grid(
 
     options = gb.build()
     options.pop("autoSizeStrategy", None)
-    original = show[[c for c in ["song_id", "heard", "status", "downloaded", "note"] if c in show.columns]].copy()
+    original = show[[c for c in ["song_id", "status", "downloaded", "note"] if c in show.columns]].copy()
 
     response = AgGrid(
         show,
@@ -1611,10 +1666,10 @@ def render_song_grid(
             except (TypeError, ValueError):
                 pass
 
-    if editable_state and {"song_id", "heard", "status"}.issubset(edited.columns) and not original.empty:
+    if editable_state and {"song_id", "status"}.issubset(edited.columns) and not original.empty:
         before = original.set_index("song_id")
         changed = 0
-        cols_for_edit = [c for c in ["song_id", "heard", "status", "downloaded", "note"] if c in edited.columns]
+        cols_for_edit = [c for c in ["song_id", "status", "downloaded", "note"] if c in edited.columns]
         for r in edited[cols_for_edit].itertuples(index=False):
             try:
                 sid = int(r.song_id)
@@ -1628,12 +1683,12 @@ def render_song_grid(
             old_downloaded = bool(prev["downloaded"]) if "downloaded" in before.columns else False
             new_downloaded = bool(getattr(r, "downloaded", old_downloaded))
             if (
-                bool(r.heard) != bool(prev.heard)
-                or str(r.status) != str(prev.status)
+                str(r.status) != str(prev.status)
                 or new_downloaded != old_downloaded
                 or new_note != old_note
             ):
-                update_note(sid, bool(r.heard), str(r.status), new_note, downloaded=new_downloaded)
+                new_status = normalized_status(str(r.status))
+                update_note(sid, new_status != "Nie słuchałem", new_status, new_note, downloaded=new_downloaded)
                 changed += 1
         if changed:
             st.toast(f"Zapisano status dla {changed} utworów.")
@@ -1904,8 +1959,8 @@ if view_key == "dashboard":
             "6 mies.": 183,
             "Całość": 0,
         }
-        ctl_count, ctl_period, ctl_scope, ctl_status, ctl_dl, ctl_layout, ctl_fam, ctl_mom, ctl_unheard = st.columns(
-            [.88, .96, 1.18, 1.02, .62, .68, .80, .80, .76],
+        ctl_count, ctl_period, ctl_scope, ctl_status, ctl_dl, ctl_layout, ctl_fam, ctl_mom = st.columns(
+            [.88, .96, 1.18, 1.02, .78, .68, .80, .80],
             vertical_alignment="bottom",
         )
         period_label = ctl_period.selectbox(
@@ -1972,9 +2027,6 @@ if view_key == "dashboard":
             )
             min_fam = ctl_fam.slider("Min. Chart Score", 0, 100, 0, format="%d%%")
             min_mom = ctl_mom.slider("Min. Momentum", 0, 100, 0, format="%d%%")
-            with ctl_unheard:
-                st.caption("Filtr")
-                only_unheard = st.checkbox("Nieprzesłuchane", key="dashboard_only_unheard")
             source_layout = {"Auto": "auto", "Pełny": "full", "Kompaktowy": "compact"}[table_layout_label]
 
             base = period_df.copy()
@@ -1990,8 +2042,7 @@ if view_key == "dashboard":
             view = base[(base.familiarity >= min_fam) & (base.momentum >= min_mom)].copy()
             view = apply_status_filter(view, selected_statuses)
             view = apply_download_filter(view, downloaded_choice)
-            search_col, unheard_col = st.columns([5.2, 1.0])
-            song_query = search_col.text_input(
+            song_query = st.text_input(
                 "Szukaj w Dashboardzie",
                 placeholder="wykonawca lub tytuł, np. meskie / Waligóra / Azizam",
                 key="dashboard_song_search",
@@ -1999,8 +2050,6 @@ if view_key == "dashboard":
             )
             if song_query.strip():
                 view = filter_song_rows(view, song_query)
-            if only_unheard:
-                view = view[~view.heard]
             view = view.reset_index(drop=True)
 
             count_key = "dashboard_count_display"
@@ -2028,7 +2077,6 @@ if view_key == "dashboard":
             view["spotify"] = [spotify_search_url(a, t) for a, t in zip(view.artist, view.title)]
             view["spotify_copy"] = view["spotify"]
             view["preview"] = "▶"
-            view["heard"] = view["heard"].fillna(False).astype(bool)
             view["status"] = view["status"].fillna("Nie słuchałem").astype(str)
             if "downloaded" not in view.columns:
                 view["downloaded"] = False
@@ -2036,7 +2084,7 @@ if view_key == "dashboard":
                 view["downloaded"] = view["downloaded"].fillna(False).astype(bool)
 
             cols = [
-                "song_id", "artist", "title", "release_month", "details", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
+                "song_id", "artist", "title", "release_month", "details", "preview", "status", "downloaded", "spotify", "spotify_copy",
                 "popularity", "familiarity", "momentum", "radio_presence", "radio_reach", "airplay_spins_7d", "airplay_spins_period", "radio_rotation",
                 "avg_position", "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
                 "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
@@ -2053,7 +2101,7 @@ if view_key == "dashboard":
             # refresh.  Include every row-affecting control in the component key so the
             # grid is remounted immediately as the user types/clears the search box.
             dashboard_grid_state = quote(
-                f"{min_fam}|{min_mom}|{int(only_unheard)}|{downloaded_choice}|{','.join(sorted(selected_statuses))}|{normalize(song_query)}",
+                f"{min_fam}|{min_mom}|{downloaded_choice}|{','.join(sorted(selected_statuses))}|{normalize(song_query)}",
                 safe="",
             )[:120]
             render_song_grid(
@@ -2138,7 +2186,7 @@ elif view_key == "song":
                     with head1:
                         st.markdown(
                             f'<div class="rc-song-title">{html.escape(str(row.artist))} — {html.escape(str(row.title))}</div>'
-                            f'<div class="rc-song-meta">{html.escape(str(row.status))} · {"przesłuchany" if bool(row.heard) else "nieprzesłuchany"}</div>',
+                            f'<div class="rc-song-meta">{html.escape(str(row.status))}</div>',
                             unsafe_allow_html=True,
                         )
                     with head2:
@@ -2459,7 +2507,6 @@ elif view_key == "song":
 
                 render_song_note_editor(
                     song_id,
-                    bool(row.heard),
                     str(row.status),
                     bool(row.downloaded),
                     str(row.note or ""),
@@ -2498,9 +2545,9 @@ elif view_key == "archive":
             if not historical_scores.empty:
                 hist_core = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in historical_scores.columns]
                 historical_scores["avg_position"] = historical_scores[hist_core].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if hist_core else float("nan")
-                score_cols = ["song_id", "familiarity", "momentum", "avg_position", "heard", "status", "downloaded", "note",
+                score_cols = ["song_id", "familiarity", "momentum", "avg_position", "status", "downloaded", "note",
                               "RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"]
-                entries = entries.drop(columns=[c for c in ["heard", "status", "downloaded", "note"] if c in entries.columns]).merge(
+                entries = entries.drop(columns=[c for c in ["status", "downloaded", "note"] if c in entries.columns]).merge(
                     historical_scores[score_cols], on="song_id", how="left",
                 )
             hist_presence = pd.DataFrame(
@@ -2555,7 +2602,7 @@ elif view_key == "archive":
                     entries[c] = entries[c].map(position_sort_value).astype(int)
 
             archive_cols = [
-                "song_id", "position", "artist", "title", "details", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
+                "song_id", "position", "artist", "title", "details", "preview", "status", "downloaded", "spotify", "spotify_copy",
                 "popularity", "familiarity", "momentum", "radio_reach", "airplay_spins_7d", "avg_position",
                 "previous_position", "reported_weeks", "reported_peak", "note",
             ]
@@ -2566,7 +2613,7 @@ elif view_key == "archive":
                 height=770,
                 editable_state=True,
             )
-            st.caption("Poprzednio/Tygodnie/Peak są uzupełniane z danych źródła, a gdy ich brakuje — z naszej zapisanej historii. Chart Score, Momentum i Śr. poz. są liczone do daty notowania; Zasięg 7d kończy się na tej samej dacie, jeśli mamy wtedy dane emisji. Status, ✓ i notatka są Twoim obecnym stanem.")
+            st.caption("Poprzednio/Tygodnie/Peak są uzupełniane z danych źródła, a gdy ich brakuje — z naszej zapisanej historii. Chart Score, Momentum i Śr. poz. są liczone do daty notowania; Zasięg 7d kończy się na tej samej dacie, jeśli mamy wtedy dane emisji. Status, Downloaded i notatka są Twoim obecnym stanem.")
 
 elif view_key == "airplay":
     st.subheader("📡 Emisje")
@@ -2740,7 +2787,7 @@ elif view_key == "airplay":
             ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
             ranked["spotify_copy"] = ranked["spotify"]
             air_cols = [
-                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
+                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "status", "downloaded", "spotify", "spotify_copy",
                 "popularity", "familiarity", "momentum", "radio_reach", "airplay_spins_7d", "avg_position",
                 "stations_count", "radio_rotation", "radio_presence_period",
                 "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
@@ -2919,7 +2966,7 @@ elif view_key == "library":
         view = view.reset_index(drop=True)
 
         library_cols = [
-            "song_id", "spins", "artist", "title", "release_month", "details", "preview", "heard", "status", "downloaded",
+            "song_id", "spins", "artist", "title", "release_month", "details", "preview", "status", "downloaded",
             "spotify", "spotify_copy", "popularity", "familiarity", "momentum", "radio_reach", "airplay_spins_7d", "avg_position",
             "stations_count", "radio_rotation", "radio_presence_period", "avg_per_day", "avg_station_day",
             "max_station_spins", "top_station", "last_play",
@@ -2978,8 +3025,7 @@ elif view_key == "data":
         render_compact_metrics([
             ("W bazie RadioCharts", overview.get("total", 0)),
             ("Oczekiwane z ostatniego eksportu", expected_rows or "—"),
-            ("DL w bazie", overview.get("downloaded", 0)),
-            ("Przesłuchane", overview.get("heard", 0)),
+            ("Downloaded", overview.get("downloaded", 0)),
             ("Hold", overview.get("hold", 0)),
             ("Seed", "OK" if str(overview.get("seed_marker", "")).startswith("rows=") else str(overview.get("seed_marker") or "—")[:24]),
         ])
@@ -3000,7 +3046,7 @@ elif view_key == "data":
 
         st.caption(
             "Wklej cały eksport TXT/TSV z nagłówkiem Active / Cat / Pack / Ver / Title / Artist / Album / Runtime. "
-            "Synchronizacja dopasowuje istniejące utwory, dodaje brakujące, ustawia Baza <Cat>, DL i Przesłuchany. Notatka zostaje."
+            "Synchronizacja dopasowuje istniejące utwory, dodaje brakujące, ustawia Baza <Cat> i Downloaded. Notatka zostaje."
         )
         radio_text = st.text_area(
             "Wklej eksport bazy radia",
@@ -3035,8 +3081,7 @@ elif view_key == "data":
                         f"{result.get('added', 0)} nowych · "
                         f"{result.get('matched', 0)} dopasowanych · "
                         f"{result.get('status_updated', 0)} statusów zmienionych · "
-                        f"{result.get('heard_marked', 0)} oznaczonych jako przesłuchane · "
-                        f"{result.get('downloaded_marked', 0)} oznaczonych jako DL."
+                        f"{result.get('downloaded_marked', 0)} oznaczonych jako Downloaded."
                     )
                     st.rerun()
 
@@ -3128,9 +3173,9 @@ else:
 5. **Baza** — oceń, czy utwory faktycznie trzymane w Twojej bibliotece nadal mają sens: widzisz też pozycje z zerową emisją w wybranym okresie.
 6. **Notowania** — podejrzyj konkretny historyczny tydzień/listę bez mieszania go z bieżącym stanem.
 
-**Status, „Przesłuchany”, DL i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji. **DL** oznacza, że po odsłuchu utwór został już pobrany / dodany do lokalnej biblioteki.
+**Status, Downloaded i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji. **Downloaded** oznacza, że utwór został już pobrany / dodany do lokalnej biblioteki. Każdy status poza **Nie słuchałem** oznacza przesłuchany utwór; osobny checkbox nie jest już potrzebny.
 
-W **Dane → Synchronizacja bazy radia** wklejasz eksport TSV/TXT z kategorią, tytułem i wykonawcą. RadioCharts dopasowuje istniejące utwory, dodaje brakujące, ustawia `Baza <Cat>` oraz zaznacza zarówno **DL**, jak i **Przesłuchany**. Nad polem wklejania widać liczbę utworów i rozkład kategorii, więc można od razu sprawdzić, czy synchronizacja faktycznie weszła.
+W **Dane → Synchronizacja bazy radia** wklejasz eksport TSV/TXT z kategorią, tytułem i wykonawcą. RadioCharts dopasowuje istniejące utwory, dodaje brakujące, ustawia `Baza <Cat>` oraz zaznacza **Downloaded**. Nad polem wklejania widać liczbę utworów i rozkład kategorii, więc można od razu sprawdzić, czy synchronizacja faktycznie weszła.
 
 W edytorze statusów, licząc od dołu, kolejność kategorii bazy to **CF1 → CF2 → R1 → R2 → G1 → G2 → SP1 → SP2 → NB → F1**, wyżej jest **Baza Hold**, a jeszcze wyżej analogiczne statusy **Candidate** w tej samej kolejności. Na górze pozostają **Watch, Słabe, Poza formatem, Nie słuchałem**. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
             """
@@ -3148,7 +3193,7 @@ W edytorze statusów, licząc od dołu, kolejność kategorii bazy to **CF1 → 
 - **Zagraniczne w najnowszych** — UK lub Billboard.
 - **Cała historia** — również utwory, które już zeszły ze wszystkich najnowszych list.
 
-Minimalne Chart Score/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli. Filtr **Statusy** otwiera listę checkboxów — możesz zaznaczyć kilka statusów naraz; brak zaznaczeń oznacza wszystkie. Osobny filtr **Downloaded** ma wartości Any/Yes/No.
+Minimalne Chart Score/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli. Filtr **Statusy** otwiera listę checkboxów — możesz zaznaczyć kilka statusów naraz; brak zaznaczeń oznacza wszystkie. Osobny filtr **Downloaded** ma wartości Any/Yes/No. Status **Nie słuchałem** zastępuje dawny osobny checkbox przesłuchania.
 
 Widok **Kompaktowy** jest domyślny. Nad filtrami widzisz tylko licznik **Utwory (filtr / okres)**. Dawne kafle Current Familiar / Rising / Pokrycie źródeł zostały usunięte, bo te same informacje można uzyskać przez sortowanie i filtry tabeli.
 
@@ -3338,6 +3383,6 @@ Worker sprawdza automatyczne źródła dwa razy dziennie — 07:30 i 20:30 czasu
             """
 **▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł. Kolumna **Kopiuj (⧉)** kopiuje ten sam link Spotify do schowka; działa też na zwykłym HTTP w sieci LAN dzięki fallbackowi `execCommand`.
 
-Twoje pola **Przesłuchany, Status i Notatka** są warstwą redakcyjną i nie zmieniają automatycznych wskaźników. Notatka jest celowo ostatnią kolumną tabel, żeby nie zabierała miejsca najważniejszym danym liczbowym.
+Twoje pola **Status, Downloaded i Notatka** są warstwą redakcyjną i nie zmieniają automatycznych wskaźników. Notatka jest celowo ostatnią kolumną tabel, żeby nie zabierała miejsca najważniejszym danym liczbowym.
             """
         )

@@ -1,14 +1,17 @@
 from pathlib import Path
 
 
-def test_android_toplist_rows_open_landscape_chart_screen():
+def test_android_toplist_rows_open_rotatable_chart_screen():
     root = Path(__file__).resolve().parents[1]
     main = (root / "android/RadioChartsAndroid/app/src/main/java/pl/radiocharts/mobile/MainActivity.kt").read_text(encoding="utf-8")
 
     assert '"chart/{id}/{source}"' in main
     assert 'clickable{navigate("chart/$id/${Uri.encode(src)}")}' in main
     assert 'ToplistChartScreen(' in main
-    assert 'SCREEN_ORIENTATION_SENSOR_LANDSCAPE' in main
+    assert 'SCREEN_ORIENTATION_SENSOR_LANDSCAPE' not in main
+    assert 'SCREEN_ORIENTATION_UNSPECIFIED' in main
+    assert 'SCREEN_ORIENTATION_LANDSCAPE' in main
+    assert '⟳ Poziomo' in main
     assert 'ToplistLineChart(points=points' in main
     assert 'drawPath(path,color' in main
     assert 'val chartOpen = currentBackStackEntry?.destination?.route?.startsWith("chart/") == true' in main

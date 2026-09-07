@@ -82,7 +82,7 @@ Wynik jest normalizowany do źródeł, które są już obecne w bazie. Dashboard
 - Familiarity / Momentum / Format Fit
 - liczba tygodni, peak i tygodnie Top 10
 - ręczne statusy: Ignore / Watch / Candidate / Current / Current Familiar / Recurrent
-- notatki i oznaczenie „przesłuchany”
+- notatki i status odsłuchu
 - Streamlit dashboard
 - worker APScheduler uruchamiany raz dziennie
 
@@ -126,7 +126,7 @@ Do połączenia z telefonu używamy Tailscale. W aplikacji Android wpisz adres w
 
 Opcjonalnie możesz ustawić `RADIOCHARTS_API_TOKEN` w usłudze API i wpisać ten sam token w aplikacji. Gdy zmienna nie jest ustawiona, API nie wymaga tokenu — jest to wariant przeznaczony wyłącznie do LAN/Tailscale. Dokumentacja testowa API jest dostępna lokalnie pod `/docs`.
 
-Projekt Android Studio znajduje się w `android/RadioChartsAndroid`. MVP zawiera Dashboard, Emisje, Bazę, kartę Utwór, odsłuch 30 s, Spotify, zmianę Przesłuchany/Status/DL/Notatki oraz wybór konkretnych stacji w emisjach utworu.
+Projekt Android Studio znajduje się w `android/RadioChartsAndroid`. Klient zawiera Dashboard, Emisje, Bazę, kartę Utwór, odsłuch 30 s, Spotify, zmianę Status/Downloaded/Notatki oraz wybór konkretnych stacji w emisjach utworu.
 
 ## TrueNAS SCALE – proponowany deployment
 
@@ -367,3 +367,12 @@ Web i Android pokazują teraz po jednej dacie wszystkie realne punkty toplist na
 
 Android 0.1.8 dodaje w Utworze wspólny wykres wszystkich toplist obok pozostawionych osobnych wykresów RMF/ZET/ESKA/OLIA/OLIS. Wspólny widok używa jednej osi dat, osobnej linii i legendy dla każdej listy. Na punktach wykresu po najechaniu kursorem lub dotknięciu pokazywane są dokładna lista, miejsce i data. Ekran wykresu nadal działa w orientacji poziomej.
 
+
+
+### 1.0.0 — pierwsze stabilne wydanie
+
+RadioCharts wychodzi z etapu MVP i dostaje stabilne wersjonowanie 1.x. Osobny checkbox **Przesłuchany** został usunięty z interfejsu; pole pozostaje w bazie dla zgodności, ale jego stan wynika teraz ze statusu — każdy status poza **Nie słuchałem** oznacza przesłuchany utwór. **Downloaded** pozostaje osobną flagą.
+
+Na karcie **Utwór** zmiana Statusu oraz Downloaded zapisuje się automatycznie, a przycisk **Zapisz** służy wyłącznie do zapisania notatki. W Emisjach i Bazie dodano preset **Dzisiaj (1d)** obok dotychczasowych zakresów, przy zachowaniu domyślnego 7d.
+
+Android 1.0.0 otwiera wykresy w bieżącej orientacji — typowo pionowej — i pozwala normalnie obracać telefon przy włączonym auto-rotate. Dodatkowy przycisk **Poziomo** wymusza landscape także przy systemowej blokadzie portretu; **Auto** zwalnia wymuszenie.

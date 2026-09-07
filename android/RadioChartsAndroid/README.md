@@ -4,7 +4,7 @@ Natywny klient Android (Kotlin + Jetpack Compose) dla prywatnego RadioCharts API
 
 ## Wersja
 
-Android 0.1.9 (`versionCode = 10`).
+Android 1.0.0 (`versionCode = 11`).
 
 ## Release signing
 
@@ -23,15 +23,19 @@ Aplikacja automatycznie sprawdza `GET /api/v1/android/update?current_version_cod
 
 Gdy jest nowsza wersja, aplikacja pobiera `GET /api/v1/android/apk`, weryfikuje SHA-256 i uruchamia systemowy instalator. Po pierwszym włączeniu aktualizacji może być potrzebne jednorazowe zezwolenie **Allow from this source** dla RadioCharts.
 
-Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 0.1.9, aktualizują się w miejscu.
+Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 1.0.0, aktualizują się w miejscu.
 
 
 
-## 0.1.9
+## 1.0.0
 
-- wspólny crosshair wybierany po dacie, z tooltipem wszystkich punktów toplist z tego dnia,
-- Peak pokazuje także datę pierwszego osiągnięcia najlepszej pozycji,
-- tooltip używa daty bez godziny i nie wybiera już przypadkowo najbliższej serii po osi Y.
+- pierwsze stabilne wydanie Androida zsynchronizowane z RadioCharts 1.0.0,
+- usunięty osobny checkbox Przesłuchany; status `Nie słuchałem` jest jedynym stanem nieodsłuchanego utworu,
+- Status i Downloaded zapisują się automatycznie na karcie Utwór; przycisk Zapisz zapisuje tylko notatkę,
+- filtr `Downloaded` zastępuje skrót `DL`,
+- Emisje/Baza mają preset `1d` = dzisiaj, przy zachowaniu domyślnego `7d`,
+- wykresy nie wymuszają już landscape przy wejściu: działają w pionie, reagują na auto-rotate, a przycisk `Poziomo` może wymusić landscape mimo blokady portretu; `Auto` zwalnia wymuszenie,
+- zachowane są wspólny crosshair, tooltip wszystkich toplist dla wybranej daty oraz data peaku.
 
 ## 0.1.8
 

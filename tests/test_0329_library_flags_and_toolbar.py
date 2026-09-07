@@ -44,14 +44,14 @@ def test_0329_manual_base_status_enforces_heard_and_downloaded(tmp_path, monkeyp
     assert tuple(row) == (1, 1, "Baza R2", "note")
 
 
-def test_0329_hold_remains_neutral(tmp_path, monkeypatch):
+def test_v1_hold_counts_as_listened_but_not_downloaded(tmp_path, monkeypatch):
     _db(monkeypatch, tmp_path)
     with db.connect() as con:
         sid = db.get_or_create_song(con, "Artist", "Hold")
     db.update_note(sid, False, "Baza Hold", "", downloaded=False)
     with db.connect() as con:
         row = con.execute("SELECT heard,downloaded FROM song_notes WHERE song_id=?", (sid,)).fetchone()
-    assert tuple(row) == (0, 0)
+    assert tuple(row) == (1, 0)
 
 
 def test_0329_dashboard_toolbar_is_bottom_aligned_and_status_has_label():

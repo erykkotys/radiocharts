@@ -53,7 +53,7 @@ def test_0323_dashboard_cleanup_and_status_order_contract():
     assert "Pokrycie źródeł" not in APP[: APP.index('st.markdown("## 📘 Manual RadioCharts")')]
     assert "Radio 7d:" not in APP
     assert "Familiarity, momentum i radio presence · wsparcie odsłuchu i ręcznej decyzji" not in APP
-    assert '"downloaded", "DL"' in APP
+    assert '"downloaded", "Downloaded"' in APP
 
 
 def test_0323_airplay_detail_uses_selected_dates_and_wide_tables_get_proxy_scrollbar():

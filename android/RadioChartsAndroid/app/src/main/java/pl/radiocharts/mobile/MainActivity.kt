@@ -2,6 +2,7 @@ package pl.radiocharts.mobile
 
 import android.app.Activity
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.pm.ActivityInfo
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -162,7 +164,7 @@ class ListVm(app: android.app.Application) : androidx.lifecycle.AndroidViewModel
             try {
                 val updated = ApiProvider.api(store).patchSong(
                     row.song_id,
-                    NotePatch(row.heard, newStatus, row.downloaded, row.note),
+                    NotePatch(newStatus != "Nie słuchałem", newStatus, row.downloaded, row.note),
                 ).song
                 _state.value = _state.value.copy(
                     rows = _state.value.rows.map {
@@ -398,7 +400,7 @@ private fun androidStatusOrder(statuses: List<String>): List<String> = statuses.
 
     fun presetRange(): Pair<LocalDate, LocalDate> {
         val end = LocalDate.now()
-        val days = when(period){"28d"->28;"90d"->90;else->7}
+        val days = when(period){"1d"->1;"28d"->28;"90d"->90;else->7}
         return end.minusDays((days-1).toLong()) to end
     }
     fun effectiveRange(): Pair<LocalDate, LocalDate> {
@@ -437,7 +439,7 @@ private fun androidStatusOrder(statuses: List<String>): List<String> = statuses.
             SortMenu(state.sort, withPeriod) { key, defaultDescending -> vm.setSort(key, defaultDescending); reload() }
             CompactFilterButton(if(state.descending) "↓" else "↑") { vm.toggleDirection(); reload() }
             if (withPeriod) {
-                listOf("7d" to "7d","28d" to "28d","90d" to "3m").forEach { (k,l) ->
+                listOf("1d" to "1d","7d" to "7d","28d" to "28d","90d" to "3m").forEach { (k,l) ->
                     FilterChip(
                         selected=period==k,
                         onClick={period=k;showExactDates=false;reload()},
@@ -574,7 +576,7 @@ private fun shortDate(value:LocalDate):String = "%02d.%02d".format(value.dayOfMo
 @Composable fun DownloadMenu(value:String,onValue:(String)->Unit){
     var open by remember{mutableStateOf(false)}
     Box{
-        OutlinedButton(onClick={open=true},contentPadding=PaddingValues(horizontal=10.dp,vertical=0.dp),modifier=Modifier.heightIn(min=34.dp)){Text("DL ${value.uppercase()}",style=MaterialTheme.typography.labelMedium)}
+        OutlinedButton(onClick={open=true},contentPadding=PaddingValues(horizontal=10.dp,vertical=0.dp),modifier=Modifier.heightIn(min=34.dp)){Text("Downloaded ${value.uppercase()}",style=MaterialTheme.typography.labelMedium)}
         DropdownMenu(expanded=open,onDismissRequest={open=false}){
             listOf("any","yes","no").forEach{DropdownMenuItem(text={Text(it.uppercase())},onClick={open=false;onValue(it)})}
         }
@@ -732,8 +734,8 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun SongScreen(id:Int, previewVm:PreviewPlayerVm, navigate:(String)->Unit) {
     val context=LocalContext.current; val store=remember{SettingsStore(context)}; val scope=rememberCoroutineScope()
-    var song by remember{id.let{mutableStateOf<SongRow?>(null)}};var charts by remember{mutableStateOf<List<ChartPoint>>(emptyList())};var air by remember{mutableStateOf<AirplayDetail?>(null)};var stations by remember{mutableStateOf<List<Station>>(emptyList())};var selectedStations by remember{mutableStateOf<Set<Int>>(emptySet())};var meta by remember{mutableStateOf(MetaResponse())};var error by remember{mutableStateOf<String?>(null)};var stationOpen by remember{mutableStateOf(false)};var period by remember{mutableStateOf("28d")};var saving by remember{mutableStateOf(false)}
-    suspend fun reloadAir(){try{val api=ApiProvider.api(store);val end=LocalDate.now();val days=when(period){"7d"->7;"90d"->90;else->28};val ids=selectedStations.takeIf{it.isNotEmpty()}?.joinToString(",");air=api.airplay(id,end.minusDays((days-1).toLong()).toString(),end.toString(),ids)}catch(e:Exception){error=e.message}}
+    var song by remember{id.let{mutableStateOf<SongRow?>(null)}};var charts by remember{mutableStateOf<List<ChartPoint>>(emptyList())};var air by remember{mutableStateOf<AirplayDetail?>(null)};var stations by remember{mutableStateOf<List<Station>>(emptyList())};var selectedStations by remember{mutableStateOf<Set<Int>>(emptySet())};var meta by remember{mutableStateOf(MetaResponse())};var error by remember{mutableStateOf<String?>(null)};var stationOpen by remember{mutableStateOf(false)};var period by remember{mutableStateOf("7d")};var savingNote by remember{mutableStateOf(false)};var savingState by remember{mutableStateOf(false)}
+    suspend fun reloadAir(){try{val api=ApiProvider.api(store);val end=LocalDate.now();val days=when(period){"1d"->1;"28d"->28;"90d"->90;else->7};val ids=selectedStations.takeIf{it.isNotEmpty()}?.joinToString(",");air=api.airplay(id,end.minusDays((days-1).toLong()).toString(),end.toString(),ids)}catch(e:Exception){error=e.message}}
     LaunchedEffect(id){try{val api=ApiProvider.api(store);song=api.song(id);charts=api.charts(id);stations=api.stations();meta=api.meta();reloadAir()}catch(e:Exception){error=e.message}}
     val s=song
     if(s==null){Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){if(error!=null)Text("Błąd: $error") else CircularProgressIndicator()};return}
@@ -742,11 +744,37 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         Row(Modifier.fillMaxWidth().padding(vertical=8.dp),horizontalArrangement=Arrangement.SpaceBetween){MetricTiny("Popularity",s.popularity?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Chart Score",s.familiarity?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Momentum",s.momentum?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Zasięg 7d",s.radio_reach?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Emisje 7d",(s.airplay_spins_7d?:0).toString())}
         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){PreviewButton(s, previewVm);SpotifyButton(s)}
         HorizontalDivider(Modifier.padding(vertical=8.dp))
-        var heard by remember(s.song_id,s.heard){mutableStateOf(s.heard)};var dl by remember(s.song_id,s.downloaded){mutableStateOf(s.downloaded)};var status by remember(s.song_id,s.status){mutableStateOf(s.status)};var note by remember(s.song_id,s.note){mutableStateOf(s.note)}
-        Row(verticalAlignment=Alignment.CenterVertically){Checkbox(heard,{heard=it});Text("Przesłuchany");Checkbox(dl,{dl=it});Text("DL")}
-        StatusMenu(status,meta.statuses){status=it}
+        var dl by remember(s.song_id,s.downloaded){mutableStateOf(s.downloaded)};var status by remember(s.song_id,s.status){mutableStateOf(s.status)};var note by remember(s.song_id,s.note){mutableStateOf(s.note)}
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Checkbox(checked=dl,onCheckedChange={newDl->
+                if(!savingState){
+                    dl=newDl
+                    scope.launch{
+                        savingState=true
+                        try{
+                            val updated=ApiProvider.api(store).patchSong(id,NotePatch(status != "Nie słuchałem",status,newDl,s.note)).song
+                            song=updated;dl=updated.downloaded;status=updated.status
+                        }catch(e:Exception){dl=s.downloaded;error=e.message}finally{savingState=false}
+                    }
+                }
+            })
+            Text("Downloaded")
+            if(savingState) CircularProgressIndicator(Modifier.padding(start=8.dp).size(18.dp),strokeWidth=2.dp)
+        }
+        StatusMenu(status,meta.statuses){newStatus->
+            if(!savingState && newStatus!=status){
+                status=newStatus
+                scope.launch{
+                    savingState=true
+                    try{
+                        val updated=ApiProvider.api(store).patchSong(id,NotePatch(newStatus != "Nie słuchałem",newStatus,dl,s.note)).song
+                        song=updated;status=updated.status;dl=updated.downloaded
+                    }catch(e:Exception){status=s.status;error=e.message}finally{savingState=false}
+                }
+            }
+        }
         OutlinedTextField(value=note,onValueChange={note=it},label={Text("Notatka")},modifier=Modifier.fillMaxWidth())
-        Button(enabled=!saving,onClick={scope.launch{saving=true;try{song=ApiProvider.api(store).patchSong(id,NotePatch(heard,status,dl,note)).song}catch(e:Exception){error=e.message}finally{saving=false}}},modifier=Modifier.fillMaxWidth()){Text(if(saving)"Zapisuję…" else "Zapisz")}
+        Button(enabled=!savingNote && !savingState,onClick={scope.launch{savingNote=true;try{song=ApiProvider.api(store).patchSong(id,NotePatch(status != "Nie słuchałem",status,dl,note)).song}catch(e:Exception){error=e.message}finally{savingNote=false}}},modifier=Modifier.fillMaxWidth()){Text(if(savingNote)"Zapisuję…" else "Zapisz")}
         HorizontalDivider(Modifier.padding(vertical=8.dp))
         Text("Pozycje na listach",style=MaterialTheme.typography.titleMedium)
         val grouped=charts.groupBy{it.source}
@@ -784,7 +812,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         }
         HorizontalDivider(Modifier.padding(vertical=8.dp))
         Row(verticalAlignment=Alignment.CenterVertically){Text("Emisje radiowe",style=MaterialTheme.typography.titleMedium,modifier=Modifier.weight(1f));OutlinedButton(onClick={stationOpen=true}){Text(if(selectedStations.isEmpty())"Wszystkie stacje" else "Stacje: ${selectedStations.size}")}}
-        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){listOf("7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach{(k,l)->FilterChip(selected=period==k,onClick={period=k;scope.launch{reloadAir()}},label={Text(l)})}}
+        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){listOf("1d" to "Dzisiaj","7d" to "7 dni","28d" to "28 dni","90d" to "3 mies.").forEach{(k,l)->FilterChip(selected=period==k,onClick={period=k;scope.launch{reloadAir()}},label={Text(l)})}}
         air?.let{a->Row(Modifier.fillMaxWidth().padding(vertical=6.dp),horizontalArrangement=Arrangement.SpaceBetween){MetricTiny("Emisje",a.total_spins.toString());MetricTiny("Zasięg","%.0f%%".format(a.period_reach));MetricTiny("Stacje","${a.stations_count}/${a.reporting_stations}");MetricTiny("/dzień","%.1f".format(a.airplay_per_day))};Text("Per stacja",style=MaterialTheme.typography.titleSmall);a.stations.forEach{Text("${it.station}: ${it.spins} · ${it.active_days} dni",modifier=Modifier.padding(vertical=2.dp))}}
         error?.let{Text("Błąd: $it",color=MaterialTheme.colorScheme.error)}
         Spacer(Modifier.height(80.dp))
@@ -794,6 +822,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 
 @Composable fun ToplistChartScreen(id:Int, source:String, onBack:()->Unit) {
     val context=LocalContext.current
+    val configuration=LocalConfiguration.current
     val activity=context as? Activity
     val store=remember{SettingsStore(context)}
     val allSources=source=="__ALL__"
@@ -801,6 +830,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     var points by remember{mutableStateOf<List<ChartPoint>>(emptyList())}
     var loading by remember{mutableStateOf(true)}
     var error by remember{mutableStateOf<String?>(null)}
+    var forcedLandscape by remember{mutableStateOf(false)}
 
     fun leaveChart() {
         activity?.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -809,7 +839,10 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
 
     BackHandler { leaveChart() }
     LaunchedEffect(Unit) {
-        activity?.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        // Keep the orientation the user is already using. With system auto-rotate
+        // enabled the chart follows the phone; the button below can force landscape
+        // even when the device is portrait-locked.
+        activity?.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
     LaunchedEffect(id,source) {
         loading=true
@@ -830,6 +863,20 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
     Column(Modifier.fillMaxSize().padding(horizontal=12.dp,vertical=8.dp)) {
         Row(verticalAlignment=Alignment.CenterVertically) {
             OutlinedButton(onClick={ leaveChart() }){Text("‹ Wróć")}
+            OutlinedButton(
+                onClick={
+                    if(forcedLandscape || configuration.orientation==Configuration.ORIENTATION_LANDSCAPE) {
+                        forcedLandscape=false
+                        activity?.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    } else {
+                        forcedLandscape=true
+                        activity?.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                    }
+                },
+                modifier=Modifier.padding(start=6.dp),
+            ){
+                Text(if(forcedLandscape || configuration.orientation==Configuration.ORIENTATION_LANDSCAPE) "↕ Auto" else "⟳ Poziomo")
+            }
             Column(Modifier.padding(start=10.dp).weight(1f)) {
                 Text(if(allSources) "Wszystkie listy" else source,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
                 Text(
@@ -858,7 +905,7 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         val peak=points.minOf{it.position}
         val peakPoint=points.filter{it.position==peak}.minByOrNull{it.chart_date}!!
         val sources=points.map{it.source}.distinct()
-        Row(Modifier.fillMaxWidth().padding(vertical=6.dp),horizontalArrangement=Arrangement.spacedBy(24.dp)) {
+        Row(Modifier.fillMaxWidth().padding(vertical=6.dp).horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(24.dp)) {
             if(allSources) {
                 MetricTiny("Listy",sources.size.toString())
                 MetricTiny("Punkty",points.size.toString())
