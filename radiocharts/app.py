@@ -917,13 +917,6 @@ def scroll_song_to_top_once() -> None:
 
 
 
-DETAILS_LABEL_FORMATTER = JsCode("""
-function(params) {
-  const sid = String((params.data || {}).song_id || '');
-  return sid ? 'Otwórz' : '-';
-}
-""")
-
 SPOTIFY_COPY_FORMATTER = JsCode("""
 function(params) {
   return String(params.value || '') ? '⧉' : '-';
@@ -979,20 +972,6 @@ function(params) {
   const host = window.top || window;
   const ev = (params && params.event) ? params.event : {};
 
-  if (field === 'details') {
-    const sid = String(row.song_id || '');
-    if (!sid) return;
-    const url = window.location.origin + '/?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
-    if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
-      try { window.open(url, '_blank', 'noopener,noreferrer'); } catch(e) {}
-      return;
-    }
-    // Same-tab navigation is returned to Streamlit through a hidden editable
-    // field. This avoids trying to navigate the component iframe itself.
-    try { params.node.setDataValue('_open_request', sid); } catch(e) {}
-    return;
-  }
-
   if (field === 'spotify') {
     const raw = String(row.spotify || params.value || '');
     if (!raw) return;
@@ -1035,6 +1014,25 @@ function(params) {
   } catch(e) {}
 }
 """)
+
+GRID_DOUBLE_CLICK_HANDLER = JsCode("""
+function(params) {
+  const field = params && params.colDef ? String(params.colDef.field || '') : '';
+  if (field !== 'artist' && field !== 'title') return;
+  const row = params && params.data ? params.data : {};
+  const sid = String(row.song_id || '');
+  if (!sid) return;
+  const ev = (params && params.event) ? params.event : {};
+  const url = window.location.origin + '/?view=song&song=' + encodeURIComponent(sid) + '#rc-song-top';
+  if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
+    try { window.open(url, '_blank', 'noopener,noreferrer'); } catch(e) {}
+    return;
+  }
+  // Return the requested song id to Streamlit through a hidden data field.
+  try { params.node.setDataValue('_open_request', sid); } catch(e) {}
+}
+""")
+
 
 GRID_SHOULD_RETURN = JsCode("""
 function(params) {
@@ -1438,8 +1436,13 @@ def render_song_grid(
         return show
     if "preview" not in show.columns:
         show["preview"] = "▶"
-    if "details" in show.columns:
+    if "song_id" in show.columns:
         show["_open_request"] = ""
+    # Przesłuchany is a visual state derived from Status. Keep the legacy DB
+    # column, but never allow the checkbox to diverge from the status shown in
+    # the same row.
+    if "status" in show.columns and "heard" in show.columns:
+        show["heard"] = show["status"].fillna("Nie słuchałem").astype(str).ne("Nie słuchałem")
 
     gb = GridOptionsBuilder.from_dataframe(show)
     gb.configure_default_column(resizable=True, sortable=True, filter=True, editable=False)
@@ -1453,7 +1456,11 @@ def render_song_grid(
             cellRenderer=JsCode("function(params){ return (params.node && params.node.rowIndex != null) ? String(params.node.rowIndex + 1) : ''; }")
         )
     gb.configure_selection(selection_mode="single", use_checkbox=False, suppressRowClickSelection=False)
-    gb.configure_grid_options(rowHeight=36, animateRows=False, onCellClicked=GRID_CLICK_HANDLER)
+    gb.configure_grid_options(
+        rowHeight=36, animateRows=False,
+        onCellClicked=GRID_CLICK_HANDLER,
+        onCellDoubleClicked=GRID_DOUBLE_CLICK_HANDLER,
+    )
     if "_row_number" in show.columns:
         row_number_refresh = JsCode("""
         function(params) {
@@ -1475,9 +1482,19 @@ def render_song_grid(
         gb.configure_column("_open_request", hide=True, editable=False)
     pin_identity = source_layout in {"auto", "compact", "airplay"}
     if "artist" in show.columns:
-        gb.configure_column("artist", "Wykonawca", minWidth=170 if pin_identity else 190, width=205 if pin_identity else 220, pinned="left" if pin_identity else None)
+        gb.configure_column(
+            "artist", "Wykonawca", minWidth=170 if pin_identity else 190, width=205 if pin_identity else 220,
+            pinned="left" if pin_identity else None,
+            headerTooltip="Dwuklik na wykonawcy otwiera kartę utworu.",
+            cellStyle={"cursor": "default"},
+        )
     if "title" in show.columns:
-        gb.configure_column("title", "Tytuł", minWidth=185 if pin_identity else 210, width=235 if pin_identity else 260, pinned="left" if pin_identity else None)
+        gb.configure_column(
+            "title", "Tytuł", minWidth=185 if pin_identity else 210, width=235 if pin_identity else 260,
+            pinned="left" if pin_identity else None,
+            headerTooltip="Dwuklik na tytule otwiera kartę utworu.",
+            cellStyle={"cursor": "default"},
+        )
     if "release_month" in show.columns:
         gb.configure_column(
             "release_month", "Premiera", minWidth=86, width=92,
@@ -1488,13 +1505,6 @@ def render_song_grid(
             "avg_position", "Śr. poz.", minWidth=82, width=88,
             headerTooltip="Średnia arytmetyczna bieżącej pozycji RMF, ZET, ESKA, OLiA i OLiS — tylko z list, na których utwór jest obecny.",
             valueFormatter=AVERAGE_POSITION_FORMATTER,
-        )
-    if "details" in show.columns:
-        gb.configure_column(
-            "details", "Otwórz", minWidth=78, width=84, sortable=False, filter=False,
-            valueFormatter=DETAILS_LABEL_FORMATTER,
-            headerTooltip="Klik: ta karta · Ctrl/Cmd/Shift/środkowy przycisk: nowa karta",
-            cellStyle={"cursor": "pointer", "color": "#cfe4ff", "fontWeight": "650", "textDecoration": "underline"},
         )
     if "spotify" in show.columns:
         gb.configure_column(
@@ -1511,6 +1521,14 @@ def render_song_grid(
         )
     if "preview" in show.columns:
         gb.configure_column("preview", "Odsłuch", minWidth=90, width=98, sortable=False, filter=False, valueFormatter=PREVIEW_LABEL_FORMATTER, cellStyle={"cursor": "pointer"})
+    if "heard" in show.columns:
+        gb.configure_column(
+            "heard", "✓", width=62, minWidth=58, maxWidth=68,
+            editable=False, sortable=True, filter=False, cellDataType="boolean",
+            cellRenderer="agCheckboxCellRenderer",
+            headerTooltip="Przesłuchany — zaznacza się automatycznie, gdy Status jest inny niż „Nie słuchałem”.",
+            cellStyle={"textAlign": "center"},
+        )
     if "status" in show.columns:
         gb.configure_column(
             "status", "Status", minWidth=150, width=165,
@@ -2073,7 +2091,6 @@ if view_key == "dashboard":
                     view["first_chart_date"] if "first_chart_date" in view.columns else [""] * len(view),
                 )
             ]
-            view["details"] = [song_link(sid) for sid in view.song_id]
             view["spotify"] = [spotify_search_url(a, t) for a, t in zip(view.artist, view.title)]
             view["spotify_copy"] = view["spotify"]
             view["preview"] = "▶"
@@ -2084,7 +2101,7 @@ if view_key == "dashboard":
                 view["downloaded"] = view["downloaded"].fillna(False).astype(bool)
 
             cols = [
-                "song_id", "artist", "title", "release_month", "details", "preview", "status", "downloaded", "spotify", "spotify_copy",
+                "song_id", "artist", "title", "release_month", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
                 "popularity", "familiarity", "momentum", "radio_presence", "radio_reach", "airplay_spins_7d", "airplay_spins_period", "radio_rotation",
                 "avg_position", "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks", "OLIA_pos", "OLIA_weeks",
                 "OLIS_pos", "OLIS_weeks", "ESKA_pos", "ESKA_weeks",
@@ -2595,14 +2612,13 @@ elif view_key == "archive":
                 entries["downloaded"] = entries["downloaded"].fillna(False).astype(bool)
             entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
             entries["spotify_copy"] = entries["spotify"]
-            entries["details"] = [song_link(sid) for sid in entries.song_id]
             entries["preview"] = "▶"
             for c in ["position", "previous_position", "reported_peak"]:
                 if c in entries:
                     entries[c] = entries[c].map(position_sort_value).astype(int)
 
             archive_cols = [
-                "song_id", "position", "artist", "title", "details", "preview", "status", "downloaded", "spotify", "spotify_copy",
+                "song_id", "position", "artist", "title", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
                 "popularity", "familiarity", "momentum", "radio_reach", "airplay_spins_7d", "avg_position",
                 "previous_position", "reported_weeks", "reported_peak", "note",
             ]
@@ -2782,12 +2798,11 @@ elif view_key == "airplay":
                 pos_col = f"{src}_pos"
                 ranked[src] = ranked[pos_col].map(position_sort_value).astype(int) if pos_col in ranked.columns else 999
 
-            ranked["details"] = [song_link(sid) for sid in ranked["song_id"]]
             ranked["preview"] = "▶"
             ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
             ranked["spotify_copy"] = ranked["spotify"]
             air_cols = [
-                "song_id", "spins", "artist", "title", "release_month", "details", "preview", "status", "downloaded", "spotify", "spotify_copy",
+                "song_id", "spins", "artist", "title", "release_month", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
                 "popularity", "familiarity", "momentum", "radio_reach", "airplay_spins_7d", "avg_position",
                 "stations_count", "radio_rotation", "radio_presence_period",
                 "avg_per_day", "avg_station_day", "max_station_spins", "top_station", "last_play",
@@ -2902,7 +2917,6 @@ elif view_key == "library":
         for src in source_cols:
             pos_col = f"{src}_pos"
             lib[src] = lib[pos_col].map(position_sort_value).astype(int) if pos_col in lib.columns else 999
-        lib["details"] = [song_link(sid) for sid in lib["song_id"]]
         lib["preview"] = "▶"
         lib["spotify"] = [spotify_search_url(a, t) for a, t in zip(lib["artist"], lib["title"])]
         lib["spotify_copy"] = lib["spotify"]
@@ -2966,7 +2980,7 @@ elif view_key == "library":
         view = view.reset_index(drop=True)
 
         library_cols = [
-            "song_id", "spins", "artist", "title", "release_month", "details", "preview", "status", "downloaded",
+            "song_id", "spins", "artist", "title", "release_month", "preview", "heard", "status", "downloaded",
             "spotify", "spotify_copy", "popularity", "familiarity", "momentum", "radio_reach", "airplay_spins_7d", "avg_position",
             "stations_count", "radio_rotation", "radio_presence_period", "avg_per_day", "avg_station_day",
             "max_station_spins", "top_station", "last_play",
@@ -3173,7 +3187,7 @@ else:
 5. **Baza** — oceń, czy utwory faktycznie trzymane w Twojej bibliotece nadal mają sens: widzisz też pozycje z zerową emisją w wybranym okresie.
 6. **Notowania** — podejrzyj konkretny historyczny tydzień/listę bez mieszania go z bieżącym stanem.
 
-**Status, Downloaded i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji. **Downloaded** oznacza, że utwór został już pobrany / dodany do lokalnej biblioteki. Każdy status poza **Nie słuchałem** oznacza przesłuchany utwór; osobny checkbox nie jest już potrzebny.
+**Status, Downloaded i Notatka są wspólne** dla wszystkich zakładek. To ten sam rekord utworu, niezależnie od tego, czy trafiłeś do niego z notowania czy z emisji. **Downloaded** oznacza, że utwór został już pobrany / dodany do lokalnej biblioteki. Kolumna **✓ (Przesłuchany)** jest tylko czytelnym wskaźnikiem: zaznacza się automatycznie dla każdego statusu poza **Nie słuchałem**.
 
 W **Dane → Synchronizacja bazy radia** wklejasz eksport TSV/TXT z kategorią, tytułem i wykonawcą. RadioCharts dopasowuje istniejące utwory, dodaje brakujące, ustawia `Baza <Cat>` oraz zaznacza **Downloaded**. Nad polem wklejania widać liczbę utworów i rozkład kategorii, więc można od razu sprawdzić, czy synchronizacja faktycznie weszła.
 
@@ -3193,7 +3207,7 @@ W edytorze statusów, licząc od dołu, kolejność kategorii bazy to **CF1 → 
 - **Zagraniczne w najnowszych** — UK lub Billboard.
 - **Cała historia** — również utwory, które już zeszły ze wszystkich najnowszych list.
 
-Minimalne Chart Score/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli. Filtr **Statusy** otwiera listę checkboxów — możesz zaznaczyć kilka statusów naraz; brak zaznaczeń oznacza wszystkie. Osobny filtr **Downloaded** ma wartości Any/Yes/No. Status **Nie słuchałem** zastępuje dawny osobny checkbox przesłuchania.
+Minimalne Chart Score/Momentum są tylko filtrami tabeli — nie zmieniają obliczeń. Pole **Szukaj w Dashboardzie** filtruje po wykonawcy i tytule, ignoruje polskie znaki i działa na całym aktualnym zakresie przed wyrenderowaniem tabeli. Filtr **Statusy** otwiera listę checkboxów — możesz zaznaczyć kilka statusów naraz; brak zaznaczeń oznacza wszystkie. Osobny filtr **Downloaded** ma wartości Any/Yes/No. Kolumna **✓ (Przesłuchany)** wynika automatycznie ze Statusu i nie jest niezależnie edytowana.
 
 Widok **Kompaktowy** jest domyślny. Nad filtrami widzisz tylko licznik **Utwory (filtr / okres)**. Dawne kafle Current Familiar / Rising / Pokrycie źródeł zostały usunięte, bo te same informacje można uzyskać przez sortowanie i filtry tabeli.
 
@@ -3300,7 +3314,7 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
 
 Zakres Emisji ma preset **ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok** oraz stale widoczne dokładne daty. Preset tylko wstawia daty; ręczna zmiana dowolnej z nich automatycznie przełącza preset na **Własny zakres**. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji.
 
-Pole **Szukaj w Emisjach** filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. Wyszukiwanie ignoruje polskie znaki. Szczegóły konkretnego nagrania otwierasz przez **Otwórz → Utwór**. Pozycje RMF/ZET/OLiA/OLiS/ESKA są w Emisjach pokazywane kompaktowo razem z tygodniami, np. `#7 (5w)`.
+Pole **Szukaj w Emisjach** filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. Wyszukiwanie ignoruje polskie znaki. Szczegóły konkretnego nagrania otwierasz **dwuklikiem na tytule lub wykonawcy**. Pozycje RMF/ZET/OLiA/OLiS/ESKA są w Emisjach pokazywane kompaktowo razem z tygodniami, np. `#7 (5w)`.
 
 W szerokich tabelach Dashboardu i Emisji poziomy scrollbar jest dodatkowo **przyklejony do dołu okna przeglądarki**, gdy tabela jest na ekranie. Jest zsynchronizowany z natywnym paskiem AG Grid.
 

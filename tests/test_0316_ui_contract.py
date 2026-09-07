@@ -3,8 +3,10 @@ from pathlib import Path
 APP = (Path(__file__).resolve().parents[1] / "radiocharts" / "app.py").read_text(encoding="utf-8")
 
 
-def test_details_column_routes_same_tab_via_hidden_grid_event():
-    assert 'DETAILS_LABEL_FORMATTER' in APP
+def test_song_opens_on_double_click_title_or_artist_via_hidden_grid_event():
+    assert 'DETAILS_LABEL_FORMATTER' not in APP
+    assert 'GRID_DOUBLE_CLICK_HANDLER' in APP
+    assert "field !== 'artist' && field !== 'title'" in APP
     assert "params.node.setDataValue('_open_request', sid)" in APP
     assert "window.location.origin + '/?view=song&song='" in APP
     assert 'navigate_to_song(int(requested[-1]))' in APP

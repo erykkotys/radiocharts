@@ -282,7 +282,7 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 
 ## 0.3.6 — stabilna nawigacja, player globalny i Emisje
 - Kompaktowy Dashboard używa bezpiecznego tekstowego formatu pozycji `#7 · 5w`, bez surowego HTML w komórkach.
-- `Otwórz` i `Spotify` w AG Grid są obsługiwane przez kliknięcie komórki; wyszukiwarka Utwór przechodzi do szczegółów w tej samej karcie.
+- Spotify w AG Grid jest obsługiwane przez kliknięcie komórki; kartę Utworu otwierasz dwuklikiem na tytule lub wykonawcy, a wyszukiwarka Utwór przechodzi do szczegółów w tej samej karcie.
 - Browser Back/Forward wymusza odświeżenie widoku, jeśli Streamlit nie zareaguje sam na zmianę query string.
 - Jeden wspólny player preview 30 s jest przyklejony do dołu całego viewportu, można go przewijać i zamknąć; przycisk odsłuchu jest również w widoku Utwór.
 - Nowa zakładka **Emisje**: automatyczne odkrywanie stacji z publicznego katalogu odSluchane.eu, zapis konkretnych emisji z bloków 2h, filtrowanie stacji checkboxami i agregacja dla dowolnego zapisanego zakresu dat.
@@ -296,7 +296,7 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 - Ranking Emisji pokazuje obok liczby odtworzeń bieżące pozycje RMF/ZET/OLiA/OLiS/ESKA oraz pozwala bezpośrednio odsłuchać, otworzyć kartę i edytować status.
 - Widok Utwór obsługuje także utwory znane tylko z emisji; wtedy metryki z notowań są pokazane jako brak danych, a nie jako `0%`.
 - Wyszukiwarka Utworu ponownie ignoruje polskie znaki (`meskie` → `Męskie`) przez normalizowany filtr przed natywnym wyborem Streamlita.
-- Kliknięcie `Otwórz` w tabeli przechodzi na kartę utworu i wymusza pozycję na górze strony zamiast zachowywać scroll z Dashboardu.
+- Dwuklik na tytule lub wykonawcy w tabeli przechodzi na kartę utworu i wymusza pozycję na górze strony zamiast zachowywać scroll z Dashboardu.
 
 ## 0.3.10 — kompletność emisji w blokach 2h
 
@@ -368,6 +368,12 @@ Web i Android pokazują teraz po jednej dacie wszystkie realne punkty toplist na
 Android 0.1.8 dodaje w Utworze wspólny wykres wszystkich toplist obok pozostawionych osobnych wykresów RMF/ZET/ESKA/OLIA/OLIS. Wspólny widok używa jednej osi dat, osobnej linii i legendy dla każdej listy. Na punktach wykresu po najechaniu kursorem lub dotknięciu pokazywane są dokładna lista, miejsce i data. Ekran wykresu nadal działa w orientacji poziomej.
 
 
+
+### 1.0.1 — prostsze otwieranie utworu i czytelny stan przesłuchania
+
+Usunięto osobną kolumnę **Otwórz** z tabel. Kartę konkretnego utworu otwiera teraz **dwuklik na tytule lub wykonawcy**, dzięki czemu odzyskane miejsce zostaje dla właściwych danych.
+
+Do tabel wraca kompaktowa kolumna **✓ (Przesłuchany)**. Checkbox jest wskaźnikiem tylko do odczytu i wynika bezpośrednio ze Statusu: **Nie słuchałem** = niezaznaczony, każdy inny status = zaznaczony. Pole `heard` nadal pozostaje w bazie dla zgodności, ale UI nie pozwala już stworzyć stanu sprzecznego ze Statusem.
 
 ### 1.0.0 — pierwsze stabilne wydanie
 

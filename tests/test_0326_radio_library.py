@@ -69,8 +69,8 @@ def test_0326_airplay_has_period_reach_compact_weeks_and_workflow_order():
     assert "return '#' + Math.round(v) + ' (' + weekLabel + ')'" in APP
     assert 'compact_initial = source_layout in {"compact", "airplay"}' in APP
     assert '"RMF", "RMF_weeks", "ZET", "ZET_weeks"' in APP
-    assert '"details", "preview", "status", "downloaded", "spotify", "spotify_copy"' in APP
-    assert '"preview", "heard", "status", "downloaded"' not in APP
+    assert '"preview", "heard", "status", "downloaded", "spotify", "spotify_copy"' in APP
+    assert '"details", "preview"' not in APP
 
 
 def test_0326_data_tab_exposes_radio_library_sync():

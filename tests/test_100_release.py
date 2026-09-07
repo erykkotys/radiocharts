@@ -30,9 +30,12 @@ def test_v1_status_is_the_listened_state_and_legacy_heard_is_retained(tmp_path, 
     assert "heard" in cols
 
 
-def test_v1_web_removes_listened_checkbox_and_autosaves_status_downloaded():
+def test_v101_web_restores_derived_listened_column_and_autosaves_status_downloaded():
     assert 'checkbox("Przesłuchany"' not in APP
     assert 'dashboard_only_unheard' not in APP
+    assert '"heard", "✓"' in APP
+    assert 'editable=False, sortable=True, filter=False, cellDataType="boolean"' in APP
+    assert 'show["heard"] = show["status"].fillna("Nie słuchałem").astype(str).ne("Nie słuchałem")' in APP
     assert '"downloaded", "Downloaded"' in APP
     assert 'on_change=_save_status' in APP
     assert 'on_change=_save_downloaded' in APP
@@ -68,8 +71,8 @@ def test_v1_android_charts_follow_device_and_can_force_landscape():
     assert 'android:configChanges="orientation|screenSize"' in MANIFEST
 
 
-def test_v1_versions():
+def test_v101_versions():
     gradle = (ROOT / "android/RadioChartsAndroid/app/build.gradle.kts").read_text(encoding="utf-8")
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
-    assert 'versionCode = 11' in gradle
-    assert 'versionName = "1.0.0"' in gradle
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.0.1"
+    assert 'versionCode = 12' in gradle
+    assert 'versionName = "1.0.1"' in gradle
