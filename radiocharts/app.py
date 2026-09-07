@@ -1547,10 +1547,17 @@ def render_song_grid(
             "heard", "✓", width=62, minWidth=58, maxWidth=68,
             editable=False, sortable=True, filter=False, cellDataType="boolean",
             cellRenderer="agCheckboxCellRenderer",
-            cellRendererParams={"disabled": True},
+            # Keep the native renderer visually active, but block pointer events
+            # below so this derived checkbox remains read-only.
+            cellRendererParams={"disabled": False},
             cellClass="rc-listened-checkbox",
             headerTooltip="Przesłuchany — zaznacza się automatycznie, gdy Status jest inny niż „Nie słuchałem”.",
-            cellStyle={"textAlign": "center"},
+            cellStyle={
+                "textAlign": "center",
+                "--ag-checkbox-checked-color": "#ff2d2d",
+                "--ag-checkbox-unchecked-color": "#6b7280",
+                "--ag-checkbox-background-color": "#15191f",
+            },
         )
     if "status" in show.columns:
         gb.configure_column(
@@ -1565,6 +1572,11 @@ def render_song_grid(
             cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor",
             cellRendererParams={"disabled": not bool(editable_state)},
             cellClass="rc-downloaded-checkbox",
+            cellStyle={
+                "--ag-checkbox-checked-color": "#22c55e",
+                "--ag-checkbox-unchecked-color": "#6b7280",
+                "--ag-checkbox-background-color": "#15191f",
+            },
             headerTooltip="Utwór pobrany / dodany do lokalnej biblioteki po odsłuchu.",
         )
     if "note" in show.columns:
@@ -1689,23 +1701,22 @@ def render_song_grid(
         custom_css={
             ".ag-row-selected": {"background-color": "rgba(74, 126, 187, 0.34) !important"},
             ".ag-cell-focus": {"border": "none !important", "outline": "none !important"},
-            # AG Grid dims disabled checkbox renderers to 50% opacity. The
-            # listened checkbox is intentionally read-only, but it should stay
-            # just as visually strong as the editable Downloaded checkbox.
-            ".rc-listened-checkbox .ag-checkbox-input-wrapper.ag-disabled": {
+            # Use AG Grid's documented checkbox CSS variables.  Setting them
+            # on the cell scopes each colour to one column and avoids the
+            # Streamlit theme's default red accent leaking into Downloaded.
+            ".rc-listened-checkbox": {
+                "--ag-checkbox-checked-color": "#ff2d2d !important",
+                "--ag-checkbox-unchecked-color": "#6b7280 !important",
+                "--ag-checkbox-background-color": "#15191f !important",
+            },
+            ".rc-listened-checkbox .ag-checkbox-input-wrapper": {
                 "opacity": "1 !important",
+                "pointer-events": "none !important",
             },
-            ".rc-downloaded-checkbox .ag-checkbox-input-wrapper.ag-disabled": {
-                "opacity": "1 !important",
-            },
-            # In AG Grid the checkbox outline + tick are an icon rendered in
-            # ::after, so colouring the wrapper itself is not enough. Target
-            # the actual checked glyph.
-            ".rc-listened-checkbox .ag-checkbox-input-wrapper.ag-checked::after": {
-                "color": "#ff2d2d !important",
-            },
-            ".rc-downloaded-checkbox .ag-checkbox-input-wrapper.ag-checked::after": {
-                "color": "#22c55e !important",
+            ".rc-downloaded-checkbox": {
+                "--ag-checkbox-checked-color": "#22c55e !important",
+                "--ag-checkbox-unchecked-color": "#6b7280 !important",
+                "--ag-checkbox-background-color": "#15191f !important",
             },
         },
         key=key,

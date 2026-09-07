@@ -59,10 +59,10 @@ def test_android_013_has_inline_preview_status_and_airplay_station_picker():
     assert "api.stations()" in main
     assert "stationIds = before.selectedStationIds" in main
     assert '@Query("station_ids") stationIds: String? = null' in api_kt
-    assert 'versionCode = 14' in gradle
-    assert 'versionName = "1.0.3"' in gradle
+    assert 'versionCode = 15' in gradle
+    assert 'versionName = "1.0.4"' in gradle
 
 
 def test_version_0405():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.0.3"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.0.4"

@@ -1,3 +1,10 @@
+## 1.0.4 — checkboxy Przesłuchany / Downloaded
+
+- **Przesłuchany** korzysta z natywnego checkboxa AG Grid, ale jego aktywny kolor jest ustawiany przez oficjalną zmienną `--ag-checkbox-checked-color` na czerwony; checkbox pozostaje tylko wskaźnikiem wynikającym ze Statusu;
+- **Downloaded** korzysta z tego samego natywnego renderera, lecz ma zielony `--ag-checkbox-checked-color`, dzięki czemu obie kolumny są natychmiast rozróżnialne;
+- oba checkboxy mają neutralny szary stan niezaznaczony i ciemne tło; Przesłuchany nie jest już renderowany jako `disabled`, a interakcja z nim jest blokowana przez `pointer-events`, więc zachowuje mocny kolor bez możliwości ręcznego rozjechania ze Statusem;
+- zmiana Statusu nadal odświeża Przesłuchany natychmiast po stronie przeglądarki.
+
 ## 1.0.3 — checkboxy o stałym, czytelnym wyglądzie
 
 - webowy **Przesłuchany** nadal wynika automatycznie ze Statusu, ale jego checkbox nie jest już wizualnie wyszarzany przez AG Grid: zaznaczenie ma mocny czerwony kolor;

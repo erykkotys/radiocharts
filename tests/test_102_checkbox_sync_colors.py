@@ -12,12 +12,12 @@ def test_listened_checkbox_refreshes_immediately_from_status():
     assert "onCellValueChanged=GRID_CELL_VALUE_CHANGED_HANDLER" in APP
 
 
-def test_listened_and_downloaded_style_actual_ag_grid_checkbox_glyphs():
+def test_listened_and_downloaded_use_scoped_ag_grid_checkbox_theme_variables():
     assert 'cellClass="rc-listened-checkbox"' in APP
     assert 'cellClass="rc-downloaded-checkbox"' in APP
-    assert 'cellRendererParams={"disabled": True}' in APP
-    assert '.rc-listened-checkbox .ag-checkbox-input-wrapper.ag-disabled' in APP
-    assert '.rc-listened-checkbox .ag-checkbox-input-wrapper.ag-checked::after' in APP
-    assert '.rc-downloaded-checkbox .ag-checkbox-input-wrapper.ag-checked::after' in APP
-    assert '"color": "#ff2d2d !important"' in APP
-    assert '"color": "#22c55e !important"' in APP
+    assert 'cellRendererParams={"disabled": False}' in APP
+    assert '"--ag-checkbox-checked-color": "#ff2d2d"' in APP
+    assert '"--ag-checkbox-checked-color": "#22c55e"' in APP
+    assert '"--ag-checkbox-unchecked-color": "#6b7280"' in APP
+    assert '"pointer-events": "none !important"' in APP
+    assert '.ag-checkbox-input-wrapper.ag-checked::after' not in APP
