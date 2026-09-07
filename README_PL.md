@@ -1,3 +1,10 @@
+## 1.0.3 — checkboxy o stałym, czytelnym wyglądzie
+
+- webowy **Przesłuchany** nadal wynika automatycznie ze Statusu, ale jego checkbox nie jest już wizualnie wyszarzany przez AG Grid: zaznaczenie ma mocny czerwony kolor;
+- **Downloaded** pozostaje edytowalny i dostaje osobny zielony kolor zaznaczenia;
+- kolory są nakładane bezpośrednio na glyph checkboxa (`::after`), czyli na element, który faktycznie rysuje AG Grid, a nie na zewnętrzny wrapper;
+- po zmianie Statusu kolumna Przesłuchany nadal odświeża się natychmiast po stronie przeglądarki.
+
 ## 0.3.30 — trwała naprawa flag Bazy i równy pasek filtrów
 
 - rekordy z realnym statusem `Baza ...` są ponownie naprawiane przez migrację v3; dodatkowo SQLite ma teraz triggery, które nie pozwalają zapisać `heard=0` lub `downloaded=0` dla aktywnej kategorii Bazy;

@@ -957,6 +957,7 @@ function(params) {
 }
 """)
 
+
 AVERAGE_POSITION_FORMATTER = JsCode("""
 function(params) {
   const v = Number(params.value);
@@ -1546,6 +1547,7 @@ def render_song_grid(
             "heard", "✓", width=62, minWidth=58, maxWidth=68,
             editable=False, sortable=True, filter=False, cellDataType="boolean",
             cellRenderer="agCheckboxCellRenderer",
+            cellRendererParams={"disabled": True},
             cellClass="rc-listened-checkbox",
             headerTooltip="Przesłuchany — zaznacza się automatycznie, gdy Status jest inny niż „Nie słuchałem”.",
             cellStyle={"textAlign": "center"},
@@ -1561,6 +1563,7 @@ def render_song_grid(
             "downloaded", "Downloaded", width=108, minWidth=98,
             editable=bool(editable_state), cellDataType="boolean",
             cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor",
+            cellRendererParams={"disabled": not bool(editable_state)},
             cellClass="rc-downloaded-checkbox",
             headerTooltip="Utwór pobrany / dodany do lokalnej biblioteki po odsłuchu.",
         )
@@ -1686,16 +1689,23 @@ def render_song_grid(
         custom_css={
             ".ag-row-selected": {"background-color": "rgba(74, 126, 187, 0.34) !important"},
             ".ag-cell-focus": {"border": "none !important", "outline": "none !important"},
-            # Keep both state columns visually strong, but distinct. AG Grid uses
-            # the wrapper's foreground color for both the checked glyph and its
-            # outline in the Streamlit theme.
-            ".rc-listened-checkbox .ag-checkbox-input-wrapper.ag-checked": {
-                "color": "#ff3b3b !important",
-                "--ag-checkbox-checked-color": "#ff3b3b",
+            # AG Grid dims disabled checkbox renderers to 50% opacity. The
+            # listened checkbox is intentionally read-only, but it should stay
+            # just as visually strong as the editable Downloaded checkbox.
+            ".rc-listened-checkbox .ag-checkbox-input-wrapper.ag-disabled": {
+                "opacity": "1 !important",
             },
-            ".rc-downloaded-checkbox .ag-checkbox-input-wrapper.ag-checked": {
+            ".rc-downloaded-checkbox .ag-checkbox-input-wrapper.ag-disabled": {
+                "opacity": "1 !important",
+            },
+            # In AG Grid the checkbox outline + tick are an icon rendered in
+            # ::after, so colouring the wrapper itself is not enough. Target
+            # the actual checked glyph.
+            ".rc-listened-checkbox .ag-checkbox-input-wrapper.ag-checked::after": {
+                "color": "#ff2d2d !important",
+            },
+            ".rc-downloaded-checkbox .ag-checkbox-input-wrapper.ag-checked::after": {
                 "color": "#22c55e !important",
-                "--ag-checkbox-checked-color": "#22c55e",
             },
         },
         key=key,
