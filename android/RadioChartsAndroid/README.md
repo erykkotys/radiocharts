@@ -4,7 +4,7 @@ Natywny klient Android (Kotlin + Jetpack Compose) dla prywatnego RadioCharts API
 
 ## Wersja
 
-Android 1.0.4 (`versionCode = 15`).
+Android 1.0.5 (`versionCode = 16`).
 
 ## Release signing
 
@@ -23,8 +23,12 @@ Aplikacja automatycznie sprawdza `GET /api/v1/android/update?current_version_cod
 
 Gdy jest nowsza wersja, aplikacja pobiera `GET /api/v1/android/apk`, weryfikuje SHA-256 i uruchamia systemowy instalator. Po pierwszym włączeniu aktualizacji może być potrzebne jednorazowe zezwolenie **Allow from this source** dla RadioCharts.
 
-Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 1.0.4, aktualizują się w miejscu.
+Stare 0.1.0/0.1.1 były debug APK podpisywanymi efemerycznym kluczem runnera GitHub. Przed pierwszą instalacją podpisanego release 0.1.2 trzeba było jednorazowo odinstalować starą aplikację. Od 0.1.2 kolejne wersje, w tym 1.0.5, aktualizują się w miejscu.
 
+
+## 1.0.5
+
+- wydanie zsynchronizowane z webowym RadioCharts 1.0.5; funkcjonalność Androida pozostaje jak w 1.0.4.
 
 ## 1.0.4
 

@@ -28,6 +28,7 @@ def test_airplay_backfill_is_centralized_in_data_view():
     assert 'Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zakładce **Dane**.' in APP
 
 
-def test_spotify_copy_column_is_configured():
-    assert '"spotify_copy", "Kopiuj"' in APP
+def test_spotify_share_column_is_configured():
+    assert '"spotify_copy", "Udostępnij"' in APP
+    assert "https://song.link/i/" in APP
     assert "field === 'spotify_copy'" in APP

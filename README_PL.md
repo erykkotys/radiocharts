@@ -1,3 +1,10 @@
+## 1.0.5 — status dropdown, natywne linki Spotify i udostępnianie
+
+- web: lista Status ma ograniczoną wysokość i własny scroll, a strona ma większy dolny margines, więc końcowe statusy CF1/CF2 są wygodnie dostępne bez zmiany kolejności;
+- web: Spotify jest prawdziwym linkiem `<a>`, więc Ctrl/Cmd+klik lub środkowy przycisk otwiera kolejne wyniki w nowych kartach bez przełączania widoku;
+- web: dawne „Kopiuj Spotify” zastąpiono „Udostępnij ↗” — dokładny utwór jest dopasowywany przez iTunes, a potem otwierany jako smart-link Songlink/Odesli;
+- Android: wersja zsynchronizowana do 1.0.5 (bez zmian funkcjonalnych).
+
 ## 1.0.4 — checkboxy Przesłuchany / Downloaded
 
 - **Przesłuchany** korzysta z natywnego checkboxa AG Grid, ale jego aktywny kolor jest ustawiany przez oficjalną zmienną `--ag-checkbox-checked-color` na czerwony; checkbox pozostaje tylko wskaźnikiem wynikającym ze Statusu;

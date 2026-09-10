@@ -13,7 +13,7 @@ def test_checkbox_columns_use_native_ag_grid_renderer_and_scoped_theme_vars():
 
 def test_release_104_metadata():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.0.4"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.0.5"
     gradle = (root / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 15' in gradle
-    assert 'versionName = "1.0.4"' in gradle
+    assert 'versionCode = 16' in gradle
+    assert 'versionName = "1.0.5"' in gradle

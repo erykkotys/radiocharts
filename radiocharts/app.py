@@ -39,7 +39,7 @@ st.markdown(
       [data-testid="stAppViewContainer"] { background: #1b2028; }
       .block-container, [data-testid="stMainBlockContainer"] {
         padding-top: .85rem !important;
-        padding-bottom: 1.2rem !important;
+        padding-bottom: 8rem !important;
         max-width: 100% !important;
       }
       [data-testid="stHeader"] { background:#1b2028 !important; height:2.55rem !important; }
@@ -917,16 +917,31 @@ def scroll_song_to_top_once() -> None:
 
 
 
-SPOTIFY_COPY_FORMATTER = JsCode("""
+SPOTIFY_SHARE_FORMATTER = JsCode("""
 function(params) {
-  return String(params.value || '') ? '⧉' : '-';
+  return String(params.value || '') ? 'Udostępnij ↗' : '-';
 }
 """)
 
-SPOTIFY_LABEL_FORMATTER = JsCode("""
+SPOTIFY_LINK_RENDERER = JsCode("""
 function(params) {
   const url = String(params.value || '');
-  return url ? 'Spotify ↗' : '-';
+  if (!url) return '-';
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.textContent = 'Spotify ↗';
+  a.style.color = '#d7f9df';
+  a.style.fontWeight = '650';
+  a.style.textDecoration = 'none';
+  a.style.cursor = 'pointer';
+  a.addEventListener('click', function(ev) {
+    // Keep this a real browser link. Ctrl/Cmd+click and middle-click can then
+    // open many Spotify results in background tabs without changing this view.
+    ev.stopPropagation();
+  });
+  return a;
 }
 """)
 
@@ -974,31 +989,67 @@ function(params) {
   const ev = (params && params.event) ? params.event : {};
 
   if (field === 'spotify') {
-    const raw = String(row.spotify || params.value || '');
-    if (!raw) return;
-    try { host.open(raw, '_blank', 'noopener,noreferrer'); } catch(e) {}
+    // Spotify is rendered as a real <a>. Do not intercept the click here:
+    // native Ctrl/Cmd+click and middle-click behaviour is the whole point.
     return;
   }
 
   if (field === 'spotify_copy') {
-    const raw = String(row.spotify_copy || row.spotify || '');
-    if (!raw) return;
-    try {
-      const doc = host.document || document;
-      const ta = doc.createElement('textarea');
-      ta.value = raw;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      doc.body.appendChild(ta);
-      ta.select();
-      let copied = false;
-      try { copied = doc.execCommand('copy'); } catch(e) {}
-      doc.body.removeChild(ta);
-      if (!copied && host.navigator && host.navigator.clipboard) {
-        host.navigator.clipboard.writeText(raw).catch(() => {});
+    const artist = String(row.artist || '');
+    const title = String(row.title || '');
+    if (!artist && !title) return;
+
+    // Open synchronously so the browser does not block the tab after the
+    // asynchronous JSONP lookup. We then redirect it to an exact Songlink page.
+    let tab = null;
+    try { tab = host.open('about:blank', '_blank'); } catch(e) {}
+
+    const doc = host.document || document;
+    const norm = (v) => String(v || '')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const nt = norm(title), na = norm(artist);
+    const cb = '__rcShareCB_' + Date.now() + '_' + Math.floor(Math.random()*1000000);
+    const script = doc.createElement('script');
+    const cleanup = () => {
+      try { delete host[cb]; } catch(e) {}
+      try { script.remove(); } catch(e) {}
+    };
+    const fallback = () => {
+      const url = String(row.spotify || '');
+      if (tab && url) { try { tab.location.replace(url); } catch(e) {} }
+      else if (tab) { try { tab.close(); } catch(e) {} }
+    };
+
+    host[cb] = function(payload) {
+      try {
+        const results = (payload && payload.results ? payload.results : []).filter(x => x && x.trackId);
+        let best = null, bestScore = -1;
+        for (const r of results) {
+          const rt = norm(r.trackName), ra = norm(r.artistName);
+          let score = 0;
+          if (rt === nt) score += 12;
+          if (nt && (rt.includes(nt) || nt.includes(rt))) score += 4;
+          const artistTokens = na.split(' ').filter(x => x.length > 2);
+          score += artistTokens.filter(t => ra.includes(t)).length * 2;
+          if (ra === na) score += 8;
+          if (score > bestScore) { best = r; bestScore = score; }
+        }
+        if (best && best.trackId) {
+          const shareUrl = 'https://song.link/i/' + encodeURIComponent(String(best.trackId));
+          if (tab) { try { tab.location.replace(shareUrl); } catch(e) {} }
+          else { try { host.open(shareUrl, '_blank', 'noopener,noreferrer'); } catch(e) {} }
+        } else {
+          fallback();
+        }
+      } finally {
+        cleanup();
       }
-    } catch(e) {}
+    };
+    script.onerror = function() { fallback(); cleanup(); };
+    const term = encodeURIComponent(artist + ' ' + title);
+    script.src = 'https://itunes.apple.com/search?term=' + term + '&country=PL&media=music&entity=song&limit=8&callback=' + cb;
+    doc.body.appendChild(script);
     return;
   }
 
@@ -1530,14 +1581,14 @@ def render_song_grid(
     if "spotify" in show.columns:
         gb.configure_column(
             "spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False,
-            valueFormatter=SPOTIFY_LABEL_FORMATTER,
-            cellStyle={"cursor": "pointer", "color": "#d7f9df", "fontWeight": "650"},
+            cellRenderer=SPOTIFY_LINK_RENDERER,
+            headerTooltip="Prawdziwy link przeglądarkowy. Ctrl/Cmd+klik lub środkowy przycisk otwiera kolejne wyniki Spotify w tle.",
         )
     if "spotify_copy" in show.columns:
         gb.configure_column(
-            "spotify_copy", "Kopiuj", minWidth=62, width=68, sortable=False, filter=False,
-            valueFormatter=SPOTIFY_COPY_FORMATTER,
-            headerTooltip="Kopiuj link Spotify do schowka",
+            "spotify_copy", "Udostępnij", minWidth=92, width=102, sortable=False, filter=False,
+            valueFormatter=SPOTIFY_SHARE_FORMATTER,
+            headerTooltip="Otwórz bezpośredni smart-link Songlink/Odesli do konkretnego utworu (Spotify, Apple Music i inne serwisy).",
             cellStyle={"cursor": "pointer", "textAlign": "center", "fontWeight": "700"},
         )
     if "preview" in show.columns:
@@ -1563,7 +1614,8 @@ def render_song_grid(
         gb.configure_column(
             "status", "Status", minWidth=150, width=165,
             editable=bool(editable_state),
-            cellEditor="agSelectCellEditor", cellEditorParams={"values": STATUSES},
+            cellEditor="agSelectCellEditor",
+            cellEditorParams={"values": STATUSES, "valueListMaxHeight": 310, "valueListMaxWidth": 220},
         )
     if "downloaded" in show.columns:
         gb.configure_column(
@@ -3449,7 +3501,7 @@ Worker sprawdza automatyczne źródła dwa razy dziennie — 07:30 i 20:30 czasu
     with st.expander("13. Spotify, odsłuch i własna ocena", expanded=False):
         st.markdown(
             """
-**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł. Kolumna **Kopiuj (⧉)** kopiuje ten sam link Spotify do schowka; działa też na zwykłym HTTP w sieci LAN dzięki fallbackowi `execCommand`.
+**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** jest prawdziwym linkiem przeglądarkowym do wyszukiwania wykonawca + tytuł, więc Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania tabeli. Kolumna **Udostępnij ↗** wyszukuje dokładny utwór przez iTunes i otwiera jego smart-link Songlink/Odesli; w razie braku trafienia wraca do wyszukiwania Spotify.
 
 Twoje pola **Status, Downloaded i Notatka** są warstwą redakcyjną i nie zmieniają automatycznych wskaźników. Notatka jest celowo ostatnią kolumną tabel, żeby nie zabierała miejsca najważniejszym danym liczbowym.
             """
