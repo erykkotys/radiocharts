@@ -1,4 +1,10 @@
-## 1.0.5 — status dropdown, natywne linki Spotify i udostępnianie
+## 1.0.6 — hotfix Spotify / React #31
+
+- web: naprawiono błąd komponentu `Minified React error #31` po zmianie Spotify z 1.0.5; AG Grid nie zwraca już `HTMLAnchorElement` do Reacta;
+- `Spotify ↗` jest ponownie bezpiecznie renderowany jako tekst komórki, a otwieranie linku obsługuje `onCellClicked`;
+- Ctrl/Cmd+klik i środkowy przycisk nadal otwierają kolejne wyniki Spotify w nowych kartach bez nawigowania bieżącej tabeli.
+
+## 1.0.5 — status dropdown, Spotify i udostępnianie
 
 - web: lista Status ma ograniczoną wysokość i własny scroll, a strona ma większy dolny margines, więc końcowe statusy CF1/CF2 są wygodnie dostępne bez zmiany kolejności;
 - web: Spotify jest prawdziwym linkiem `<a>`, więc Ctrl/Cmd+klik lub środkowy przycisk otwiera kolejne wyniki w nowych kartach bez przełączania widoku;

@@ -923,25 +923,10 @@ function(params) {
 }
 """)
 
-SPOTIFY_LINK_RENDERER = JsCode("""
+SPOTIFY_LABEL_FORMATTER = JsCode("""
 function(params) {
   const url = String(params.value || '');
-  if (!url) return '-';
-  const a = document.createElement('a');
-  a.href = url;
-  a.target = '_blank';
-  a.rel = 'noopener noreferrer';
-  a.textContent = 'Spotify ↗';
-  a.style.color = '#d7f9df';
-  a.style.fontWeight = '650';
-  a.style.textDecoration = 'none';
-  a.style.cursor = 'pointer';
-  a.addEventListener('click', function(ev) {
-    // Keep this a real browser link. Ctrl/Cmd+click and middle-click can then
-    // open many Spotify results in background tabs without changing this view.
-    ev.stopPropagation();
-  });
-  return a;
+  return url ? 'Spotify ↗' : '-';
 }
 """)
 
@@ -989,8 +974,19 @@ function(params) {
   const ev = (params && params.event) ? params.event : {};
 
   if (field === 'spotify') {
-    // Spotify is rendered as a real <a>. Do not intercept the click here:
-    // native Ctrl/Cmd+click and middle-click behaviour is the whole point.
+    const url = String(row.spotify || params.value || '');
+    if (!url) return;
+    // Never return a DOM node from a streamlit-aggrid renderer: React treats
+    // HTMLAnchorElement as an invalid child (React error #31). Handle the
+    // navigation from the cell event instead. Modifier/middle clicks always
+    // open a new tab and immediately restore focus to RadioCharts so several
+    // Spotify results can be queued without leaving the table.
+    try {
+      const tab = host.open(url, '_blank', 'noopener,noreferrer');
+      if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
+        try { host.focus(); } catch(e) {}
+      }
+    } catch(e) {}
     return;
   }
 
@@ -1581,8 +1577,9 @@ def render_song_grid(
     if "spotify" in show.columns:
         gb.configure_column(
             "spotify", "Spotify", minWidth=90, width=95, sortable=False, filter=False,
-            cellRenderer=SPOTIFY_LINK_RENDERER,
-            headerTooltip="Prawdziwy link przeglądarkowy. Ctrl/Cmd+klik lub środkowy przycisk otwiera kolejne wyniki Spotify w tle.",
+            valueFormatter=SPOTIFY_LABEL_FORMATTER,
+            cellStyle={"cursor": "pointer", "color": "#d7f9df", "fontWeight": "650"},
+            headerTooltip="Klik otwiera Spotify w nowej karcie. Ctrl/Cmd+klik lub środkowy przycisk pozwala otwierać kolejne wyniki bez opuszczania tabeli.",
         )
     if "spotify_copy" in show.columns:
         gb.configure_column(
