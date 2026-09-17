@@ -1,4 +1,4 @@
-## 1.1.0 — tożsamość utworów, ręczne scalanie i szybszy resumable backfill
+## 1.1.1 — tożsamość utworów, ręczne scalanie i szybszy resumable backfill
 
 - automatyczne scalanie wariantów jednego nagrania zostało rozszerzone o charakterystyczny tytuł i graf powiązanych kredytów wykonawców;
 - po scaleniu zapamiętywane są stare sygnatury wykonawca+tytuł oraz stare ID, więc późniejszy import nie powinien odtworzyć tego samego duplikatu;

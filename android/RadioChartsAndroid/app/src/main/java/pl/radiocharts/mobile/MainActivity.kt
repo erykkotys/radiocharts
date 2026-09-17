@@ -743,6 +743,10 @@ private fun sortChoices(withPeriod:Boolean): List<SortChoice> {
         Text(s.artist,style=MaterialTheme.typography.titleMedium,color=Color(0xFFB5BDC9));Text(s.title,style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
         Row(Modifier.fillMaxWidth().padding(vertical=8.dp),horizontalArrangement=Arrangement.SpaceBetween){MetricTiny("Popularity",s.popularity?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Chart Score",s.familiarity?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Momentum",s.momentum?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Zasięg 7d",s.radio_reach?.let{"%.0f%%".format(it)}?:"—");MetricTiny("Emisje 7d",(s.airplay_spins_7d?:0).toString())}
         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){PreviewButton(s, previewVm);SpotifyButton(s)}
+        OutlinedButton(
+            onClick={context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://www.olis.pl/charts/oficjalna-lista-wyroznien")))},
+            modifier=Modifier.fillMaxWidth(),
+        ){Text("OLiS wyróżnienia ↗")}
         HorizontalDivider(Modifier.padding(vertical=8.dp))
         var dl by remember(s.song_id,s.downloaded){mutableStateOf(s.downloaded)};var status by remember(s.song_id,s.status){mutableStateOf(s.status)};var note by remember(s.song_id,s.note){mutableStateOf(s.note)}
         Row(verticalAlignment=Alignment.CenterVertically){

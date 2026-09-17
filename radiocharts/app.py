@@ -841,6 +841,11 @@ def spotify_search_url(artist: str, title: str) -> str:
     return f"https://open.spotify.com/search/{query}"
 
 
+def olis_awards_url() -> str:
+    """Official ZPAV/OLiS searchable Gold/Platinum/Diamond awards database."""
+    return "https://www.olis.pl/charts/oficjalna-lista-wyroznien"
+
+
 def filter_song_rows(frame: pd.DataFrame, query: str) -> pd.DataFrame:
     """Accent-insensitive artist/title filtering; every typed token must match."""
     q = normalize(str(query or ""))
@@ -2305,7 +2310,7 @@ elif view_key == "song":
                 spotify_url = spotify_search_url(str(row.artist), str(row.title))
 
                 with st.container(border=True):
-                    head1, head2, head3 = st.columns([6, 1.05, .9])
+                    head1, head2, head3, head4 = st.columns([5.2, 1.05, .9, 1.2])
                     with head1:
                         st.markdown(
                             f'<div class="rc-song-title">{html.escape(str(row.artist))} — {html.escape(str(row.title))}</div>'
@@ -2316,6 +2321,8 @@ elif view_key == "song":
                         render_preview_button(song_id, row.artist, row.title, spotify_url)
                     with head3:
                         st.link_button("Spotify ↗", spotify_url, use_container_width=True)
+                    with head4:
+                        st.link_button("OLiS wyróżnienia ↗", olis_awards_url(), use_container_width=True)
 
                     pop_frame = with_popularity(pd.DataFrame([row.to_dict()]), AIR_REV)
                     popularity_label = f"{float(pop_frame.iloc[0].get('popularity', 0)):.0f}%" if not pop_frame.empty else "—"
@@ -3566,7 +3573,7 @@ Worker sprawdza automatyczne źródła dwa razy dziennie — 07:30 i 20:30 czasu
     with st.expander("13. Spotify, odsłuch i własna ocena", expanded=False):
         st.markdown(
             """
-**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł; w tabelach obsługa kliknięcia jest realizowana bezpiecznie przez AG Grid, a Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania bieżącego widoku. Kolumna **Udostępnij ↗** wyszukuje dokładny utwór przez iTunes i otwiera jego smart-link Songlink/Odesli; w razie braku trafienia wraca do wyszukiwania Spotify.
+**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł; w tabelach obsługa kliknięcia jest realizowana bezpiecznie przez AG Grid, a Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania bieżącego widoku. Kolumna **Udostępnij ↗** wyszukuje dokładny utwór przez iTunes i otwiera jego smart-link Songlink/Odesli; w razie braku trafienia wraca do wyszukiwania Spotify. Na karcie **Utwór** przycisk **OLiS wyróżnienia ↗** prowadzi do oficjalnej, przeszukiwalnej bazy ZPAV/OLiS ze Złotymi, Platynowymi i Diamentowymi Płytami.
 
 Twoje pola **Status, Downloaded i Notatka** są warstwą redakcyjną i nie zmieniają automatycznych wskaźników. Notatka jest celowo ostatnią kolumną tabel, żeby nie zabierała miejsca najważniejszym danym liczbowym.
             """
