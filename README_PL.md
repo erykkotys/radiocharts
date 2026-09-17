@@ -1,3 +1,22 @@
+## 1.1.0 — tożsamość utworów, ręczne scalanie i szybszy resumable backfill
+
+- automatyczne scalanie wariantów jednego nagrania zostało rozszerzone o charakterystyczny tytuł i graf powiązanych kredytów wykonawców;
+- po scaleniu zapamiętywane są stare sygnatury wykonawca+tytuł oraz stare ID, więc późniejszy import nie powinien odtworzyć tego samego duplikatu;
+- karta **Utwór → Duplikaty / scalanie utworu** pozwala ręcznie scalić przypadki niejednoznaczne; scalanie zachowuje emisje, notowania, status, Downloaded i notatki;
+- backfill odSluchane przed startem hurtowo wczytuje już poprawnie zapisane bloki `stacja + data + 2h`, dzięki czemu roczny backfill może szybko pominąć miesiące, które już są w bazie;
+- ponowne zapisanie jednego bloku pozostaje atomowe i odporne na duplikaty;
+- Manual w aplikacji został zaktualizowany o `1d`, obecny mechanizm Spotify, scalanie duplikatów oraz dokładne zasady wznawiania backfillu.
+
+### Aktualny manual
+
+Najbardziej aktualna dokumentacja użytkowa jest w zakładce **Manual** samej aplikacji. README zachowuje również historię zmian starszych wersji; opisy dawnych wersji poniżej są changelogiem, a nie bieżącym stanem funkcji.
+
+## 1.0.7 — zmiana kategorii F1 → F3
+
+- Kategoria radia `F1` została zastąpiona przez `F3` w statusach, filtrach, API i synchronizacji bazy.
+- Istniejące `Baza F1` i `F1 Candidate` są automatycznie migrowane odpowiednio do `Baza F3` i `F3 Candidate`.
+- Stare eksporty zawierające jeszcze `F1` są kompatybilnie normalizowane do `F3`.
+
 ## 1.0.6 — hotfix Spotify / React #31
 
 - web: naprawiono błąd komponentu `Minified React error #31` po zmianie Spotify z 1.0.5; AG Grid nie zwraca już `HTMLAnchorElement` do Reacta;
@@ -36,7 +55,7 @@
 
 - Dashboard wyrównuje wszystkie kontrolki w górnym pasku do jednej linii; Status ma własną etykietę i ten sam wymiar kontrolki co sąsiednie filtry.
 - nowa migracja `radio_library_heard_downloaded_v2` ponownie naprawia istniejące rekordy `Baza <kategoria>`, ustawiając **Przesłuchany = ✓** i **DL = ✓** nawet wtedy, gdy marker z 0.3.28 był już zapisany;
-- ręczne ustawienie dowolnego realnego statusu `Baza R2/R1/CF2/CF1/F1/G1/G2/SP1/SP2/NB` również automatycznie wymusza Przesłuchany i DL; `Baza Hold` pozostaje neutralny.
+- ręczne ustawienie dowolnego realnego statusu `Baza R2/R1/CF2/CF1/F3/G1/G2/SP1/SP2/NB` również automatycznie wymusza Przesłuchany i DL; `Baza Hold` pozostaje neutralny.
 
 ## 0.3.28 — Popularity, filtry wielokrotne i pełna synchronizacja bazy
 
@@ -56,14 +75,14 @@
 - nowa zakładka **Baza** pokazuje wszystkie utwory z aktywnym statusem `Baza ...`, także gdy mają 0 emisji w wybranym okresie;
 - filtry statusu w Dashboardzie i Emisjach;
 - synchronizacja bazy radia przez wklejenie pełnego TXT/TSV oraz diagnostyka liczby utworów/kategorii;
-- kolejność statusów dopasowana do hierarchii CF1/CF2/R1/R2/G1/G2/SP1/SP2/NB/F1.
+- kolejność statusów dopasowana do hierarchii CF1/CF2/R1/R2/G1/G2/SP1/SP2/NB/F3.
 
 ## 0.3.26 — synchronizacja bazy radia i czytelniejsze Emisje
 
 - Emisje pokazują osobno **Zasięg 7d** oraz **Zasięg** dla aktualnie wybranego okresu; okresowy Zasięg jest wyświetlany jako procent raportujących stacji z liczbą stacji w nawiasie.
 - RMF/ZET/OLiA/OLiS/ESKA w Emisjach używają kompaktowego zapisu pozycji z tygodniami, np. `#7 (5w)`.
 - Przesłuchano, Status i DL są ustawione bezpośrednio za Odsłuchem w głównych tabelach.
-- Taksonomia statusów obejmuje teraz wszystkie kategorie z lokalnej bazy radia: R2, R1, CF2, CF1, F1, G1, G2, SP1, SP2 i NB — zarówno jako `... Candidate`, jak i `Baza ...`.
+- Taksonomia statusów obejmuje teraz wszystkie kategorie z lokalnej bazy radia: R2, R1, CF2, CF1, F3, G1, G2, SP1, SP2 i NB — zarówno jako `... Candidate`, jak i `Baza ...`.
 - Jednorazowa migracja produkcyjna importuje do wspólnego katalogu eksport bazy radia z 2026-08-25, aktualizuje status istniejących utworów do `Baza <Cat>`, dodaje brakujące i zaznacza DL.
 - W **Dane → Synchronizacja bazy radia** można później wrzucić kolejny plik TSV/TXT tego samego typu i ponownie wyrównać RadioCharts z biblioteką emisyjną.
 

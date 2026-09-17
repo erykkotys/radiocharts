@@ -14,6 +14,7 @@ from filelock import FileLock
 
 from radiocharts.db import (
     airplay_window_exists,
+    existing_airplay_windows,
     list_airplay_stations,
     store_airplay_window,
     upsert_airplay_stations,
@@ -254,15 +255,17 @@ def collect_latest_window(
     total = len(stations) * len(windows)
     ok = errors = skipped = plays_total = done = 0
     messages: list[str] = []
+    station_ids = [int(s["station_id"]) for s in stations]
+    existing = existing_airplay_windows(
+        station_ids, windows[0][0], windows[-1][0], require_completed_capture=True
+    ) if windows and station_ids else set()
     with FileLock(str(LOCK_PATH), timeout=1):
         for play_date, start_hour in windows:
             for station in stations:
                 done += 1
                 station_id = int(station["station_id"])
                 name = str(station.get("name") or station_id)
-                if airplay_window_exists(
-                    station_id, play_date, start_hour, require_completed_capture=True
-                ):
+                if (station_id, play_date.isoformat(), int(start_hour)) in existing:
                     skipped += 1
                     msg = f"{name} {play_date} {start_hour:02d}-{(start_hour+2)%24:02d}: już jest"
                 else:
@@ -273,6 +276,7 @@ def collect_latest_window(
                         )
                         ok += 1
                         plays_total += stored
+                        existing.add((station_id, play_date.isoformat(), int(start_hour)))
                         msg = f"{name} {play_date} {start_hour:02d}-{(start_hour+2)%24:02d}: OK ({stored})"
                     except Exception as exc:
                         errors += 1
@@ -320,6 +324,9 @@ def backfill_airplay(
     if total == 0:
         return {"ok": 0, "errors": 0, "skipped": 0, "plays": 0, "total": 0, "messages": []}
     stations_by_id = {int(s["station_id"]): s for s in _stations_or_discover()}
+    existing = existing_airplay_windows(
+        ids, start_date, end_date, require_completed_capture=True
+    )
     missing = [x for x in ids if x not in stations_by_id]
     if missing:
         raise ValueError(f"Brak stacji o ID: {', '.join(map(str, missing[:10]))}")
@@ -332,9 +339,7 @@ def backfill_airplay(
                 done += 1
                 station = stations_by_id[station_id]
                 name = str(station.get("name") or station_id)
-                if airplay_window_exists(
-                    station_id, d, start_hour, require_completed_capture=True
-                ):
+                if (station_id, d.isoformat(), int(start_hour)) in existing:
                     skipped += 1
                     msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: już jest"
                 else:
@@ -345,6 +350,7 @@ def backfill_airplay(
                         )
                         ok += 1
                         plays_total += stored
+                        existing.add((station_id, d.isoformat(), int(start_hour)))
                         msg = f"{name} {d} {start_hour:02d}-{(start_hour+2)%24:02d}: OK ({stored})"
                     except Exception as exc:
                         errors += 1

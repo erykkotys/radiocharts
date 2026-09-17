@@ -70,12 +70,35 @@ CREATE TABLE IF NOT EXISTS song_notes (
     updated_at TEXT NOT NULL
 );
 
+-- Stable identity memory.  When two historical rows are merged, remember both
+-- the exact credit/title signature and the retired numeric id so later imports
+-- cannot recreate the duplicate and old links can still resolve to the master.
+CREATE TABLE IF NOT EXISTS song_identity_aliases (
+    artist_key TEXT NOT NULL,
+    title_key TEXT NOT NULL,
+    canonical_song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    source TEXT NOT NULL DEFAULT 'auto',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(artist_key, title_key)
+);
+CREATE INDEX IF NOT EXISTS idx_song_identity_alias_target ON song_identity_aliases(canonical_song_id);
+
+CREATE TABLE IF NOT EXISTS song_id_redirects (
+    old_song_id INTEGER PRIMARY KEY,
+    canonical_song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL DEFAULT 'merge',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_song_id_redirect_target ON song_id_redirects(canonical_song_id);
+
 -- A real Baza category is a hard invariant: if a title is in the local
 -- radio library it has already been auditioned and downloaded.  These triggers
 -- keep the invariant true even if an older UI/client writes stale checkbox values.
+DROP TRIGGER IF EXISTS trg_song_notes_base_flags_insert;
+DROP TRIGGER IF EXISTS trg_song_notes_base_flags_update;
 CREATE TRIGGER IF NOT EXISTS trg_song_notes_base_flags_insert
 AFTER INSERT ON song_notes
-WHEN NEW.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB')
+WHEN NEW.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F3','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB')
  AND (NEW.heard<>1 OR NEW.downloaded<>1)
 BEGIN
   UPDATE song_notes SET heard=1, downloaded=1 WHERE song_id=NEW.song_id;
@@ -83,7 +106,7 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS trg_song_notes_base_flags_update
 AFTER UPDATE OF status,heard,downloaded ON song_notes
-WHEN NEW.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB')
+WHEN NEW.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F3','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB')
  AND (NEW.heard<>1 OR NEW.downloaded<>1)
 BEGIN
   UPDATE song_notes SET heard=1, downloaded=1 WHERE song_id=NEW.song_id;
@@ -649,6 +672,314 @@ def artist_anchor(value: str) -> str:
     return anchor
 
 
+def _artist_identity_tokens(value: str) -> set[str]:
+    """Meaningful tokens used only for conservative same-recording matching.
+
+    Credits coming from RDS often alternate between a project name, a year and
+    a long performer list.  Exact artist matching is still preferred; these
+    tokens merely let obviously related credits form a graph for one distinctive
+    title (for example Męskie Granie Orkiestra 2025 vs the full guest credit).
+    """
+    key = normalize(value)
+    stop = {"feat", "featuring", "with", "and", "the", "official", "version"}
+    out: set[str] = set()
+    for token in key.split():
+        if re.fullmatch(r"(?:19|20)\d{2}", token):
+            continue
+        if token in stop or len(token) < 4:
+            continue
+        out.add(token)
+    return out
+
+
+def _artist_variants_match(left: str, right: str) -> bool:
+    if normalize(left) == normalize(right):
+        return True
+    if artist_anchor(left) and artist_anchor(left) == artist_anchor(right):
+        return True
+    lkey = re.sub(r"\b(?:19|20)\d{2}\b", "", normalize(left)).strip()
+    rkey = re.sub(r"\b(?:19|20)\d{2}\b", "", normalize(right)).strip()
+    if lkey and rkey and (lkey in rkey or rkey in lkey) and min(len(lkey), len(rkey)) >= 7:
+        return True
+    common = _artist_identity_tokens(left) & _artist_identity_tokens(right)
+    # Two shared meaningful tokens are a very strong signal.  One long token is
+    # enough for a surname/project bridge, but only inside an already identical
+    # distinctive-title group.
+    return len(common) >= 2 or any(len(token) >= 6 for token in common)
+
+
+def _bump_song_identity_revision(con: sqlite3.Connection) -> None:
+    con.execute(
+        "INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_identity_revision',?)",
+        (_utcnow(),),
+    )
+
+
+def _merge_song_ids(
+    con: sqlite3.Connection,
+    canonical_id: int,
+    duplicate_ids: Iterable[int],
+    *,
+    source: str = "auto",
+) -> int:
+    """Merge duplicate song rows into ``canonical_id`` without losing history.
+
+    Chart entries, airplay, notes, flags and missing release/ISRC metadata are
+    preserved.  Exact retired signatures and numeric ids are retained as aliases
+    so future collectors and old URLs resolve to the master instead of creating
+    the duplicate again.
+    """
+    cid = int(canonical_id)
+    canonical = con.execute("SELECT * FROM songs WHERE id=?", (cid,)).fetchone()
+    if not canonical:
+        raise ValueError(f"Nie istnieje utwór docelowy ID {cid}")
+    ids = []
+    for raw in duplicate_ids:
+        did = int(raw)
+        if did != cid and did not in ids:
+            ids.append(did)
+    if not ids:
+        return 0
+
+    valid_rows = []
+    for did in ids:
+        row = con.execute("SELECT * FROM songs WHERE id=?", (did,)).fetchone()
+        if row:
+            valid_rows.append(row)
+    if not valid_rows:
+        return 0
+
+    all_ids = [cid] + [int(r["id"]) for r in valid_rows]
+    placeholders = ",".join("?" for _ in all_ids)
+    notes = con.execute(
+        f"SELECT * FROM song_notes WHERE song_id IN ({placeholders}) ORDER BY updated_at DESC",
+        all_ids,
+    ).fetchall()
+    if notes:
+        heard = any(bool(n["heard"]) for n in notes)
+        downloaded = any(bool(n["downloaded"]) for n in notes)
+        chosen = notes[0]
+        note_texts: list[str] = []
+        for n in notes:
+            txt = str(n["note"] or "").strip()
+            if txt and txt not in note_texts:
+                note_texts.append(txt)
+        status = str(chosen["status"] or "Nie słuchałem")
+        con.execute(
+            """INSERT INTO song_notes(song_id,heard,status,downloaded,note,updated_at) VALUES(?,?,?,?,?,?)
+               ON CONFLICT(song_id) DO UPDATE SET heard=excluded.heard,status=excluded.status,
+                   downloaded=excluded.downloaded,note=excluded.note,updated_at=excluded.updated_at""",
+            (cid, int(heard), status, int(downloaded), "\n---\n".join(note_texts), chosen["updated_at"]),
+        )
+
+    # Preserve useful metadata when the chosen master lacks it.
+    release_date = str(canonical["release_date"] or "").strip()
+    isrc = str(canonical["isrc"] or "").strip()
+    if not release_date:
+        release_date = next((str(r["release_date"]) for r in valid_rows if str(r["release_date"] or "").strip()), "")
+    if not isrc:
+        isrc = next((str(r["isrc"]) for r in valid_rows if str(r["isrc"] or "").strip()), "")
+    con.execute("UPDATE songs SET release_date=?,isrc=? WHERE id=?", (release_date or None, isrc or None, cid))
+
+    merged = 0
+    now = _utcnow()
+    for dup in valid_rows:
+        did = int(dup["id"])
+        # Remember aliases before deleting the old catalogue row.
+        con.execute(
+            """INSERT INTO song_identity_aliases(artist_key,title_key,canonical_song_id,source,created_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(artist_key,title_key) DO UPDATE SET
+                 canonical_song_id=excluded.canonical_song_id,source=excluded.source,created_at=excluded.created_at""",
+            (str(dup["artist_key"]), str(dup["title_key"]), cid, str(source), now),
+        )
+        con.execute(
+            """INSERT INTO song_id_redirects(old_song_id,canonical_song_id,reason,created_at)
+               VALUES(?,?,?,?)
+               ON CONFLICT(old_song_id) DO UPDATE SET
+                 canonical_song_id=excluded.canonical_song_id,reason=excluded.reason,created_at=excluded.created_at""",
+            (did, cid, str(source), now),
+        )
+        # Redirect aliases/old ids that had already pointed at this duplicate.
+        con.execute("UPDATE song_identity_aliases SET canonical_song_id=? WHERE canonical_song_id=?", (cid, did))
+        con.execute("UPDATE song_id_redirects SET canonical_song_id=? WHERE canonical_song_id=?", (cid, did))
+
+        dup_entries = con.execute("SELECT id,issue_id FROM chart_entries WHERE song_id=?", (did,)).fetchall()
+        for ent in dup_entries:
+            conflict = con.execute(
+                "SELECT id FROM chart_entries WHERE issue_id=? AND song_id=?",
+                (int(ent["issue_id"]), cid),
+            ).fetchone()
+            if conflict:
+                con.execute("DELETE FROM chart_entries WHERE id=?", (int(ent["id"]),))
+            else:
+                con.execute("UPDATE chart_entries SET song_id=? WHERE id=?", (cid, int(ent["id"])))
+        con.execute("UPDATE airplay_plays SET song_id=? WHERE song_id=?", (cid, did))
+        con.execute("DELETE FROM song_notes WHERE song_id=?", (did,))
+        con.execute("DELETE FROM songs WHERE id=?", (did,))
+        merged += 1
+
+    # The master's own exact signature is useful too: future variant logic can
+    # resolve through one table before creating anything new.
+    canonical_now = con.execute("SELECT artist_key,title_key FROM songs WHERE id=?", (cid,)).fetchone()
+    if canonical_now:
+        con.execute(
+            """INSERT OR IGNORE INTO song_identity_aliases(artist_key,title_key,canonical_song_id,source,created_at)
+               VALUES(?,?,?,?,?)""",
+            (str(canonical_now["artist_key"]), str(canonical_now["title_key"]), cid, "canonical", now),
+        )
+    if merged:
+        _bump_song_identity_revision(con)
+    return merged
+
+
+def _merge_duplicate_songs_v2(con: sqlite3.Connection) -> int:
+    """Conservatively collapse connected artist-credit variants of one title.
+
+    Unlike v1 this runs on title anchors and artist-token connectivity, so long
+    ensemble credits and year-labelled project names can converge.  It never
+    merges unrelated artist components merely because they happen to share a
+    title; ambiguous cases stay available for manual merge in the UI.
+    """
+    rows = con.execute(
+        """SELECT s.*,
+                  (SELECT COUNT(*) FROM chart_entries e WHERE e.song_id=s.id) AS chart_count,
+                  (SELECT COUNT(*) FROM airplay_plays p WHERE p.song_id=s.id) AS spin_count,
+                  CASE WHEN EXISTS(SELECT 1 FROM song_notes n WHERE n.song_id=s.id) THEN 1 ELSE 0 END AS has_note
+           FROM songs s ORDER BY s.id"""
+    ).fetchall()
+    groups: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        anchor = title_anchor(str(row["title"] or "")) or str(row["title_key"] or "")
+        distinctive = bool(anchor) and (len(anchor) >= 8 or len(anchor.split()) >= 2)
+        if distinctive:
+            groups.setdefault(anchor, []).append(row)
+
+    merged = 0
+    for variants in groups.values():
+        if len(variants) < 2:
+            continue
+        # Connected components by related artist credit. This is deliberately
+        # transitive: a full ensemble credit can bridge the project-name RDS row
+        # and a shorter guest-artist row without title-only guesswork.
+        remaining = {int(r["id"]): r for r in variants}
+        while remaining:
+            seed_id = next(iter(remaining))
+            component_ids = {seed_id}
+            frontier = [seed_id]
+            while frontier:
+                current_id = frontier.pop()
+                current = remaining.get(current_id) or next(r for r in variants if int(r["id"]) == current_id)
+                for oid, other in list(remaining.items()):
+                    if oid in component_ids:
+                        continue
+                    if _artist_variants_match(str(current["artist"]), str(other["artist"])):
+                        component_ids.add(oid)
+                        frontier.append(oid)
+            component = [next(r for r in variants if int(r["id"]) == sid) for sid in component_ids]
+            for sid in component_ids:
+                remaining.pop(sid, None)
+            if len(component) < 2:
+                continue
+            component.sort(
+                key=lambda r: (
+                    -int(r["has_note"] or 0),
+                    -int(r["chart_count"] or 0),
+                    -int(r["spin_count"] or 0),
+                    int(r["id"]),
+                )
+            )
+            cid = int(component[0]["id"])
+            merged += _merge_song_ids(con, cid, [int(r["id"]) for r in component[1:]], source="auto-v2")
+    return merged
+
+
+def merge_songs(canonical_id: int, duplicate_ids: Iterable[int]) -> dict:
+    """Public/manual merge used by the Utwór screen.
+
+    Existing duplicate rows must be merged physically even if the conservative
+    ``canonical_song_id`` read-path would already *display* them through the
+    chart-backed master. Retired/nonexistent ids are resolved through redirects.
+    """
+    init_db()
+    cid = canonical_song_id(int(canonical_id))
+    ids: list[int] = []
+    with connect() as con:
+        for raw in duplicate_ids:
+            did = int(raw)
+            if did == cid:
+                continue
+            exists = con.execute("SELECT 1 FROM songs WHERE id=?", (did,)).fetchone()
+            if exists:
+                if did not in ids:
+                    ids.append(did)
+                continue
+            redirect = con.execute("SELECT canonical_song_id FROM song_id_redirects WHERE old_song_id=?", (did,)).fetchone()
+            if redirect and int(redirect["canonical_song_id"]) != cid:
+                resolved = int(redirect["canonical_song_id"])
+                if resolved not in ids:
+                    ids.append(resolved)
+        before = con.execute("SELECT artist,title FROM songs WHERE id=?", (cid,)).fetchone()
+        merged = _merge_song_ids(con, cid, ids, source="manual")
+    return {
+        "canonical_song_id": cid,
+        "artist": str(before["artist"] if before else ""),
+        "title": str(before["title"] if before else ""),
+        "merged": int(merged),
+    }
+
+
+def duplicate_song_candidates(song_id: int, limit: int = 40) -> list[dict]:
+    """Likely aliases for manual review, ordered by strongest title/artist signal."""
+    init_db()
+    sid = canonical_song_id(int(song_id))
+    with connect() as con:
+        current = con.execute("SELECT id,artist,title,title_key FROM songs WHERE id=?", (sid,)).fetchone()
+        if not current:
+            return []
+        exact = con.execute(
+            """SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+                      (SELECT COUNT(*) FROM chart_entries e WHERE e.song_id=s.id) AS chart_count,
+                      (SELECT COUNT(*) FROM airplay_plays p WHERE p.song_id=s.id) AS spin_count,
+                      COALESCE((SELECT status FROM song_notes n WHERE n.song_id=s.id),'Nie słuchałem') AS status
+               FROM songs s WHERE s.id<>? AND s.title_key=? ORDER BY chart_count DESC,spin_count DESC,s.id LIMIT ?""",
+            (sid, str(current["title_key"]), int(limit)),
+        ).fetchall()
+    out = []
+    for r in exact:
+        item = dict(r)
+        item["artist_match"] = bool(_artist_variants_match(str(current["artist"]), str(r["artist"])))
+        out.append(item)
+    out.sort(key=lambda x: (not bool(x["artist_match"]), -int(x["chart_count"] or 0), -int(x["spin_count"] or 0), int(x["song_id"])))
+    return out[: int(limit)]
+
+
+def search_song_merge_candidates(query: str, exclude_song_id: int | None = None, limit: int = 40) -> list[dict]:
+    """Small server-side search used only by the manual duplicate merge tool."""
+    init_db()
+    q = normalize(query)
+    if len(q) < 2:
+        return []
+    like = f"%{q}%"
+    params: list[object] = [like, like]
+    where = "(s.artist_key LIKE ? OR s.title_key LIKE ?)"
+    if exclude_song_id is not None:
+        where += " AND s.id<>?"
+        params.append(int(exclude_song_id))
+    params.append(max(1, min(int(limit), 100)))
+    with connect() as con:
+        rows = con.execute(
+            f"""SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+                       (SELECT COUNT(*) FROM chart_entries e WHERE e.song_id=s.id) AS chart_count,
+                       (SELECT COUNT(*) FROM airplay_plays p WHERE p.song_id=s.id) AS spin_count,
+                       COALESCE((SELECT status FROM song_notes n WHERE n.song_id=s.id),'Nie słuchałem') AS status
+                FROM songs s WHERE {where}
+                ORDER BY chart_count DESC,spin_count DESC,s.artist COLLATE NOCASE,s.title COLLATE NOCASE LIMIT ?""",
+            tuple(params),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _merge_duplicate_songs(con: sqlite3.Connection) -> int:
     """One-time migration for aliases created before artist-anchor matching.
 
@@ -795,6 +1126,7 @@ def init_db() -> None:
     current_path = str(DB_PATH)
     required_markers = {
         "song_alias_merge_v1",
+        "song_alias_merge_v2",
         "billboard_metadata_reset_v1",
         "billboard_metadata_reset_v2",
         "source_checks_v1",
@@ -806,6 +1138,7 @@ def init_db() -> None:
         "airplay_chart_title_relink_v2",
         "status_taxonomy_v2",
         "status_taxonomy_v3",
+        "status_taxonomy_v4",
         "song_downloaded_v1",
         "radio_library_seed_20260825_v2",
         "radio_library_heard_downloaded_v1",
@@ -902,6 +1235,11 @@ def init_db() -> None:
                         merged = _merge_duplicate_songs(con)
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v1',?)", (str(merged),))
 
+                    migration_v2 = con.execute("SELECT value FROM app_meta WHERE key='song_alias_merge_v2'").fetchone()
+                    if not migration_v2:
+                        merged_v2 = _merge_duplicate_songs_v2(con)
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v2',?)", (str(merged_v2),))
+
                     bb_reset = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v1'").fetchone()
                     if not bb_reset:
                         con.execute(
@@ -949,6 +1287,21 @@ def init_db() -> None:
                                 (new_status, old_status),
                             )
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('status_taxonomy_v3','done')")
+
+                    status_mig_v4 = con.execute("SELECT value FROM app_meta WHERE key='status_taxonomy_v4'").fetchone()
+                    if not status_mig_v4:
+                        # 1.0.7: station category F1 was renamed to F3. Preserve
+                        # existing editorial state while moving old rows to the new taxonomy.
+                        status_map_v4 = {
+                            "F1 Candidate": "F3 Candidate",
+                            "Baza F1": "Baza F3",
+                        }
+                        for old_status, new_status in status_map_v4.items():
+                            con.execute(
+                                "UPDATE song_notes SET status=? WHERE status=?",
+                                (new_status, old_status),
+                            )
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('status_taxonomy_v4','done')")
 
                     # 0.3.27: robust one-shot seed of the user's current radio
                     # library.  0.3.26 kept this migration outside the fast-path
@@ -1010,7 +1363,7 @@ def init_db() -> None:
                         # still remained unchecked. Only real library categories are
                         # touched; Baza Hold stays a neutral parking state.
                         real_base_statuses = tuple(
-                            f"Baza {cat}" for cat in ("R2", "R1", "CF2", "CF1", "F1", "G1", "G2", "SP1", "SP2", "NB")
+                            f"Baza {cat}" for cat in ("R2", "R1", "CF2", "CF1", "F3", "G1", "G2", "SP1", "SP2", "NB")
                         )
                         placeholders = ",".join("?" for _ in real_base_statuses)
                         changed_v2 = con.execute(
@@ -1034,7 +1387,7 @@ def init_db() -> None:
                         # install persistent DB triggers (created by SCHEMA above) so
                         # this invariant no longer depends on one-shot migration state.
                         real_base_statuses = tuple(
-                            f"Baza {cat}" for cat in ("R2", "R1", "CF2", "CF1", "F1", "G1", "G2", "SP1", "SP2", "NB")
+                            f"Baza {cat}" for cat in ("R2", "R1", "CF2", "CF1", "F3", "G1", "G2", "SP1", "SP2", "NB")
                         )
                         placeholders = ",".join("?" for _ in real_base_statuses)
                         changed_v3 = con.execute(
@@ -1120,27 +1473,55 @@ def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release
     akey, tkey = normalize(artist), normalize(title)
     row = con.execute("SELECT id, release_date FROM songs WHERE artist_key=? AND title_key=?", (akey, tkey)).fetchone()
     if not row:
+        alias = con.execute(
+            """SELECT s.id,s.release_date FROM song_identity_aliases a
+               JOIN songs s ON s.id=a.canonical_song_id
+               WHERE a.artist_key=? AND a.title_key=? LIMIT 1""",
+            (akey, tkey),
+        ).fetchone()
+        if alias:
+            row = alias
+    if not row:
         anchor = artist_anchor(artist)
         candidates = con.execute("SELECT id,artist,release_date FROM songs WHERE title_key=?", (tkey,)).fetchall()
         matches = [r for r in candidates if artist_anchor(str(r["artist"])) == anchor]
         if len(matches) == 1:
             row = matches[0]
+        else:
+            related = [r for r in candidates if _artist_variants_match(artist, str(r["artist"]))]
+            if len(related) == 1:
+                row = related[0]
     if row:
         if release_date and not row["release_date"]:
             con.execute("UPDATE songs SET release_date=? WHERE id=?", (release_date, row["id"]))
+        # Remember this exact incoming signature even when the canonical display
+        # credit differs. The next occurrence becomes a constant-time lookup.
+        con.execute(
+            """INSERT OR IGNORE INTO song_identity_aliases(artist_key,title_key,canonical_song_id,source,created_at)
+               VALUES(?,?,?,?,?)""",
+            (akey, tkey, int(row["id"]), "auto-match", _utcnow()),
+        )
         return int(row["id"])
     cur = con.execute(
         "INSERT INTO songs(artist,title,artist_key,title_key,release_date,created_at) VALUES (?,?,?,?,?,?)",
         (artist.strip(), title.strip(), akey, tkey, release_date, _utcnow()),
     )
-    return int(cur.lastrowid)
+    sid = int(cur.lastrowid)
+    con.execute(
+        """INSERT OR IGNORE INTO song_identity_aliases(artist_key,title_key,canonical_song_id,source,created_at)
+           VALUES(?,?,?,?,?)""",
+        (akey, tkey, sid, "canonical", _utcnow()),
+    )
+    return sid
 
 
-RADIO_LIBRARY_CATEGORIES = ("R2", "R1", "CF2", "CF1", "F1", "G1", "G2", "SP1", "SP2", "NB")
+RADIO_LIBRARY_CATEGORIES = ("R2", "R1", "CF2", "CF1", "F3", "G1", "G2", "SP1", "SP2", "NB")
 
 
 def radio_library_status(category: str) -> str:
     cat = str(category or "").strip().upper()
+    if cat == "F1":
+        cat = "F3"
     if cat not in RADIO_LIBRARY_CATEGORIES:
         raise ValueError(f"Nieobsługiwana kategoria bazy radia: {category!r}")
     return f"Baza {cat}"
@@ -1170,6 +1551,8 @@ def parse_radio_library_tsv(text: str) -> tuple[list[dict], dict]:
     unsupported: dict[str, int] = {}
     for src in reader:
         cat = str(src.get("Cat") or "").strip().upper()
+        if cat == "F1":
+            cat = "F3"
         artist = str(src.get("Artist") or "").strip()
         title = str(src.get("Title") or "").strip()
         if not artist or not title or not cat:
@@ -1280,9 +1663,9 @@ def radio_library_catalog() -> list[dict]:
                       (SELECT MIN(i.chart_date)
                          FROM chart_entries ce JOIN chart_issues i ON i.id=ce.issue_id
                         WHERE ce.song_id=s.id) AS first_chart_date,
-                      CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.heard END AS heard,
+                      CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F3','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.heard END AS heard,
                       n.status,
-                      CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F1','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.downloaded END AS downloaded,
+                      CASE WHEN n.status IN ('Baza R2','Baza R1','Baza CF2','Baza CF1','Baza F3','Baza G1','Baza G2','Baza SP1','Baza SP2','Baza NB') THEN 1 ELSE n.downloaded END AS downloaded,
                       n.note,n.updated_at
                FROM songs s
                JOIN song_notes n ON n.song_id=s.id
@@ -1390,6 +1773,7 @@ def upsert_issue(source: str, chart_date: str | date, issue_key: str, chart_size
 
 
 def update_note(song_id: int, heard: bool, status: str, note: str, downloaded: bool | None = None) -> None:
+    status = {"F1 Candidate": "F3 Candidate", "Baza F1": "Baza F3"}.get(str(status), str(status))
     init_db()
     with connect() as con:
         if downloaded is None:
@@ -1419,9 +1803,10 @@ def chart_revision() -> str:
             """SELECT
                  COALESCE((SELECT MAX(retrieved_at) FROM chart_issues),'') AS charts,
                  COALESCE((SELECT MAX(id) FROM chart_entries),0) AS max_entry_id,
-                 COALESCE((SELECT MAX(id) FROM chart_issues),0) AS max_issue_id"""
+                 COALESCE((SELECT MAX(id) FROM chart_issues),0) AS max_issue_id,
+                 COALESCE((SELECT value FROM app_meta WHERE key='song_identity_revision'),'') AS identity_rev"""
         ).fetchone()
-        return f"{row['charts']}|{row['max_entry_id']}|{row['max_issue_id']}"
+        return f"{row['charts']}|{row['max_entry_id']}|{row['max_issue_id']}|{row['identity_rev']}"
 
 
 def catalog_revision() -> str:
@@ -1505,12 +1890,16 @@ def song_catalog() -> list[dict]:
 
 
 def canonical_song_id(song_id: int) -> int:
-    """Resolve a safe chart-backed alias for one song, if one exists."""
+    """Resolve a retired/manual alias or a safe chart-backed alias."""
     init_db()
+    original = int(song_id)
     with connect() as con:
-        row = con.execute("SELECT id,title,title_key FROM songs WHERE id=?", (int(song_id),)).fetchone()
+        redirect = con.execute("SELECT canonical_song_id FROM song_id_redirects WHERE old_song_id=?", (original,)).fetchone()
+        if redirect:
+            return int(redirect["canonical_song_id"])
+        row = con.execute("SELECT id,title,title_key FROM songs WHERE id=?", (original,)).fetchone()
         if not row:
-            return int(song_id)
+            return original
         has_chart = con.execute("SELECT 1 FROM chart_entries WHERE song_id=? LIMIT 1", (int(song_id),)).fetchone()
         if has_chart:
             return int(song_id)
@@ -1852,12 +2241,13 @@ def airplay_revision() -> str:
             """SELECT COALESCE(MAX(fetched_at),'') AS fetched,
                       COALESCE(MAX(play_date),'') AS play_date,
                       COUNT(*) AS windows,
-                      COALESCE((SELECT MAX(updated_at) FROM airplay_stations),'') AS stations_updated
+                      COALESCE((SELECT MAX(updated_at) FROM airplay_stations),'') AS stations_updated,
+                      COALESCE((SELECT value FROM app_meta WHERE key='song_identity_revision'),'') AS identity_rev
                FROM airplay_windows WHERE success=1"""
         ).fetchone()
     if not row:
         return ""
-    return f"{row['fetched']}|{row['play_date']}|{row['windows']}|{row['stations_updated']}"
+    return f"{row['fetched']}|{row['play_date']}|{row['windows']}|{row['stations_updated']}|{row['identity_rev']}"
 
 
 def latest_chart_positions() -> list[dict]:
@@ -2130,6 +2520,55 @@ def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | No
         if len(ids) == 1:
             return next(iter(ids))
     return None
+
+
+def existing_airplay_windows(
+    station_ids: Iterable[int],
+    start_date: date | str,
+    end_date: date | str,
+    *,
+    require_completed_capture: bool = True,
+    tz_name: str = "Europe/Warsaw",
+) -> set[tuple[int, str, int]]:
+    """Bulk-load successful 2h windows for resumable long backfills.
+
+    A year across many stations can mean tens of thousands of blocks.  Reading
+    them in one indexed query is much cheaper than opening SQLite once per
+    candidate block.  Premature historical rows are intentionally excluded so
+    the normal backfill repairs them.
+    """
+    init_db()
+    ids = sorted({int(x) for x in station_ids})
+    if not ids:
+        return set()
+    start = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    if end < start:
+        start, end = end, start
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as con:
+        rows = con.execute(
+            f"""SELECT station_id,play_date,start_hour,fetched_at,success
+                FROM airplay_windows
+                WHERE station_id IN ({placeholders}) AND play_date>=? AND play_date<=? AND success=1""",
+            (*ids, start.isoformat(), end.isoformat()),
+        ).fetchall()
+    if not require_completed_capture:
+        return {(int(r["station_id"]), str(r["play_date"]), int(r["start_hour"])) for r in rows}
+    tz = ZoneInfo(tz_name)
+    out: set[tuple[int, str, int]] = set()
+    for row in rows:
+        try:
+            d = date.fromisoformat(str(row["play_date"]))
+            fetched_at = datetime.fromisoformat(str(row["fetched_at"] or "").replace("Z", "+00:00"))
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+            end_local = datetime.combine(d, dt_time(int(row["start_hour"]) % 24, 0), tzinfo=tz) + timedelta(hours=2)
+            if fetched_at.astimezone(timezone.utc) >= end_local.astimezone(timezone.utc):
+                out.add((int(row["station_id"]), d.isoformat(), int(row["start_hour"])))
+        except Exception:
+            continue
+    return out
 
 
 def airplay_window_exists(

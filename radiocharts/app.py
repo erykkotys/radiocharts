@@ -24,6 +24,7 @@ from radiocharts.db import (
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision,
     parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
+    duplicate_song_candidates, search_song_merge_candidates, merge_songs,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
@@ -699,7 +700,7 @@ def render_nav_tabs(current: str) -> None:
 
 st.markdown('<div class="rc-app-title">📻 <span>RadioCharts Research</span></div>', unsafe_allow_html=True)
 
-RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F1"]
+RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F3"]
 RADIO_STATUS_TOP_DOWN = list(reversed(RADIO_STATUS_BOTTOM_UP))
 BASE_STATUSES = [f"Baza {code}" for code in RADIO_STATUS_TOP_DOWN]
 CANDIDATE_STATUSES = [f"{code} Candidate" for code in RADIO_STATUS_TOP_DOWN]
@@ -722,6 +723,8 @@ STATUS_ALIASES = {
     "Current Familiar": "Baza CF1",
     "Recurrent": "Baza R1",
     "Poza bazą": "Baza Hold",
+    "F1 Candidate": "F3 Candidate",
+    "Baza F1": "Baza F3",
 }
 
 def normalized_status(value: str | None) -> str:
@@ -1958,7 +1961,7 @@ def render_airplay_data_management(running: bool) -> None:
             "end_date": bf_end.isoformat(),
         })
         st.rerun()
-    st.caption("Pełna zakończona doba jednej stacji = 12 bloków po 2h. Backfill pobiera tylko zakończone okna i nie powinien dublować zapisanych emisji.")
+    st.caption("Pełna zakończona doba jednej stacji = 12 bloków po 2h. Backfill najpierw wczytuje zapisane bloki, pomija już kompletne okna i pobiera tylko brakujące lub wymagające ponowienia — możesz więc bezpiecznie wskazać także długi zakres, np. rok.")
     render_job_status_fragment("airplay", "data_airplay")
 
     with st.expander("🔎 Co dokładnie zostało pobrane — pokrycie per stacja", expanded=False):
@@ -2631,6 +2634,65 @@ elif view_key == "song":
                     bool(row.downloaded),
                     str(row.note or ""),
                 )
+
+                with st.expander("Duplikaty / scalanie utworu", expanded=False):
+                    st.caption(
+                        "RadioCharts automatycznie łączy bezpieczne warianty tego samego nagrania. "
+                        "Jeśli RDS lub inne źródło utworzy osobny rekord, możesz ręcznie włączyć go do aktualnego utworu. "
+                        "Scalanie przenosi emisje, historię list, status/Downloaded i notatki; stary ID pozostaje przekierowaniem."
+                    )
+                    auto_candidates = duplicate_song_candidates(song_id)
+                    merge_query = st.text_input(
+                        "Szukaj dodatkowego wariantu",
+                        value="",
+                        key=f"merge_search_{song_id}",
+                        placeholder="wykonawca lub tytuł",
+                    )
+                    manual_candidates = search_song_merge_candidates(merge_query, exclude_song_id=song_id) if len(normalize(merge_query)) >= 2 else []
+                    candidate_map: dict[int, dict] = {}
+                    for item in [*auto_candidates, *manual_candidates]:
+                        candidate_map[int(item["song_id"])] = item
+                    if not candidate_map:
+                        st.caption("Brak oczywistych duplikatów. Wpisz fragment wykonawcy lub tytułu, aby wyszukać ręcznie.")
+                    else:
+                        candidate_ids = list(candidate_map)
+                        def _merge_label(candidate_id: int) -> str:
+                            item = candidate_map[int(candidate_id)]
+                            signal = " · podobny credit" if item.get("artist_match") else ""
+                            return (
+                                f"{item.get('artist','')} — {item.get('title','')} "
+                                f"[ID {candidate_id}] · listy {int(item.get('chart_count') or 0)} · "
+                                f"emisje {int(item.get('spin_count') or 0)} · {item.get('status') or 'Nie słuchałem'}{signal}"
+                            )
+                        merge_id = st.selectbox(
+                            "Wariant do włączenia do aktualnego utworu",
+                            candidate_ids,
+                            format_func=_merge_label,
+                            key=f"merge_candidate_{song_id}",
+                        )
+                        merge_confirm = st.checkbox(
+                            "Potwierdzam, że to to samo nagranie",
+                            key=f"merge_confirm_{song_id}",
+                        )
+                        if st.button(
+                            "Scal wybrany wariant → ten utwór",
+                            disabled=not merge_confirm,
+                            key=f"merge_button_{song_id}",
+                            type="primary",
+                        ):
+                            result = merge_songs(song_id, [int(merge_id)])
+                            st.session_state["song_merge_notice"] = (
+                                f"Scalono {int(result.get('merged') or 0)} wariant. "
+                                f"Rekord docelowy: {result.get('artist','')} — {result.get('title','')}."
+                            )
+                            st.cache_data.clear()
+                            st.rerun()
+
+                if st.session_state.pop("song_merge_notice", None):
+                    # Notice is intentionally lightweight; the merged data above
+                    # is already refreshed on this rerun.
+                    st.toast("Duplikat scalony z aktualnym utworem.")
+
                 # Player jest podniesiony nad dół okna; dodatkowy luz zapobiega
                 # przycinaniu ostatniego wiersza formularza na niższych ekranach.
                 st.markdown('<div style="height:5rem"></div>', unsafe_allow_html=True)
@@ -3294,7 +3356,7 @@ else:
 
 W **Dane → Synchronizacja bazy radia** wklejasz eksport TSV/TXT z kategorią, tytułem i wykonawcą. RadioCharts dopasowuje istniejące utwory, dodaje brakujące, ustawia `Baza <Cat>` oraz zaznacza **Downloaded**. Nad polem wklejania widać liczbę utworów i rozkład kategorii, więc można od razu sprawdzić, czy synchronizacja faktycznie weszła.
 
-W edytorze statusów, licząc od dołu, kolejność kategorii bazy to **CF1 → CF2 → R1 → R2 → G1 → G2 → SP1 → SP2 → NB → F1**, wyżej jest **Baza Hold**, a jeszcze wyżej analogiczne statusy **Candidate** w tej samej kolejności. Na górze pozostają **Watch, Słabe, Poza formatem, Nie słuchałem**. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
+W edytorze statusów, licząc od dołu, kolejność kategorii bazy to **CF1 → CF2 → R1 → R2 → G1 → G2 → SP1 → SP2 → NB → F3**, wyżej jest **Baza Hold**, a jeszcze wyżej analogiczne statusy **Candidate** w tej samej kolejności. Na górze pozostają **Watch, Słabe, Poza formatem, Nie słuchałem**. Stare `Candidate` i `CF Candidate` są migrowane do `CF1 Candidate`, `Ignore` do `Poza formatem`, a `Poza bazą` do `Baza Hold`.
             """
         )
 
@@ -3415,7 +3477,7 @@ Na karcie Utwór/Dashboard domyślnie jest to sygnał z **ostatnich 7 dni**. W r
 - **Najmocniejsza stacja** — stacja z największą liczbą emisji tego utworu.
 - **Ostatnio** — ostatnia zapisana godzina emisji.
 
-Zakres Emisji ma preset **ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok** oraz stale widoczne dokładne daty. Preset tylko wstawia daty; ręczna zmiana dowolnej z nich automatycznie przełącza preset na **Własny zakres**. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji.
+Zakres Emisji ma presety **Dzisiaj (1d) / ostatni tydzień / 2 tygodnie / miesiąc / 3 miesiące / pół roku / rok** oraz dokładne daty. Domyślny pozostaje **ostatni tydzień (7d)**. Preset tylko wstawia daty; ręczna zmiana dowolnej z nich automatycznie przełącza preset na **Własny zakres**. Szybkie zakresy kończą się na najnowszym dniu, dla którego mamy zapisane dane emisji.
 
 Pole **Szukaj w Emisjach** filtruje **cały wybrany okres**, zanim zadziała limit `Pokaż 50/100/...`. Wyszukiwanie ignoruje polskie znaki. Szczegóły konkretnego nagrania otwierasz **dwuklikiem na tytule lub wykonawcy**. Pozycje RMF/ZET/OLiA/OLiS/ESKA są w Emisjach pokazywane kompaktowo razem z tygodniami, np. `#7 (5w)`.
 
@@ -3440,7 +3502,7 @@ Zakładka **Baza** nie jest rankingiem zewnętrznym. Jej punktem wyjścia są ws
 
 Możesz zmieniać zakres dat i stacje dokładnie jak w Emisjach, a następnie sortować m.in. po Emisjach, Zasięgu, Radio Presence, Chart Score, Momentum albo średniej pozycji. **Tylko niegrane** szybko pokazuje rzeczy obecne u Ciebie, ale nieobecne w monitorowanych stacjach w danym okresie.
 
-Filtr statusu rozbija własną bazę na CF1/CF2/R1/R2/G1/G2/SP1/SP2/NB/F1. Dzięki temu można np. osobno sprawdzić, czy CF-y naprawdę mają szeroką i intensywną rotację, a goldy nadal pojawiają się wystarczająco często.
+Filtr statusu rozbija własną bazę na CF1/CF2/R1/R2/G1/G2/SP1/SP2/NB/F3. Dzięki temu można np. osobno sprawdzić, czy CF-y naprawdę mają szeroką i intensywną rotację, a goldy nadal pojawiają się wystarczająco często.
             """
         )
 
@@ -3463,9 +3525,13 @@ Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zak�
     with st.expander("10. Utwór i identyfikacja między źródłami", expanded=False):
         st.markdown(
             """
-RadioCharts próbuje utrzymywać **jeden wspólny rekord utworu** dla notowań i emisji. RDS potrafi jednak zapisać ten sam numer z innym zestawem wykonawców. System łączy bezpieczne warianty, gdy tytuł jest wystarczająco charakterystyczny i jednoznacznie wskazuje jeden utwór z historii notowań.
+RadioCharts utrzymuje **jeden wspólny rekord nagrania** dla notowań, emisji i Twojej warstwy redakcyjnej. RDS potrafi jednak zapisać ten sam numer z innym zestawem wykonawców, rokiem projektu albo długim kredytem gościnnym.
 
-Nie robimy agresywnego łączenia krótkich tytułów typu „Home” czy „Stay”, bo łatwo byłoby skleić dwa różne nagrania. Jeżeli Emisje pokazują podejrzanie małą liczbę odtworzeń dla znanego hitu, pierwszą rzeczą do sprawdzenia są właśnie warianty kredytu RDS.
+Od 1.1 system zapamiętuje aliasy po scaleniu i automatycznie łączy konserwatywne warianty na podstawie **charakterystycznego tytułu + powiązanego kredytu wykonawców**. Kredyty mogą łączyć się łańcuchowo — np. nazwa projektu ↔ pełny skład ↔ krótszy wariant z nazwiskiem gościa. Po scaleniu emisje, historia list, Status, Downloaded i Notatki zostają przy jednym rekordzie, a stary ID oraz stary podpis wykonawca+tytuł są zapamiętane, żeby duplikat nie odtworzył się przy kolejnym imporcie.
+
+Nie robimy agresywnego łączenia wyłącznie po tytule, szczególnie dla krótkich nazw typu „Home” czy „Stay”, bo łatwo byłoby skleić dwa różne nagrania. Niejednoznaczne przypadki zostają do ręcznej decyzji.
+
+Na karcie **Utwór → Duplikaty / scalanie utworu** zobaczysz podejrzane warianty o tym samym tytule; możesz też wyszukać dowolny rekord ręcznie. Po potwierdzeniu wybrany wariant jest scalany do aktualnie otwartego utworu. To jest backup dla przypadków, których automat celowo nie rusza.
 
 Wyszukiwarka Utwór pokazuje przede wszystkim utwory z notowań oraz te, którym nadałeś status/notatkę. Surowe, jednorazowe warianty RDS nie zaśmiecają selektora; nadal można je otworzyć bezpośrednio z Emisji.
             """
@@ -3485,6 +3551,8 @@ Przykład: utwór może być wielkim hitem w źródłach, a brzmieniowo być dan
             """
 Zakładka **Dane** służy do całej obsługi pobierania: bieżących notowań, backfillu list oraz **backfillu Emisji / odSluchane**. Jest tu też diagnostyka **„Co dokładnie zostało pobrane — pokrycie per stacja”** z własnym zakresem dat. Tabela „Stan źródeł” pokazuje kadencję publikacji, najnowsze pobrane notowanie oraz datę, której co najmniej oczekujemy dzisiaj.
 
+Backfill Emisji jest **wznawialny i odporny na duplikaty**. Jednostką kontrolną jest blok `stacja + data + 2h`; przed długim backfillem RadioCharts jednym zapytaniem wczytuje już poprawnie zapisane bloki i pomija je w pamięci. Możesz więc bezpiecznie poprosić o rok danych, nawet jeśli kilka miesięcy już masz — pobrane zostaną tylko brakujące lub stare, przedwcześnie zapisane bloki. Ponowne pobranie jednego bloku atomowo zastępuje jego zawartość, a unikalny klucz emisji dodatkowo chroni przed zdublowaniem pojedynczego odtworzenia.
+
 Każdy nowy proces zapisuje pełny log w `/app/data/jobs/`. Nazwa zaczyna się od czasu uruchomienia:
 
 `YYYY-MM-DD_HH-MM-SS_typ-procesu_jobid.log`
@@ -3498,7 +3566,7 @@ Worker sprawdza automatyczne źródła dwa razy dziennie — 07:30 i 20:30 czasu
     with st.expander("13. Spotify, odsłuch i własna ocena", expanded=False):
         st.markdown(
             """
-**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** jest prawdziwym linkiem przeglądarkowym do wyszukiwania wykonawca + tytuł, więc Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania tabeli. Kolumna **Udostępnij ↗** wyszukuje dokładny utwór przez iTunes i otwiera jego smart-link Songlink/Odesli; w razie braku trafienia wraca do wyszukiwania Spotify.
+**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł; w tabelach obsługa kliknięcia jest realizowana bezpiecznie przez AG Grid, a Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania bieżącego widoku. Kolumna **Udostępnij ↗** wyszukuje dokładny utwór przez iTunes i otwiera jego smart-link Songlink/Odesli; w razie braku trafienia wraca do wyszukiwania Spotify.
 
 Twoje pola **Status, Downloaded i Notatka** są warstwą redakcyjną i nie zmieniają automatycznych wskaźników. Notatka jest celowo ostatnią kolumną tabel, żeby nie zabierała miejsca najważniejszym danym liczbowym.
             """
