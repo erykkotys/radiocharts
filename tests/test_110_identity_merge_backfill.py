@@ -147,7 +147,9 @@ def test_backfill_uses_bulk_existing_set_and_skips_download(monkeypatch, tmp_pat
 
 def test_manual_is_current_for_merge_resumable_backfill_and_1d():
     app = Path("radiocharts/app.py").read_text(encoding="utf-8")
-    assert "Duplikaty / scalanie utworu" in app
+    assert "Scal zaznaczone" in app
+    assert "ostatniej kolumnie" in app
+    assert "Duplikaty / scalanie utworu" not in app
     assert "jednym zapytaniem wczytuje już poprawnie zapisane bloki" in app
     assert "Dzisiaj (1d)" in app
     assert "Domyślny pozostaje **ostatni tydzień (7d)**" in app

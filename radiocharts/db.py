@@ -687,11 +687,52 @@ def title_anchor(value: str) -> str:
     # Guest credits are very frequently appended to the title by radio/RDS
     # systems although the musical title itself ends before the parentheses.
     raw = re.sub(
-        r"\s*[\(\[]\s*(?:feat(?:uring)?|ft|with)\.?\s+[^\)\]]+[\)\]]\s*$",
+        r"\s*[\(\[]\s*(?:feat(?:uring)?|ft|with)\.?\s*[^\)\]]+[\)\]]\s*$",
         "", raw, flags=re.IGNORECASE,
     )
     raw = re.sub(r"\s+[-–—]\s*(?:radio\s+edit|single\s+edit|remaster(?:ed)?).*?$", "", raw, flags=re.IGNORECASE)
     return normalize(raw)
+
+
+def _identity_title_anchor(value: str) -> str:
+    """Title key used only for song identity matching.
+
+    ``title_anchor`` intentionally strips only explicit metadata because some
+    callers relink by title alone.  Identity matching can be a little smarter
+    because every automatic merge also requires artist-credit evidence.  This
+    catches common RDS guest lists such as ``Nareszcie (Herbut & Zalia & Vito
+    Bambino)`` without treating arbitrary subtitles/version labels as aliases.
+    """
+    raw = str(value or "").strip()
+    anchored = title_anchor(raw)
+    raw_key = normalize(raw)
+    if anchored and anchored != raw_key:
+        return anchored
+
+    match = re.match(r"^(.*?)\s*[\(\[]([^\)\]]+)[\)\]]\s*$", raw)
+    if not match:
+        return anchored
+    base = match.group(1).strip()
+    suffix = match.group(2).strip()
+    snorm = normalize(suffix)
+    if not base or not snorm:
+        return anchored
+
+    # Never erase genuine version descriptors.  Explicit Feat/Ft/guest markers
+    # are safe; without a marker require a list of at least three credited
+    # people (two commas or two ampersands), which is typical for RDS credits.
+    forbidden = {
+        "remix", "mix", "live", "acoustic", "instrumental", "karaoke",
+        "edit", "version", "remaster", "remastered", "cover", "demo",
+        "part", "pt", "vol", "radio", "session", "concert",
+    }
+    if any(token in forbidden for token in snorm.split()):
+        return anchored
+    explicit_guest = bool(re.match(r"^(?:feat|featuring|ft|with|gosc|goscie|guest|guests)\b", snorm))
+    list_like = suffix.count(",") >= 2 or suffix.count("&") >= 2
+    if explicit_guest or list_like:
+        return normalize(base)
+    return anchored
 
 
 def _title_variants_match(left: str, right: str) -> bool:
@@ -702,8 +743,8 @@ def _title_variants_match(left: str, right: str) -> bool:
     ``I Ciebie Też`` vs ``I Ciebie Też, Bardzo`` while explicitly refusing
     common version/remix suffixes.
     """
-    lkey = title_anchor(left)
-    rkey = title_anchor(right)
+    lkey = _identity_title_anchor(left)
+    rkey = _identity_title_anchor(right)
     if not lkey or not rkey:
         return False
     if lkey == rkey:
@@ -1091,6 +1132,182 @@ def _merge_duplicate_songs_v3(con: sqlite3.Connection) -> int:
     return merged
 
 
+def _merge_duplicate_songs_v4(con: sqlite3.Connection) -> int:
+    """Targeted 1.1.4 pass for guest-credit parenthetical aliases.
+
+    This deliberately does *not* loosen the generic matcher.  Candidate groups
+    use :func:`_identity_title_anchor`, then still require the same conservative
+    title relation and artist-credit relation as v3.  Version/remix/live labels
+    stay separate.
+    """
+    rows = con.execute(
+        """WITH chart_counts AS (
+               SELECT song_id,COUNT(*) AS chart_count FROM chart_entries GROUP BY song_id
+           ), spin_counts AS (
+               SELECT song_id,COUNT(*) AS spin_count FROM airplay_plays GROUP BY song_id
+           ), note_flags AS (
+               SELECT song_id,1 AS has_note FROM song_notes GROUP BY song_id
+           )
+           SELECT s.*,COALESCE(c.chart_count,0) AS chart_count,
+                  COALESCE(p.spin_count,0) AS spin_count,COALESCE(n.has_note,0) AS has_note
+           FROM songs s
+           LEFT JOIN chart_counts c ON c.song_id=s.id
+           LEFT JOIN spin_counts p ON p.song_id=s.id
+           LEFT JOIN note_flags n ON n.song_id=s.id
+           ORDER BY s.id"""
+    ).fetchall()
+    by_id = {int(r["id"]): r for r in rows}
+    by_anchor: dict[str, list[int]] = {}
+    for row in rows:
+        anchor = _identity_title_anchor(str(row["title"] or ""))
+        if anchor:
+            by_anchor.setdefault(anchor, []).append(int(row["id"]))
+
+    adjacency: dict[int, set[int]] = {sid: set() for sid in by_id}
+    def connect_if_related(left_id: int, right_id: int) -> None:
+        if left_id == right_id:
+            return
+        left = by_id[left_id]
+        right = by_id[right_id]
+        if not _title_variants_match(str(left["title"]), str(right["title"])):
+            return
+        if not _song_artist_variants_match(
+            str(left["artist"]), str(left["title"]),
+            str(right["artist"]), str(right["title"]),
+        ):
+            return
+        adjacency[left_id].add(right_id)
+        adjacency[right_id].add(left_id)
+
+    for ids in by_anchor.values():
+        if len(ids) < 2:
+            continue
+        for idx, left_id in enumerate(ids[:-1]):
+            for right_id in ids[idx + 1:]:
+                connect_if_related(left_id, right_id)
+
+    # Retain the one-trailing-word truncation support from v3, but generate only
+    # exact candidate anchor pairs; no first-word/full-catalogue comparison.
+    forbidden = {
+        "remix", "mix", "live", "acoustic", "instrumental", "karaoke",
+        "edit", "version", "remaster", "remastered", "cover", "demo",
+        "part", "pt", "vol", "radio",
+    }
+    for long_anchor, long_ids in by_anchor.items():
+        tokens = long_anchor.split()
+        if len(tokens) < 3 or tokens[-1] in forbidden:
+            continue
+        short_anchor = " ".join(tokens[:-1])
+        if len(short_anchor) < 8:
+            continue
+        short_ids = by_anchor.get(short_anchor)
+        if not short_ids:
+            continue
+        for left_id in short_ids:
+            for right_id in long_ids:
+                connect_if_related(left_id, right_id)
+
+    merged = 0
+    remaining = set(by_id)
+    while remaining:
+        seed_id = next(iter(remaining))
+        component_ids = {seed_id}
+        frontier = [seed_id]
+        while frontier:
+            current_id = frontier.pop()
+            for other_id in adjacency.get(current_id, ()):
+                if other_id in component_ids:
+                    continue
+                component_ids.add(other_id)
+                frontier.append(other_id)
+        remaining.difference_update(component_ids)
+        if len(component_ids) < 2:
+            continue
+        component = [by_id[sid] for sid in component_ids]
+        component.sort(
+            key=lambda r: (
+                -int((r["chart_count"] or 0) > 0),
+                -int(_identity_title_anchor(str(r["title"] or "")) == normalize(str(r["title"] or ""))),
+                -int(r["chart_count"] or 0),
+                -int(r["spin_count"] or 0),
+                -int(r["has_note"] or 0),
+                len(str(r["title"] or "")),
+                int(r["id"]),
+            )
+        )
+        cid = int(component[0]["id"])
+        merged += _merge_song_ids(
+            con, cid, [int(r["id"]) for r in component[1:]], source="auto-v4"
+        )
+    return merged
+
+
+def merge_song_group(song_ids: Iterable[int]) -> dict:
+    """Merge a user-selected set of duplicate rows and choose the master safely.
+
+    Manual selection is the high-confidence signal; RadioCharts only chooses
+    which selected row should remain canonical.  Chart-backed/richer rows win,
+    while every retired signature and numeric ID is kept as an alias/redirect.
+    """
+    init_db()
+    resolved: list[int] = []
+    for raw in song_ids:
+        sid = canonical_song_id(int(raw))
+        if sid not in resolved:
+            resolved.append(sid)
+    if len(resolved) < 2:
+        sid = resolved[0] if resolved else 0
+        row = get_song(sid) if sid else None
+        return {
+            "canonical_song_id": sid,
+            "artist": str((row or {}).get("artist") or ""),
+            "title": str((row or {}).get("title") or ""),
+            "merged": 0,
+        }
+
+    placeholders = ",".join("?" for _ in resolved)
+    with connect() as con:
+        rows = con.execute(
+            f"""SELECT s.*,
+                       (SELECT COUNT(*) FROM chart_entries e WHERE e.song_id=s.id) AS chart_count,
+                       (SELECT COUNT(*) FROM airplay_plays p WHERE p.song_id=s.id) AS spin_count,
+                       CASE WHEN EXISTS(SELECT 1 FROM song_notes n WHERE n.song_id=s.id) THEN 1 ELSE 0 END AS has_note
+                FROM songs s WHERE s.id IN ({placeholders})""",
+            resolved,
+        ).fetchall()
+        if len(rows) < 2:
+            row = rows[0] if rows else None
+            return {
+                "canonical_song_id": int(row["id"]) if row else 0,
+                "artist": str(row["artist"] if row else ""),
+                "title": str(row["title"] if row else ""),
+                "merged": 0,
+            }
+        ordered = sorted(
+            rows,
+            key=lambda r: (
+                -int((r["chart_count"] or 0) > 0),
+                -int(_identity_title_anchor(str(r["title"] or "")) == normalize(str(r["title"] or ""))),
+                -int(r["chart_count"] or 0),
+                -int(r["spin_count"] or 0),
+                -int(r["has_note"] or 0),
+                len(str(r["title"] or "")),
+                int(r["id"]),
+            ),
+        )
+        canonical = ordered[0]
+        cid = int(canonical["id"])
+        merged = _merge_song_ids(
+            con, cid, [int(r["id"]) for r in ordered[1:]], source="manual-grid"
+        )
+        return {
+            "canonical_song_id": cid,
+            "artist": str(canonical["artist"] or ""),
+            "title": str(canonical["title"] or ""),
+            "merged": int(merged),
+        }
+
+
 def merge_songs(canonical_id: int, duplicate_ids: Iterable[int]) -> dict:
     """Public/manual merge used by the Utwór screen.
 
@@ -1134,7 +1351,7 @@ def duplicate_song_candidates(song_id: int, limit: int = 40) -> list[dict]:
         current = con.execute("SELECT id,artist,title,title_key FROM songs WHERE id=?", (sid,)).fetchone()
         if not current:
             return []
-        tanchor = title_anchor(str(current["title"] or ""))
+        tanchor = _identity_title_anchor(str(current["title"] or ""))
         if not tanchor:
             return []
         rows = con.execute(
@@ -1369,6 +1586,7 @@ def init_db() -> None:
         "song_alias_merge_v1",
         "song_alias_merge_v2",
         "song_alias_merge_v3",
+        "song_alias_merge_v4",
         "billboard_metadata_reset_v1",
         "billboard_metadata_reset_v2",
         "source_checks_v1",
@@ -1405,7 +1623,7 @@ def init_db() -> None:
     # running only this maintenance pass, the other process may safely serve the
     # existing schema instead of waiting 90 seconds and crashing with FileLock
     # Timeout. Fresh/schema-changing databases still use the full wait.
-    maintenance_markers = {"song_alias_merge_v3"}
+    maintenance_markers = {"song_alias_merge_v3", "song_alias_merge_v4"}
     critical_markers = required_markers - maintenance_markers
     pre_keys = _app_meta_keys(required_markers)
     maintenance_only_pending = (
@@ -1509,6 +1727,11 @@ def init_db() -> None:
                     if not migration_v3:
                         merged_v3 = _merge_duplicate_songs_v3(con)
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v3',?)", (str(merged_v3),))
+
+                    migration_v4 = con.execute("SELECT value FROM app_meta WHERE key='song_alias_merge_v4'").fetchone()
+                    if not migration_v4:
+                        merged_v4 = _merge_duplicate_songs_v4(con)
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v4',?)", (str(merged_v4),))
 
                     bb_reset = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v1'").fetchone()
                     if not bb_reset:
@@ -1770,7 +1993,7 @@ def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release
         # Broader but still conservative title-variant lookup.  This catches
         # ``Title (Feat. ...)``, one-word RDS truncations and embedded
         # ``artist credit - title`` rows without scanning the full catalogue.
-        tanchor = title_anchor(title)
+        tanchor = _identity_title_anchor(title)
         if tanchor:
             candidates = con.execute(
                 """SELECT id,artist,title,release_date FROM songs
@@ -2789,7 +3012,7 @@ def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | No
 
     # Related title variants from RDS/library metadata. Require both title and
     # artist-credit evidence before accepting a match.
-    tanchor = title_anchor(title)
+    tanchor = _identity_title_anchor(title)
     if tanchor:
         variant_rows = con.execute(
             """SELECT id,artist,title FROM songs
@@ -2818,7 +3041,7 @@ def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | No
 
     # RDS often appends a project/version suffix to the title. Match the stripped
     # title only when it uniquely identifies one chart song.
-    tanchor = title_anchor(title)
+    tanchor = _identity_title_anchor(title)
     suffix_was_removed = bool(tanchor and tanchor != tkey)
     distinctive = bool(tanchor) and (len(tanchor) >= (6 if suffix_was_removed else 8) or len(tanchor.split()) >= 2)
     if distinctive:

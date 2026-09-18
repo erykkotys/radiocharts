@@ -24,7 +24,7 @@ from radiocharts.db import (
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision,
     parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
-    duplicate_song_candidates, search_song_merge_candidates, merge_songs,
+    merge_song_group,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.metrics import compute_scores, song_history
@@ -1488,6 +1488,43 @@ function(params) {
 """)
 
 
+@st.dialog("Scal utwory")
+def confirm_song_merge_dialog(song_ids: tuple[int, ...], state_key: str) -> None:
+    """Confirmation for the Emisje-table duplicate merge workflow."""
+    ids = tuple(dict.fromkeys(int(x) for x in song_ids if int(x) > 0))
+    rows = []
+    for sid in ids:
+        row = get_song(sid)
+        if row:
+            rows.append({
+                "ID": int(row.get("song_id") or sid),
+                "Wykonawca": str(row.get("artist") or ""),
+                "Tytuł": str(row.get("title") or ""),
+            })
+    st.warning(
+        "Scalanie jest trwałe. Emisje, notowania, status, Downloaded i notatki zostaną połączone. "
+        "Dawne nazwy i ID pozostaną aliasami, więc nowe dane z tym samym starym opisem trafią już do rekordu głównego."
+    )
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True, height=min(280, 42 + 35 * len(rows)))
+    st.caption(
+        "RadioCharts automatycznie zachowa jako rekord główny najlepiej udokumentowaną wersję "
+        "(najpierw historia toplist, potem liczba emisji)."
+    )
+    left, right = st.columns(2)
+    if left.button("Anuluj", use_container_width=True):
+        st.rerun()
+    if right.button("Scal utwory", type="primary", use_container_width=True, disabled=len(ids) < 2):
+        result = merge_song_group(ids)
+        st.session_state[state_key] = []
+        st.session_state["song_merge_notice"] = (
+            f"Scalono {int(result.get('merged') or 0)} rekordów → "
+            f"{result.get('artist','')} — {result.get('title','')}."
+        )
+        st.cache_data.clear()
+        st.rerun()
+
+
 @st.fragment
 def render_song_grid(
     frame: pd.DataFrame,
@@ -1499,6 +1536,7 @@ def render_song_grid(
     station_total: int | None = None,
     floating_hscroll: bool = False,
     row_numbers: bool = False,
+    merge_select_mode: bool = False,
 ) -> pd.DataFrame:
     """AG Grid table: row highlight, editing, responsive source columns and preview player."""
     show = frame.copy()
@@ -1518,6 +1556,14 @@ def render_song_grid(
     # the same row.
     if "status" in show.columns and "heard" in show.columns:
         show["heard"] = show["status"].fillna("Nie słuchałem").astype(str).ne("Nie słuchałem")
+
+    merge_state_key = f"{key}__merge_selected"
+    if merge_select_mode and "song_id" in show.columns:
+        visible_ids = {int(x) for x in show["song_id"].dropna().tolist()}
+        remembered = {int(x) for x in st.session_state.get(merge_state_key, []) if int(x) in visible_ids}
+        # Appending here deliberately puts the checkbox at the far right, after
+        # Notatka in the Emisje layout, so accidental clicks are unlikely.
+        show["_merge_select"] = [int(sid) in remembered for sid in show["song_id"]]
 
     gb = GridOptionsBuilder.from_dataframe(show)
     gb.configure_default_column(resizable=True, sortable=True, filter=True, editable=False)
@@ -1638,6 +1684,13 @@ def render_song_grid(
         )
     if "note" in show.columns:
         gb.configure_column("note", "Notatka", minWidth=220, width=300, editable=bool(editable_state))
+    if "_merge_select" in show.columns:
+        gb.configure_column(
+            "_merge_select", "Scal", width=72, minWidth=68, maxWidth=78,
+            editable=True, sortable=False, filter=False, suppressMenu=True,
+            cellDataType="boolean", cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor",
+            headerTooltip="Zaznacz co najmniej dwa rekordy tego samego nagrania, a potem użyj przycisku Scal zaznaczone pod tabelą.",
+        )
     for col, label, tooltip in [
         ("popularity", "Popularity", "80% względna liczba emisji z ostatnich 28 dni + 20% bonus z bieżących pozycji; OLiA/OLiS mają największą wagę bonusu."),
         ("familiarity", "Chart Score", "Historyczna siła utworu w obserwowanych notowaniach: peak, długość obecności i Top 10."),
@@ -1794,6 +1847,33 @@ def render_song_grid(
                 navigate_to_song(int(requested[-1]))
             except (TypeError, ValueError):
                 pass
+
+    if merge_select_mode and {"song_id", "_merge_select"}.issubset(edited.columns):
+        selected_ids: list[int] = []
+        for sid, selected in edited[["song_id", "_merge_select"]].itertuples(index=False, name=None):
+            try:
+                if bool(selected):
+                    selected_ids.append(int(sid))
+            except Exception:
+                continue
+        selected_ids = list(dict.fromkeys(selected_ids))
+        st.session_state[merge_state_key] = selected_ids
+        controls_left, controls_right = st.columns([1, 4], vertical_alignment="center")
+        if controls_left.button(
+            f"Scal zaznaczone ({len(selected_ids)})",
+            disabled=len(selected_ids) < 2,
+            key=f"{key}__merge_button",
+            type="primary",
+            use_container_width=True,
+        ):
+            confirm_song_merge_dialog(tuple(selected_ids), merge_state_key)
+        controls_right.caption(
+            "Zaznacz 2+ warianty tego samego utworu w ostatniej kolumnie. "
+            "Scalanie zapamiętuje stare nazwy jako aliasy dla przyszłych importów."
+        )
+        notice = st.session_state.pop("song_merge_notice", None)
+        if notice:
+            st.toast(str(notice))
 
     if editable_state and {"song_id", "status"}.issubset(edited.columns) and not original.empty:
         before = original.set_index("song_id")
@@ -2642,63 +2722,8 @@ elif view_key == "song":
                     str(row.note or ""),
                 )
 
-                with st.expander("Duplikaty / scalanie utworu", expanded=False):
-                    st.caption(
-                        "RadioCharts automatycznie łączy bezpieczne warianty tego samego nagrania. "
-                        "Jeśli RDS lub inne źródło utworzy osobny rekord, możesz ręcznie włączyć go do aktualnego utworu. "
-                        "Scalanie przenosi emisje, historię list, status/Downloaded i notatki; stary ID pozostaje przekierowaniem."
-                    )
-                    auto_candidates = duplicate_song_candidates(song_id)
-                    merge_query = st.text_input(
-                        "Szukaj dodatkowego wariantu",
-                        value="",
-                        key=f"merge_search_{song_id}",
-                        placeholder="wykonawca lub tytuł",
-                    )
-                    manual_candidates = search_song_merge_candidates(merge_query, exclude_song_id=song_id) if len(normalize(merge_query)) >= 2 else []
-                    candidate_map: dict[int, dict] = {}
-                    for item in [*auto_candidates, *manual_candidates]:
-                        candidate_map[int(item["song_id"])] = item
-                    if not candidate_map:
-                        st.caption("Brak oczywistych duplikatów. Wpisz fragment wykonawcy lub tytułu, aby wyszukać ręcznie.")
-                    else:
-                        candidate_ids = list(candidate_map)
-                        def _merge_label(candidate_id: int) -> str:
-                            item = candidate_map[int(candidate_id)]
-                            signal = " · podobny credit" if item.get("artist_match") else ""
-                            return (
-                                f"{item.get('artist','')} — {item.get('title','')} "
-                                f"[ID {candidate_id}] · listy {int(item.get('chart_count') or 0)} · "
-                                f"emisje {int(item.get('spin_count') or 0)} · {item.get('status') or 'Nie słuchałem'}{signal}"
-                            )
-                        merge_id = st.selectbox(
-                            "Wariant do włączenia do aktualnego utworu",
-                            candidate_ids,
-                            format_func=_merge_label,
-                            key=f"merge_candidate_{song_id}",
-                        )
-                        merge_confirm = st.checkbox(
-                            "Potwierdzam, że to to samo nagranie",
-                            key=f"merge_confirm_{song_id}",
-                        )
-                        if st.button(
-                            "Scal wybrany wariant → ten utwór",
-                            disabled=not merge_confirm,
-                            key=f"merge_button_{song_id}",
-                            type="primary",
-                        ):
-                            result = merge_songs(song_id, [int(merge_id)])
-                            st.session_state["song_merge_notice"] = (
-                                f"Scalono {int(result.get('merged') or 0)} wariant. "
-                                f"Rekord docelowy: {result.get('artist','')} — {result.get('title','')}."
-                            )
-                            st.cache_data.clear()
-                            st.rerun()
-
-                if st.session_state.pop("song_merge_notice", None):
-                    # Notice is intentionally lightweight; the merged data above
-                    # is already refreshed on this rerun.
-                    st.toast("Duplikat scalony z aktualnym utworem.")
+                # Ręczne scalanie duplikatów jest celowo tylko w tabeli Emisje:
+                # tam widać wszystkie warianty obok siebie i trudniej pomylić kierunek scalania.
 
                 # Player jest podniesiony nad dół okna; dodatkowy luz zapobiega
                 # przycinaniu ostatniego wiersza formularza na niższych ekranach.
@@ -2991,6 +3016,7 @@ elif view_key == "airplay":
                 station_total=reporting_station_count,
                 floating_hscroll=True,
                 row_numbers=True,
+                merge_select_mode=True,
             )
 
 elif view_key == "library":
@@ -3534,13 +3560,13 @@ Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zak�
             """
 RadioCharts utrzymuje **jeden wspólny rekord nagrania** dla notowań, emisji i Twojej warstwy redakcyjnej. RDS potrafi jednak zapisać ten sam numer z innym zestawem wykonawców, rokiem projektu albo długim kredytem gościnnym.
 
-Od 1.1 system zapamiętuje aliasy po scaleniu i automatycznie łączy konserwatywne warianty na podstawie **charakterystycznego tytułu + powiązanego kredytu wykonawców**. Od 1.1.2 rozpoznaje też typowe śmieci z RDS: dopiski `(Feat. …)` / `(Ft. …)`, bezpieczne skrócenie wielowyrazowego tytułu o jeden końcowy wyraz oraz rekordy w stylu `pełny kredyt wykonawców - właściwy tytuł` zapisane omyłkowo w polu Tytuł. Warianty typu Remix/Live/Acoustic/Edit pozostają osobnymi nagraniami. Kredyty mogą łączyć się łańcuchowo — np. nazwa projektu ↔ pełny skład ↔ krótszy wariant z nazwiskiem gościa. Po scaleniu emisje, historia list, Status, Downloaded i Notatki zostają przy jednym rekordzie, a stary ID oraz stary podpis wykonawca+tytuł są zapamiętane, żeby duplikat nie odtworzył się przy kolejnym imporcie.
+Od 1.1 system zapamiętuje aliasy po scaleniu i automatycznie łączy konserwatywne warianty na podstawie **charakterystycznego tytułu + powiązanego kredytu wykonawców**. Od 1.1.4 rozpoznaje też typowe listy gości dopisane w nawiasie bez słowa `Feat.` — np. `Nareszcie (Herbut & Zalia & Vito Bambino)`, `Tańczę (Igor Herbut, Zalia, Vito Bambino)` czy `Świt (Gośc.: …)`. Nadal osobno zostają warianty typu Remix/Live/Acoustic/Edit. Po scaleniu emisje, historia list, Status, Downloaded i Notatki zostają przy jednym rekordzie.
 
-Przy pierwszym uruchomieniu 1.1.2 wykonywany jest ponowny skan istniejącego katalogu (`song_alias_merge_v3`), więc poprawka sprząta także stare duplikaty, a nie tylko zapobiega powstawaniu nowych.
+**Stary rekord nie jest „zapominany”.** Jego dokładny podpis `wykonawca + tytuł` trafia do tabeli aliasów, a stare `song_id` do tabeli przekierowań. Dlatego jeżeli za tydzień odSluchane znowu poda dokładnie tę samą starą nazwę, importer od razu przypnie emisję do rekordu głównego zamiast tworzyć nowy duplikat. Surowy tekst wykonawcy/tytułu przy samej emisji pozostaje zachowany.
 
-Nie robimy agresywnego łączenia wyłącznie po tytule, szczególnie dla krótkich nazw typu „Home” czy „Stay”, bo łatwo byłoby skleić dwa różne nagrania. Niejednoznaczne przypadki zostają do ręcznej decyzji.
+Automat jest celowo konserwatywny: nie łączymy agresywnie wyłącznie po podobnym tytule, szczególnie dla krótkich nazw typu „Home” czy „Stay”. Przy pierwszym uruchomieniu 1.1.4 działa tylko wąski skan `song_alias_merge_v4` dla bezpiecznych guest-creditów; to nie jest pełny fuzzy-matcher całego katalogu.
 
-Na karcie **Utwór → Duplikaty / scalanie utworu** zobaczysz podejrzane warianty o tym samym tytule; możesz też wyszukać dowolny rekord ręcznie. Po potwierdzeniu wybrany wariant jest scalany do aktualnie otwartego utworu. To jest backup dla przypadków, których automat celowo nie rusza.
+Ręczny backup jest teraz w **Emisje**. W ostatniej kolumnie **Scal** zaznacz co najmniej dwa rekordy, a pod tabelą kliknij **Scal zaznaczone**. Pojawi się potwierdzenie z listą wybranych rekordów. RadioCharts sam zachowa jako rekord główny najlepiej udokumentowaną wersję (preferuje historię toplist, potem liczbę emisji), a pozostałe zapisze jako trwałe aliasy. Mechanizm scalania z karty Utwór został usunięty, bo przy jednym otwartym rekordzie trudno było ocenić, który wariant jest właściwy.
 
 Wyszukiwarka Utwór pokazuje przede wszystkim utwory z notowań oraz te, którym nadałeś status/notatkę. Surowe, jednorazowe warianty RDS nie zaśmiecają selektora; nadal można je otworzyć bezpośrednio z Emisji.
             """

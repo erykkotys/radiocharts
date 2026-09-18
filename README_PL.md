@@ -1,3 +1,12 @@
+## 1.1.4 — bezpieczniejsze duplikaty i scalanie prosto z Emisji
+
+- automat pozostaje konserwatywny, ale rozpoznaje teraz częsty wariant RDS, w którym lista gości jest dopisana w nawiasie bez `Feat.`, np. `Nareszcie (Herbut & Zalia & Vito Bambino)`, `Tańczę (Igor Herbut, Zalia, Vito Bambino)` i `Świt (Gośc.: …)`;
+- warianty `Remix`, `Live`, `Acoustic`, `Edit`, `Instrumental` itd. nadal nie są automatycznie scalane;
+- jednorazowy lekki skan `song_alias_merge_v4` porządkuje istniejące rekordy spełniające te wąskie reguły;
+- ręczne scalanie przeniesiono z karty **Utwór** do tabeli **Emisje**: ostatnia kolumna `Scal` zawiera checkboxy, a przycisk `Scal zaznaczone` otwiera okno potwierdzenia;
+- po ręcznym scaleniu RadioCharts zachowuje dokładne stare sygnatury `wykonawca + tytuł` w `song_identity_aliases` oraz stare ID w `song_id_redirects`; kolejne importy z dawną nazwą trafiają więc automatycznie do rekordu głównego zamiast odtwarzać duplikat;
+- rekord główny przy ręcznym scalaniu jest wybierany automatycznie na podstawie jakości historii: preferowany jest rekord obecny na toplistach, następnie ten z większą liczbą emisji.
+
 ## 1.1.3 — hotfix startu po migracji duplikatów
 
 - Web i worker nie blokują już sobie startu przez `radiocharts.db.init.lock`, gdy jedyną brakującą operacją jest konserwacyjny skan `song_alias_merge_v3`. Drugi proces może wtedy wystartować po krótkim sprawdzeniu, podczas gdy pierwszy kończy porządkowanie katalogu.
