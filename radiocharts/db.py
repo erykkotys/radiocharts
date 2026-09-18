@@ -640,9 +640,40 @@ def normalize(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _split_embedded_credit_title(value: str) -> tuple[str, str] | None:
+    """Extract ``artist credit - title`` metadata accidentally stored as title.
+
+    Some RDS/library exports contain rows such as ``Męskie Granie Orkiestra
+    2018, Kortez, Podsiadło - Początek`` while the Artist column says only
+    ``Wersja Singlowa``.  Treat the left side as an additional artist credit,
+    but only when it strongly looks like metadata rather than a real song title.
+    """
+    raw = str(value or "").strip()
+    parts = re.split(r"\s+[-–—]\s+", raw, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    left, right = (part.strip() for part in parts)
+    if not left or not right:
+        return None
+    lnorm = normalize(left)
+    looks_like_credit = (
+        bool(re.search(r"\b(?:19|20)\d{2}\b", left))
+        or "," in left
+        or "meskie granie" in lnorm
+        or "orkiestra" in lnorm
+        or bool(re.search(r"\b(?:feat|ft|featuring)\b", lnorm))
+    )
+    if not looks_like_credit:
+        return None
+    return left, right
+
+
 def title_anchor(value: str) -> str:
     """Normalize a title while removing common non-title RDS suffixes."""
     raw = str(value or "").strip()
+    embedded = _split_embedded_credit_title(raw)
+    if embedded:
+        raw = embedded[1]
     # Parenthetical/bracket suffixes with a year/project/version are metadata in
     # many playlists, not part of the recording title.
     raw = re.sub(
@@ -653,8 +684,60 @@ def title_anchor(value: str) -> str:
         r"\s*[\(\[][^\)\]]*(?:meskie\s+granie|męskie\s+granie|radio\s+edit|single\s+edit|remaster(?:ed)?)[^\)\]]*[\)\]]\s*$",
         "", raw, flags=re.IGNORECASE,
     )
+    # Guest credits are very frequently appended to the title by radio/RDS
+    # systems although the musical title itself ends before the parentheses.
+    raw = re.sub(
+        r"\s*[\(\[]\s*(?:feat(?:uring)?|ft|with)\.?\s+[^\)\]]+[\)\]]\s*$",
+        "", raw, flags=re.IGNORECASE,
+    )
     raw = re.sub(r"\s+[-–—]\s*(?:radio\s+edit|single\s+edit|remaster(?:ed)?).*?$", "", raw, flags=re.IGNORECASE)
     return normalize(raw)
+
+
+def _title_variants_match(left: str, right: str) -> bool:
+    """Conservative equivalence for radio metadata variants of one title.
+
+    Besides exact anchored titles, allow one trailing word to be missing from
+    a distinctive multi-word title.  This catches real RDS truncations such as
+    ``I Ciebie Też`` vs ``I Ciebie Też, Bardzo`` while explicitly refusing
+    common version/remix suffixes.
+    """
+    lkey = title_anchor(left)
+    rkey = title_anchor(right)
+    if not lkey or not rkey:
+        return False
+    if lkey == rkey:
+        return True
+    lt, rt = lkey.split(), rkey.split()
+    short, long = (lt, rt) if len(lt) <= len(rt) else (rt, lt)
+    if len(short) < 2 or len(long) != len(short) + 1:
+        return False
+    if short != long[: len(short)]:
+        return False
+    if len(" ".join(short)) < 8:
+        return False
+    forbidden = {
+        "remix", "mix", "live", "acoustic", "instrumental", "karaoke",
+        "edit", "version", "remaster", "remastered", "cover", "demo",
+        "part", "pt", "vol", "radio",
+    }
+    return long[-1] not in forbidden
+
+
+def _song_artist_credits(artist: str, title: str) -> list[str]:
+    credits = [str(artist or "").strip()]
+    embedded = _split_embedded_credit_title(title)
+    if embedded and embedded[0] and embedded[0] not in credits:
+        credits.append(embedded[0])
+    return [credit for credit in credits if credit]
+
+
+def _song_artist_variants_match(left_artist: str, left_title: str, right_artist: str, right_title: str) -> bool:
+    return any(
+        _artist_variants_match(a, b)
+        for a in _song_artist_credits(left_artist, left_title)
+        for b in _song_artist_credits(right_artist, right_title)
+    )
 
 
 def artist_anchor(value: str) -> str:
@@ -894,6 +977,80 @@ def _merge_duplicate_songs_v2(con: sqlite3.Connection) -> int:
     return merged
 
 
+def _merge_duplicate_songs_v3(con: sqlite3.Connection) -> int:
+    """Re-scan historical rows with stronger RDS/title-variant matching.
+
+    v2 intentionally required identical title anchors.  Real radio metadata also
+    appends ``(Feat. ...)``, drops the last word of a title, or stores a whole
+    ``artist credit - title`` string in the title column.  v3 handles those
+    patterns while still requiring a related artist credit before merging.
+    """
+    rows = con.execute(
+        """SELECT s.*,
+                  (SELECT COUNT(*) FROM chart_entries e WHERE e.song_id=s.id) AS chart_count,
+                  (SELECT COUNT(*) FROM airplay_plays p WHERE p.song_id=s.id) AS spin_count,
+                  CASE WHEN EXISTS(SELECT 1 FROM song_notes n WHERE n.song_id=s.id) THEN 1 ELSE 0 END AS has_note
+           FROM songs s ORDER BY s.id"""
+    ).fetchall()
+
+    # Bucket by the first anchored title token. This avoids an O(n^2) scan over
+    # the full catalogue while keeping all prefix/Feat variants together.
+    buckets: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        anchor = title_anchor(str(row["title"] or ""))
+        if not anchor:
+            continue
+        first = anchor.split()[0]
+        buckets.setdefault(first, []).append(row)
+
+    merged = 0
+    for variants in buckets.values():
+        if len(variants) < 2:
+            continue
+        by_id = {int(r["id"]): r for r in variants}
+        remaining = set(by_id)
+        while remaining:
+            seed_id = next(iter(remaining))
+            component_ids = {seed_id}
+            frontier = [seed_id]
+            while frontier:
+                current_id = frontier.pop()
+                current = by_id[current_id]
+                for oid in list(remaining):
+                    if oid in component_ids:
+                        continue
+                    other = by_id[oid]
+                    if not _title_variants_match(str(current["title"]), str(other["title"])):
+                        continue
+                    if not _song_artist_variants_match(
+                        str(current["artist"]), str(current["title"]),
+                        str(other["artist"]), str(other["title"]),
+                    ):
+                        continue
+                    component_ids.add(oid)
+                    frontier.append(oid)
+            for sid in component_ids:
+                remaining.discard(sid)
+            if len(component_ids) < 2:
+                continue
+            component = [by_id[sid] for sid in component_ids]
+            component.sort(
+                key=lambda r: (
+                    -int(r["has_note"] or 0),
+                    -int(r["chart_count"] or 0),
+                    -int(r["spin_count"] or 0),
+                    # Prefer the cleaner/shorter title if evidence is otherwise equal.
+                    len(str(r["title"] or "")),
+                    int(r["id"]),
+                )
+            )
+            cid = int(component[0]["id"])
+            merged += _merge_song_ids(
+                con, cid, [int(r["id"]) for r in component[1:]], source="auto-v3"
+            )
+    return merged
+
+
 def merge_songs(canonical_id: int, duplicate_ids: Iterable[int]) -> dict:
     """Public/manual merge used by the Utwór screen.
 
@@ -937,20 +1094,37 @@ def duplicate_song_candidates(song_id: int, limit: int = 40) -> list[dict]:
         current = con.execute("SELECT id,artist,title,title_key FROM songs WHERE id=?", (sid,)).fetchone()
         if not current:
             return []
-        exact = con.execute(
+        tanchor = title_anchor(str(current["title"] or ""))
+        if not tanchor:
+            return []
+        rows = con.execute(
             """SELECT s.id AS song_id,s.artist,s.title,s.release_date,
                       (SELECT COUNT(*) FROM chart_entries e WHERE e.song_id=s.id) AS chart_count,
                       (SELECT COUNT(*) FROM airplay_plays p WHERE p.song_id=s.id) AS spin_count,
                       COALESCE((SELECT status FROM song_notes n WHERE n.song_id=s.id),'Nie słuchałem') AS status
-               FROM songs s WHERE s.id<>? AND s.title_key=? ORDER BY chart_count DESC,spin_count DESC,s.id LIMIT ?""",
-            (sid, str(current["title_key"]), int(limit)),
+               FROM songs s
+               WHERE s.id<>?
+                 AND (s.title_key=? OR s.title_key LIKE ? OR ? LIKE s.title_key || ' %' OR s.title_key LIKE ?)
+               ORDER BY chart_count DESC,spin_count DESC,s.id LIMIT ?""",
+            (sid, tanchor, f"{tanchor} %", tanchor, f"% {tanchor}", max(int(limit) * 4, 80)),
         ).fetchall()
     out = []
-    for r in exact:
+    for r in rows:
+        if not _title_variants_match(str(current["title"]), str(r["title"])):
+            continue
         item = dict(r)
-        item["artist_match"] = bool(_artist_variants_match(str(current["artist"]), str(r["artist"])))
+        item["artist_match"] = bool(_song_artist_variants_match(
+            str(current["artist"]), str(current["title"]), str(r["artist"]), str(r["title"])
+        ))
+        item["exact_title"] = normalize(str(current["title"])) == normalize(str(r["title"]))
         out.append(item)
-    out.sort(key=lambda x: (not bool(x["artist_match"]), -int(x["chart_count"] or 0), -int(x["spin_count"] or 0), int(x["song_id"])))
+    out.sort(key=lambda x: (
+        not bool(x["artist_match"]),
+        not bool(x["exact_title"]),
+        -int(x["chart_count"] or 0),
+        -int(x["spin_count"] or 0),
+        int(x["song_id"]),
+    ))
     return out[: int(limit)]
 
 
@@ -1127,6 +1301,7 @@ def init_db() -> None:
     required_markers = {
         "song_alias_merge_v1",
         "song_alias_merge_v2",
+        "song_alias_merge_v3",
         "billboard_metadata_reset_v1",
         "billboard_metadata_reset_v2",
         "source_checks_v1",
@@ -1239,6 +1414,11 @@ def init_db() -> None:
                     if not migration_v2:
                         merged_v2 = _merge_duplicate_songs_v2(con)
                         con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v2',?)", (str(merged_v2),))
+
+                    migration_v3 = con.execute("SELECT value FROM app_meta WHERE key='song_alias_merge_v3'").fetchone()
+                    if not migration_v3:
+                        merged_v3 = _merge_duplicate_songs_v3(con)
+                        con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_alias_merge_v3',?)", (str(merged_v3),))
 
                     bb_reset = con.execute("SELECT value FROM app_meta WHERE key='billboard_metadata_reset_v1'").fetchone()
                     if not bb_reset:
@@ -1483,14 +1663,37 @@ def get_or_create_song(con: sqlite3.Connection, artist: str, title: str, release
             row = alias
     if not row:
         anchor = artist_anchor(artist)
-        candidates = con.execute("SELECT id,artist,release_date FROM songs WHERE title_key=?", (tkey,)).fetchall()
+        candidates = con.execute("SELECT id,artist,title,release_date FROM songs WHERE title_key=?", (tkey,)).fetchall()
         matches = [r for r in candidates if artist_anchor(str(r["artist"])) == anchor]
         if len(matches) == 1:
             row = matches[0]
         else:
-            related = [r for r in candidates if _artist_variants_match(artist, str(r["artist"]))]
+            related = [
+                r for r in candidates
+                if _song_artist_variants_match(artist, title, str(r["artist"]), str(r["title"]))
+            ]
             if len(related) == 1:
                 row = related[0]
+    if not row:
+        # Broader but still conservative title-variant lookup.  This catches
+        # ``Title (Feat. ...)``, one-word RDS truncations and embedded
+        # ``artist credit - title`` rows without scanning the full catalogue.
+        tanchor = title_anchor(title)
+        if tanchor:
+            candidates = con.execute(
+                """SELECT id,artist,title,release_date FROM songs
+                   WHERE title_key=? OR title_key LIKE ? OR ? LIKE title_key || ' %' OR title_key LIKE ?
+                   ORDER BY id LIMIT 100""",
+                (tanchor, f"{tanchor} %", tanchor, f"% {tanchor}"),
+            ).fetchall()
+            related = [
+                r for r in candidates
+                if _title_variants_match(title, str(r["title"]))
+                and _song_artist_variants_match(artist, title, str(r["artist"]), str(r["title"]))
+            ]
+            unique = {int(r["id"]): r for r in related}
+            if len(unique) == 1:
+                row = next(iter(unique.values()))
     if row:
         if release_date and not row["release_date"]:
             con.execute("UPDATE songs SET release_date=? WHERE id=?", (release_date, row["id"]))
@@ -2491,6 +2694,25 @@ def _match_song_id(con: sqlite3.Connection, artist: str, title: str) -> int | No
         for row in candidates:
             if artist_anchor(str(row["artist"])) == anchor_artist:
                 return int(row["id"])
+
+    # Related title variants from RDS/library metadata. Require both title and
+    # artist-credit evidence before accepting a match.
+    tanchor = title_anchor(title)
+    if tanchor:
+        variant_rows = con.execute(
+            """SELECT id,artist,title FROM songs
+               WHERE title_key=? OR title_key LIKE ? OR ? LIKE title_key || ' %' OR title_key LIKE ?
+               ORDER BY id LIMIT 100""",
+            (tanchor, f"{tanchor} %", tanchor, f"% {tanchor}"),
+        ).fetchall()
+        related = [
+            row for row in variant_rows
+            if _title_variants_match(title, str(row["title"]))
+            and _song_artist_variants_match(artist, title, str(row["artist"]), str(row["title"]))
+        ]
+        unique = {int(row["id"]): row for row in related}
+        if len(unique) == 1:
+            return int(next(iter(unique)))
 
     # Exact title-only fallback when exactly one chart-backed recording owns a
     # reasonably distinctive title.

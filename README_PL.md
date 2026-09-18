@@ -1,3 +1,12 @@
+## 1.1.2 — skuteczniejsze scalanie duplikatów RDS
+
+- nowa migracja `song_alias_merge_v3` ponownie analizuje **już istniejący katalog**, więc poprawiony matcher działa również na duplikaty utworzone przed aktualizacją;
+- tytuły z dopiskiem `(Feat. …)`, `(Ft. …)` lub podobnym są traktowane jako ten sam tytuł, jeśli zgadza się powiązany kredyt wykonawców;
+- bezpiecznie obsługiwane jest typowe skrócenie RDS o jeden końcowy wyraz, np. `I Ciebie Też` ↔ `I Ciebie Też, Bardzo`; warianty typu `Remix`, `Live`, `Acoustic`, `Edit` itp. są celowo wykluczone;
+- obsługiwane są błędne rekordy, w których całe `wykonawcy - tytuł` trafiło do pola Tytuł, np. `Męskie Granie Orkiestra 2018, ... - Początek`;
+- ten sam matcher działa przy nowych importach, więc po migracji te warianty nie powinny ponownie tworzyć oddzielnych rekordów;
+- ręczne **Duplikaty / scalanie utworu** pokazuje teraz również kandydatów z powyższymi wariantami tytułu, a nie tylko idealnie identyczny tytuł.
+
 ## 1.1.1 — tożsamość utworów, ręczne scalanie i szybszy resumable backfill
 
 - automatyczne scalanie wariantów jednego nagrania zostało rozszerzone o charakterystyczny tytuł i graf powiązanych kredytów wykonawców;

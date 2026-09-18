@@ -3534,7 +3534,9 @@ Pobieranie, uzupełnianie 24h, backfill i zarządzanie stacjami są teraz w zak�
             """
 RadioCharts utrzymuje **jeden wspólny rekord nagrania** dla notowań, emisji i Twojej warstwy redakcyjnej. RDS potrafi jednak zapisać ten sam numer z innym zestawem wykonawców, rokiem projektu albo długim kredytem gościnnym.
 
-Od 1.1 system zapamiętuje aliasy po scaleniu i automatycznie łączy konserwatywne warianty na podstawie **charakterystycznego tytułu + powiązanego kredytu wykonawców**. Kredyty mogą łączyć się łańcuchowo — np. nazwa projektu ↔ pełny skład ↔ krótszy wariant z nazwiskiem gościa. Po scaleniu emisje, historia list, Status, Downloaded i Notatki zostają przy jednym rekordzie, a stary ID oraz stary podpis wykonawca+tytuł są zapamiętane, żeby duplikat nie odtworzył się przy kolejnym imporcie.
+Od 1.1 system zapamiętuje aliasy po scaleniu i automatycznie łączy konserwatywne warianty na podstawie **charakterystycznego tytułu + powiązanego kredytu wykonawców**. Od 1.1.2 rozpoznaje też typowe śmieci z RDS: dopiski `(Feat. …)` / `(Ft. …)`, bezpieczne skrócenie wielowyrazowego tytułu o jeden końcowy wyraz oraz rekordy w stylu `pełny kredyt wykonawców - właściwy tytuł` zapisane omyłkowo w polu Tytuł. Warianty typu Remix/Live/Acoustic/Edit pozostają osobnymi nagraniami. Kredyty mogą łączyć się łańcuchowo — np. nazwa projektu ↔ pełny skład ↔ krótszy wariant z nazwiskiem gościa. Po scaleniu emisje, historia list, Status, Downloaded i Notatki zostają przy jednym rekordzie, a stary ID oraz stary podpis wykonawca+tytuł są zapamiętane, żeby duplikat nie odtworzył się przy kolejnym imporcie.
+
+Przy pierwszym uruchomieniu 1.1.2 wykonywany jest ponowny skan istniejącego katalogu (`song_alias_merge_v3`), więc poprawka sprząta także stare duplikaty, a nie tylko zapobiega powstawaniu nowych.
 
 Nie robimy agresywnego łączenia wyłącznie po tytule, szczególnie dla krótkich nazw typu „Home” czy „Stay”, bo łatwo byłoby skleić dwa różne nagrania. Niejednoznaczne przypadki zostają do ręcznej decyzji.
 

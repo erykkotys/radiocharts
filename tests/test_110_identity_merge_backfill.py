@@ -151,3 +151,72 @@ def test_manual_is_current_for_merge_resumable_backfill_and_1d():
     assert "jednym zapytaniem wczytuje już poprawnie zapisane bloki" in app
     assert "Dzisiaj (1d)" in app
     assert "Domyślny pozostaje **ostatni tydzień (7d)**" in app
+
+
+def test_auto_merge_v3_handles_feat_suffix_and_rds_title_truncation(monkeypatch, tmp_path):
+    _reset_db(monkeypatch, tmp_path)
+    variants = [
+        ("Męskie Granie Orkiestra 2021", "I Ciebie Też"),
+        ("Męskie Granie Orkiestra 2021", "I Ciebie Też, Bardzo (Ft. Daria Zawiałow, Dawid Podsiadło, Vito Bambino)"),
+        ("Męskie Granie Orkiestra, Bedoes, Krzysztof Zalewski, Kwiat Jabłoni", "Jest Tylko Teraz"),
+        ("Męskie Granie Orkiestra 2022", "Jest Tylko Teraz (Feat. Bedoes, Krzysztof Zalewski, Kwiat Jabłoni)"),
+        ("Męskie Granie Orkiestra 2026", "Nareszcie"),
+        ("Męskie Granie Orkiestra 2026", "Nareszcie (Ft. Igor Herbut, Zalia, Vito Bambino)"),
+    ]
+    with db.connect() as con:
+        now = db._utcnow()
+        for artist, title in variants:
+            con.execute(
+                "INSERT INTO songs(artist,title,artist_key,title_key,created_at) VALUES(?,?,?,?,?)",
+                (artist, title, db.normalize(artist), db.normalize(title), now),
+            )
+        con.execute("DELETE FROM app_meta WHERE key='song_alias_merge_v3'")
+    monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
+    db.init_db()
+    with db.connect() as con:
+        rows = con.execute("SELECT artist,title FROM songs ORDER BY id").fetchall()
+    titles = [db.title_anchor(str(r["title"])) for r in rows]
+    assert titles.count(db.normalize("I Ciebie Też")) == 1
+    assert titles.count(db.normalize("Jest Tylko Teraz")) == 1
+    assert titles.count(db.normalize("Nareszcie")) == 1
+    assert len(rows) == 3
+
+
+def test_auto_merge_v3_understands_embedded_artist_credit_in_title(monkeypatch, tmp_path):
+    _reset_db(monkeypatch, tmp_path)
+    with db.connect() as con:
+        now = db._utcnow()
+        con.execute(
+            "INSERT INTO songs(artist,title,artist_key,title_key,created_at) VALUES(?,?,?,?,?)",
+            ("Męskie Granie Orkiestra", "Początek", db.normalize("Męskie Granie Orkiestra"), db.normalize("Początek"), now),
+        )
+        con.execute(
+            "INSERT INTO songs(artist,title,artist_key,title_key,created_at) VALUES(?,?,?,?,?)",
+            (
+                "Wersja Singlowa",
+                "Męskie Granie Orkiestra 2018, Kortez, Podsiadło, Zalewski - Początek",
+                db.normalize("Wersja Singlowa"),
+                db.normalize("Męskie Granie Orkiestra 2018, Kortez, Podsiadło, Zalewski - Początek"),
+                now,
+            ),
+        )
+        con.execute("DELETE FROM app_meta WHERE key='song_alias_merge_v3'")
+    monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
+    db.init_db()
+    with db.connect() as con:
+        rows = con.execute("SELECT artist,title FROM songs").fetchall()
+    assert len(rows) == 1
+    assert db.title_anchor(str(rows[0]["title"])) == db.normalize("Początek")
+
+
+def test_get_or_create_v3_reuses_title_variants_and_rejects_remix(monkeypatch, tmp_path):
+    _reset_db(monkeypatch, tmp_path)
+    with db.connect() as con:
+        base = db.get_or_create_song(con, "Męskie Granie Orkiestra 2026", "Nareszcie")
+        feat = db.get_or_create_song(con, "Męskie Granie Orkiestra 2026", "Nareszcie (Ft. Igor Herbut, Zalia, Vito Bambino)")
+        truncated = db.get_or_create_song(con, "Męskie Granie Orkiestra 2021", "I Ciebie Też")
+        full = db.get_or_create_song(con, "Męskie Granie Orkiestra 2021", "I Ciebie Też, Bardzo")
+        remix = db.get_or_create_song(con, "Męskie Granie Orkiestra 2021", "I Ciebie Też Remix")
+    assert base == feat
+    assert truncated == full
+    assert remix != truncated
