@@ -220,3 +220,22 @@ def test_get_or_create_v3_reuses_title_variants_and_rejects_remix(monkeypatch, t
     assert base == feat
     assert truncated == full
     assert remix != truncated
+
+
+def test_init_db_secondary_process_does_not_timeout_when_only_v3_cleanup_is_pending(monkeypatch, tmp_path):
+    _reset_db(monkeypatch, tmp_path)
+    with db.connect() as con:
+        con.execute("DELETE FROM app_meta WHERE key='song_alias_merge_v3'")
+    monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
+
+    class BusyInitLock:
+        def __init__(self, *args, **kwargs):
+            pass
+        def acquire(self):
+            raise db.FileLockTimeout("busy")
+        def release(self):
+            pass
+
+    monkeypatch.setattr(db, "FileLock", BusyInitLock)
+    db.init_db()  # schema is ready; another process may finish the v3 maintenance pass
+    assert db._INITIALIZED_DB_PATH == str(db.DB_PATH)

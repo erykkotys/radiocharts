@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from filelock import FileLock
+from filelock import FileLock, Timeout as FileLockTimeout
 
 DB_PATH = Path(os.getenv("RADIOCHARTS_DB", "/app/data/radiocharts.db"))
 if str(DB_PATH).startswith("/app/") and not Path("/app").exists():
@@ -980,74 +980,114 @@ def _merge_duplicate_songs_v2(con: sqlite3.Connection) -> int:
 def _merge_duplicate_songs_v3(con: sqlite3.Connection) -> int:
     """Re-scan historical rows with stronger RDS/title-variant matching.
 
-    v2 intentionally required identical title anchors.  Real radio metadata also
-    appends ``(Feat. ...)``, drops the last word of a title, or stores a whole
-    ``artist credit - title`` string in the title column.  v3 handles those
-    patterns while still requiring a related artist credit before merging.
+    1.1.3 keeps the v3 semantics but avoids first-word buckets.  Those buckets
+    could become very large for common beginnings (``I``, ``The``, ``Nie``...)
+    and turn startup into a quadratic comparison pass.  Candidate edges are
+    now generated only from equal title anchors or the one-trailing-word
+    truncation that :func:`_title_variants_match` intentionally supports.
     """
     rows = con.execute(
-        """SELECT s.*,
-                  (SELECT COUNT(*) FROM chart_entries e WHERE e.song_id=s.id) AS chart_count,
-                  (SELECT COUNT(*) FROM airplay_plays p WHERE p.song_id=s.id) AS spin_count,
-                  CASE WHEN EXISTS(SELECT 1 FROM song_notes n WHERE n.song_id=s.id) THEN 1 ELSE 0 END AS has_note
-           FROM songs s ORDER BY s.id"""
+        """WITH chart_counts AS (
+               SELECT song_id,COUNT(*) AS chart_count FROM chart_entries GROUP BY song_id
+           ), spin_counts AS (
+               SELECT song_id,COUNT(*) AS spin_count FROM airplay_plays GROUP BY song_id
+           ), note_flags AS (
+               SELECT song_id,1 AS has_note FROM song_notes GROUP BY song_id
+           )
+           SELECT s.*,COALESCE(c.chart_count,0) AS chart_count,
+                  COALESCE(p.spin_count,0) AS spin_count,COALESCE(n.has_note,0) AS has_note
+           FROM songs s
+           LEFT JOIN chart_counts c ON c.song_id=s.id
+           LEFT JOIN spin_counts p ON p.song_id=s.id
+           LEFT JOIN note_flags n ON n.song_id=s.id
+           ORDER BY s.id"""
     ).fetchall()
 
-    # Bucket by the first anchored title token. This avoids an O(n^2) scan over
-    # the full catalogue while keeping all prefix/Feat variants together.
-    buckets: dict[str, list[sqlite3.Row]] = {}
+    by_id = {int(r["id"]): r for r in rows}
+    by_anchor: dict[str, list[int]] = {}
     for row in rows:
         anchor = title_anchor(str(row["title"] or ""))
-        if not anchor:
+        if anchor:
+            by_anchor.setdefault(anchor, []).append(int(row["id"]))
+
+    adjacency: dict[int, set[int]] = {sid: set() for sid in by_id}
+
+    def connect_if_related(left_id: int, right_id: int) -> None:
+        if left_id == right_id:
+            return
+        left = by_id[left_id]
+        right = by_id[right_id]
+        if not _title_variants_match(str(left["title"]), str(right["title"])):
+            return
+        if not _song_artist_variants_match(
+            str(left["artist"]), str(left["title"]),
+            str(right["artist"]), str(right["title"]),
+        ):
+            return
+        adjacency[left_id].add(right_id)
+        adjacency[right_id].add(left_id)
+
+    # Exact anchored-title groups catch Feat/Ft suffixes and embedded-credit
+    # rows. Groups are normally tiny, so pairwise artist checks stay cheap.
+    for ids in by_anchor.values():
+        if len(ids) < 2:
             continue
-        first = anchor.split()[0]
-        buckets.setdefault(first, []).append(row)
+        for idx, left_id in enumerate(ids[:-1]):
+            for right_id in ids[idx + 1:]:
+                connect_if_related(left_id, right_id)
+
+    # The only non-exact title relation supported by v3 is one missing trailing
+    # word. Generate exactly those anchor pairs instead of comparing every song
+    # sharing the same first token.
+    forbidden = {
+        "remix", "mix", "live", "acoustic", "instrumental", "karaoke",
+        "edit", "version", "remaster", "remastered", "cover", "demo",
+        "part", "pt", "vol", "radio",
+    }
+    for long_anchor, long_ids in by_anchor.items():
+        tokens = long_anchor.split()
+        if len(tokens) < 3 or tokens[-1] in forbidden:
+            continue
+        short_anchor = " ".join(tokens[:-1])
+        if len(short_anchor) < 8:
+            continue
+        short_ids = by_anchor.get(short_anchor)
+        if not short_ids:
+            continue
+        for left_id in short_ids:
+            for right_id in long_ids:
+                connect_if_related(left_id, right_id)
 
     merged = 0
-    for variants in buckets.values():
-        if len(variants) < 2:
+    remaining = set(by_id)
+    while remaining:
+        seed_id = next(iter(remaining))
+        component_ids = {seed_id}
+        frontier = [seed_id]
+        while frontier:
+            current_id = frontier.pop()
+            for other_id in adjacency.get(current_id, ()):
+                if other_id in component_ids:
+                    continue
+                component_ids.add(other_id)
+                frontier.append(other_id)
+        remaining.difference_update(component_ids)
+        if len(component_ids) < 2:
             continue
-        by_id = {int(r["id"]): r for r in variants}
-        remaining = set(by_id)
-        while remaining:
-            seed_id = next(iter(remaining))
-            component_ids = {seed_id}
-            frontier = [seed_id]
-            while frontier:
-                current_id = frontier.pop()
-                current = by_id[current_id]
-                for oid in list(remaining):
-                    if oid in component_ids:
-                        continue
-                    other = by_id[oid]
-                    if not _title_variants_match(str(current["title"]), str(other["title"])):
-                        continue
-                    if not _song_artist_variants_match(
-                        str(current["artist"]), str(current["title"]),
-                        str(other["artist"]), str(other["title"]),
-                    ):
-                        continue
-                    component_ids.add(oid)
-                    frontier.append(oid)
-            for sid in component_ids:
-                remaining.discard(sid)
-            if len(component_ids) < 2:
-                continue
-            component = [by_id[sid] for sid in component_ids]
-            component.sort(
-                key=lambda r: (
-                    -int(r["has_note"] or 0),
-                    -int(r["chart_count"] or 0),
-                    -int(r["spin_count"] or 0),
-                    # Prefer the cleaner/shorter title if evidence is otherwise equal.
-                    len(str(r["title"] or "")),
-                    int(r["id"]),
-                )
+        component = [by_id[sid] for sid in component_ids]
+        component.sort(
+            key=lambda r: (
+                -int(r["has_note"] or 0),
+                -int(r["chart_count"] or 0),
+                -int(r["spin_count"] or 0),
+                len(str(r["title"] or "")),
+                int(r["id"]),
             )
-            cid = int(component[0]["id"])
-            merged += _merge_song_ids(
-                con, cid, [int(r["id"]) for r in component[1:]], source="auto-v3"
-            )
+        )
+        cid = int(component[0]["id"])
+        merged += _merge_song_ids(
+            con, cid, [int(r["id"]) for r in component[1:]], source="auto-v3"
+        )
     return merged
 
 
@@ -1295,6 +1335,33 @@ def _purge_eska_jingles(con: sqlite3.Connection) -> dict:
     return {"plays": plays_before, "songs": songs_before}
 
 
+def _app_meta_keys(keys: set[str]) -> set[str]:
+    """Read migration markers without taking the cross-process init lock."""
+    if not DB_PATH.exists() or not keys:
+        return set()
+    con = None
+    try:
+        con = sqlite3.connect(DB_PATH, timeout=1)
+        table = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_meta'"
+        ).fetchone()
+        if not table:
+            return set()
+        placeholders = ",".join("?" for _ in keys)
+        return {
+            str(row[0])
+            for row in con.execute(
+                f"SELECT key FROM app_meta WHERE key IN ({placeholders})",
+                tuple(sorted(keys)),
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        return set()
+    finally:
+        if con is not None:
+            con.close()
+
+
 def init_db() -> None:
     global _INITIALIZED_DB_PATH
     current_path = str(DB_PATH)
@@ -1332,8 +1399,31 @@ def init_db() -> None:
     # schema/migration work across processes so a simultaneous deploy cannot
     # make one container fail in executescript().
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    init_lock = FileLock(f"{DB_PATH}.init.lock", timeout=90)
-    with init_lock:
+
+    # song_alias_merge_v3 is a data-cleanup migration, not a schema prerequisite.
+    # On deploy the web process and worker start together. If one is already
+    # running only this maintenance pass, the other process may safely serve the
+    # existing schema instead of waiting 90 seconds and crashing with FileLock
+    # Timeout. Fresh/schema-changing databases still use the full wait.
+    maintenance_markers = {"song_alias_merge_v3"}
+    critical_markers = required_markers - maintenance_markers
+    pre_keys = _app_meta_keys(required_markers)
+    maintenance_only_pending = (
+        critical_markers.issubset(pre_keys)
+        and not required_markers.issubset(pre_keys)
+    )
+    lock_timeout = 3 if maintenance_only_pending else 90
+    init_lock = FileLock(f"{DB_PATH}.init.lock", timeout=lock_timeout)
+    try:
+        init_lock.acquire()
+    except FileLockTimeout:
+        if maintenance_only_pending:
+            # Another process owns the maintenance migration. The DB schema is
+            # already complete, so this process can start immediately.
+            _INITIALIZED_DB_PATH = current_path
+            return
+        raise
+    try:
         # Another process may have completed the migration while we waited.
         try:
             con0 = sqlite3.connect(DB_PATH, timeout=5)
@@ -1646,6 +1736,8 @@ def init_db() -> None:
                 time.sleep(0.7 * (attempt + 1))
         if last_exc is not None:
             raise last_exc
+    finally:
+        init_lock.release()
 
     _INITIALIZED_DB_PATH = current_path
 

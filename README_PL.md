@@ -1,3 +1,10 @@
+## 1.1.3 — hotfix startu po migracji duplikatów
+
+- Web i worker nie blokują już sobie startu przez `radiocharts.db.init.lock`, gdy jedyną brakującą operacją jest konserwacyjny skan `song_alias_merge_v3`. Drugi proces może wtedy wystartować po krótkim sprawdzeniu, podczas gdy pierwszy kończy porządkowanie katalogu.
+- Skan v3 nie grupuje już całego katalogu po pierwszym słowie tytułu. Kandydaci są generowani tylko dla identycznego tytułu po normalizacji lub bezpiecznego wariantu skróconego o jeden końcowy wyraz.
+- Liczniki toplist/emisji używane do wyboru rekordu głównego są agregowane jednym przebiegiem zamiast osobnych zapytań dla każdego utworu.
+- Funkcjonalność scalania z 1.1.2 pozostaje bez zmian, ale pierwsze uruchomienie na dużej bazie powinno być znacząco szybsze i nie powinno kończyć się `filelock._error.Timeout`.
+
 ## 1.1.2 — skuteczniejsze scalanie duplikatów RDS
 
 - nowa migracja `song_alias_merge_v3` ponownie analizuje **już istniejący katalog**, więc poprawiony matcher działa również na duplikaty utworzone przed aktualizacją;
