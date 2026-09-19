@@ -17,7 +17,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 from radiocharts.build_info import BUILD_DATE, display_version
 from radiocharts.freshness import source_cadence_info
-from radiocharts.airplay import completed_windows_in_range
+from radiocharts.airplay import AIRPLAY_BACKFILL_MAX_WINDOWS, completed_windows_in_range
 from radiocharts.db import (
     airplay_coverage, airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
     airplay_spin_counts, airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
@@ -2035,9 +2035,9 @@ def render_airplay_data_management(running: bool) -> None:
         bf_start, bf_end = bf_end, bf_start
     estimated_windows = len(selected_ids) * len(completed_windows_in_range(bf_start, bf_end))
     d2.metric("Okna 2h", f"{estimated_windows:,}".replace(",", " "))
-    can_backfill = bool(selected_ids) and estimated_windows <= 100_000 and not running
-    if estimated_windows > 100_000:
-        st.warning("Zakres przekracza limit 100 000 okien. Zmniejsz zakres lub liczbę stacji.")
+    can_backfill = bool(selected_ids) and estimated_windows <= AIRPLAY_BACKFILL_MAX_WINDOWS and not running
+    if estimated_windows > AIRPLAY_BACKFILL_MAX_WINDOWS:
+        st.warning(f"Zakres przekracza limit {AIRPLAY_BACKFILL_MAX_WINDOWS:,} okien. Zmniejsz zakres lub liczbę stacji.".replace(",", " "))
     run_col, _ = st.columns([1.8, 4.2])
     if run_col.button("Backfill emisji", disabled=not can_backfill, type="primary", use_container_width=True, key="data_airplay_bf_run"):
         start_job("airplay-backfill", params={
@@ -2046,7 +2046,7 @@ def render_airplay_data_management(running: bool) -> None:
             "end_date": bf_end.isoformat(),
         })
         st.rerun()
-    st.caption("Pełna zakończona doba jednej stacji = 12 bloków po 2h. Backfill najpierw wczytuje zapisane bloki, pomija już kompletne okna i pobiera tylko brakujące lub wymagające ponowienia — możesz więc bezpiecznie wskazać także długi zakres, np. rok.")
+    st.caption(f"Pełna zakończona doba jednej stacji = 12 bloków po 2h. Limit jednego procesu: {AIRPLAY_BACKFILL_MAX_WINDOWS:,} okien. Backfill najpierw wczytuje zapisane bloki, pomija już kompletne okna i pobiera tylko brakujące lub wymagające ponowienia — możesz więc bezpiecznie wskazać także długi zakres, np. rok lub więcej.".replace(",", " "))
     render_job_status_fragment("airplay", "data_airplay")
 
     with st.expander("🔎 Co dokładnie zostało pobrane — pokrycie per stacja", expanded=False):

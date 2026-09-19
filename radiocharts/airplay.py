@@ -27,6 +27,7 @@ HEADERS = {
     "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.7",
 }
 LOCK_PATH = Path("/app/data/airplay.lock") if Path("/app").exists() else Path(__file__).resolve().parent.parent / "data" / "airplay.lock"
+AIRPLAY_BACKFILL_MAX_WINDOWS = 500_000
 
 
 def _get(url: str, timeout: int = 12) -> str:
@@ -299,7 +300,7 @@ def backfill_airplay(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     pause_seconds: float = 0.10,
-    max_windows: int = 100_000,
+    max_windows: int = AIRPLAY_BACKFILL_MAX_WINDOWS,
     now: datetime | None = None,
 ) -> dict:
     """Exact, resumable backfill over all finished public 2-hour windows.

@@ -1,3 +1,10 @@
+## 1.1.5 — większy limit backfillu emisji
+
+- limit jednego backfillu odSluchane został zwiększony z **100 000 do 500 000 okien 2h**;
+- przy ok. 65 aktywnych stacjach pozwala to objąć jednorazowo około **1,75 roku** pełnej historii, o ile odSluchane ma te dane;
+- backfill nadal hurtowo sprawdza zapisane okna i pomija kompletne bloki, więc ponowne wskazanie częściowo pobranego zakresu jest bezpieczne;
+- domyślny zakres w UI nie został zmieniony.
+
 ## 1.1.4 — bezpieczniejsze duplikaty i scalanie prosto z Emisji
 
 - automat pozostaje konserwatywny, ale rozpoznaje teraz częsty wariant RDS, w którym lista gości jest dopisana w nawiasie bez `Feat.`, np. `Nareszcie (Herbut & Zalia & Vito Bambino)`, `Tańczę (Igor Herbut, Zalia, Vito Bambino)` i `Świt (Gośc.: …)`;
@@ -358,7 +365,7 @@ ZET ma automatyczny collector bieżącego Top 20 oraz eksperymentalny backfill p
 - Jeden wspólny player preview 30 s jest przyklejony do dołu całego viewportu, można go przewijać i zamknąć; przycisk odsłuchu jest również w widoku Utwór.
 - Nowa zakładka **Emisje**: automatyczne odkrywanie stacji z publicznego katalogu odSluchane.eu, zapis konkretnych emisji z bloków 2h, filtrowanie stacji checkboxami i agregacja dla dowolnego zapisanego zakresu dat.
 - Emisje pokazują: łączną liczbę spinów, liczbę stacji, średnią/stację, maksimum na jednej stacji, najmocniejszą stację, ostatnią emisję, status, odsłuch, Spotify i szczegóły dopasowanego utworu.
-- Worker emisji pobiera poprzedni zakończony blok 2h co dwie godziny o `:12`. Backfill jest resumable/idempotentny i ma limit 100 000 okien 2h na jeden proces.
+- Worker emisji pobiera poprzedni zakończony blok 2h co dwie godziny o `:12`. Backfill jest resumable/idempotentny i ma limit 500 000 okien 2h na jeden proces.
 
 ## 0.3.9 — naprawa emisji i wspólny katalog utworów
 - Naprawiona migracja starych tabel Emisji: `airplay_stations.station_id` jest ponownie prawdziwym kluczem głównym, więc znika błąd SQLite `foreign key mismatch` przy `airplay_windows`/`airplay_plays`. Migracja przebudowuje tylko tabele airplay i zachowuje dotychczasowe dane.
