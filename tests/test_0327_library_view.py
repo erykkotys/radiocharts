@@ -54,7 +54,7 @@ def test_0327_ui_has_library_tab_status_filters_and_paste_sync():
     assert 'STATUS_FILTER_BASE = "Baza — wszystkie"' in APP
     assert '"Wklej eksport bazy radia"' in APP
     assert 'st.text_area(' in APP
-    assert 'st.file_uploader(' not in APP
+    assert 'st.file_uploader("Plik GSelector"' in APP
 
 
 def test_0327_library_view_keeps_zero_airplay_songs_and_period_metrics():
@@ -67,4 +67,4 @@ def test_0327_library_view_keeps_zero_airplay_songs_and_period_metrics():
 
 
 def test_0327_status_order_bottom_up_contract():
-    assert 'RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F1"]' in APP
+    assert 'RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F3"]' in APP

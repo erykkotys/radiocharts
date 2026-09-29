@@ -27,6 +27,18 @@ from radiocharts.db import (
     merge_song_group,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
+from radiocharts.local_station import (
+    EVENT_TYPES as LOCAL_EVENT_TYPES,
+    available_dates as local_available_dates,
+    compare_day as local_compare_day,
+    day_summary as local_day_summary,
+    ensure_seed_data as ensure_local_station_seed_data,
+    events_for_day as local_events_for_day,
+    import_gselector_export as import_local_gselector_export,
+    import_history as local_import_history,
+    preview_import as preview_local_import,
+    song_stats as local_song_stats,
+)
 from radiocharts.metrics import compute_scores, song_history
 
 st.set_page_config(page_title="RadioCharts Research", page_icon="📻", layout="wide")
@@ -132,6 +144,7 @@ st.markdown(
 )
 
 init_db()
+ensure_local_station_seed_data()
 
 
 def copyable_json(data: dict, key: str) -> None:
@@ -681,6 +694,7 @@ def render_nav_tabs(current: str) -> None:
         ("archive", "Notowania"),
         ("airplay", "Emisje"),
         ("library", "Baza"),
+        ("our_radio", "Nasze radio"),
         ("data", "Dane"),
         ("methodology", "Manual"),
     ]
@@ -2119,8 +2133,307 @@ def render_airplay_data_management(running: bool) -> None:
                 st.rerun()
 
 
+
+LOCAL_EVENT_LABELS = {
+    "song": "Utwór",
+    "jingle": "Jingle",
+    "show": "Audycja",
+    "bed": "Podkład",
+    "info": "Informacje",
+    "etm": "ETM",
+    "traffic": "Reklama/traffic",
+    "command": "Komenda Zetta",
+    "other": "Inne",
+}
+
+
+def _local_default_date(values: list[str], kind: str) -> date | None:
+    if not values:
+        return None
+    parsed = [date.fromisoformat(v) for v in values]
+    if kind == "schedule":
+        today = date.today()
+        future = [d for d in parsed if d >= today]
+        return min(future) if future else max(parsed)
+    return max(parsed)
+
+
+def _local_timeline_frame(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    frame["Typ"] = frame["event_type"].map(LOCAL_EVENT_LABELS).fillna(frame["event_type"])
+    frame["Czas"] = frame["air_time_raw"].fillna("")
+    frame["Kategoria"] = frame["category"].fillna("")
+    frame["Wykonawca"] = frame["artist"].fillna("")
+    frame["Element / tytuł"] = frame["title"].fillna("")
+    frame["Runtime"] = frame["runtime_raw"].fillna("")
+    frame["ID"] = frame["external_id"].fillna("")
+    frame["⚠"] = frame["time_anomaly"].fillna(0).astype(bool)
+    return frame[["Czas", "Typ", "Kategoria", "Wykonawca", "Element / tytuł", "Runtime", "ID", "⚠"]]
+
+
+def _render_local_timeline(kind: str, key_prefix: str) -> None:
+    dates = local_available_dates(kind)
+    if not dates:
+        label = "Scheduled" if kind == "schedule" else "Played"
+        st.info(f"Brak danych {label}. Zaimportuj plik GSelectora w zakładce Import.")
+        return
+
+    default_date = _local_default_date(dates, kind) or date.fromisoformat(dates[-1])
+    dcol, hcol, tcol = st.columns([.82, .82, 2.15], vertical_alignment="bottom")
+    selected_date = dcol.selectbox(
+        "Dzień",
+        dates,
+        index=dates.index(default_date.isoformat()) if default_date.isoformat() in dates else len(dates) - 1,
+        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
+        key=f"{key_prefix}_date",
+    )
+    hour_options: list[object] = ["Cały dzień", *range(24)]
+    selected_hour = hcol.selectbox(
+        "Godzina",
+        hour_options,
+        format_func=lambda value: str(value) if isinstance(value, str) else f"{int(value):02d}:00–{int(value):02d}:59",
+        key=f"{key_prefix}_hour",
+    )
+    type_options = list(LOCAL_EVENT_LABELS)
+    selected_types = tcol.multiselect(
+        "Typy elementów",
+        type_options,
+        default=type_options,
+        format_func=lambda value: LOCAL_EVENT_LABELS.get(value, value),
+        key=f"{key_prefix}_types",
+    )
+
+    rows = local_events_for_day(
+        kind,
+        selected_date,
+        hour=None if selected_hour == "Cały dzień" else int(selected_hour),
+        event_types=selected_types,
+    )
+    day = local_day_summary(kind, selected_date)
+    render_compact_metrics([
+        ("Elementy", day["events"]),
+        ("Utwory", day["songs"]),
+        ("Jingle", day["jingles"]),
+        ("Audycje", day["shows"]),
+    ])
+    frame = _local_timeline_frame(rows)
+    if frame.empty:
+        st.info("Brak elementów dla wybranych filtrów.")
+        return
+    st.dataframe(
+        frame,
+        hide_index=True,
+        use_container_width=True,
+        height=690,
+        column_config={
+            "Czas": st.column_config.TextColumn(width="small"),
+            "Typ": st.column_config.TextColumn(width="small"),
+            "Kategoria": st.column_config.TextColumn(width="medium"),
+            "Wykonawca": st.column_config.TextColumn(width="medium"),
+            "Element / tytuł": st.column_config.TextColumn(width="large"),
+            "Runtime": st.column_config.TextColumn(width="small"),
+            "ID": st.column_config.TextColumn(width="medium"),
+            "⚠": st.column_config.CheckboxColumn(help="Nietypowy zapis czasu z GSelectora; surowa wartość została zachowana."),
+        },
+    )
+    st.caption(
+        "⚠ oznacza nietypowy zapis Air Time (np. minuty >59 przy opcji 60+ minutes/hour). "
+        "Importer zachowuje surową wartość i używa Exact Time do sortowania, jeśli jest dostępny."
+    )
+
+
+def _render_local_comparison() -> None:
+    scheduled_dates = set(local_available_dates("schedule"))
+    played_dates = set(local_available_dates("played"))
+    overlap = sorted(scheduled_dates & played_dates)
+    if not overlap:
+        st.info(
+            "Nie ma jeszcze dnia, dla którego są jednocześnie Scheduled i Played. "
+            "Po pierwszym eksporcie Played dla 30.09 lub później porównanie pojawi się automatycznie."
+        )
+        return
+    selected_date = st.selectbox(
+        "Dzień do porównania",
+        overlap,
+        index=len(overlap) - 1,
+        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
+        key="our_radio_compare_date",
+    )
+    comparison = local_compare_day(selected_date)
+    render_compact_metrics([
+        ("Scheduled", comparison["scheduled"]),
+        ("Played", comparison["played"]),
+        ("Dopasowane", comparison["matched"]),
+        ("Pominięte / dodane", f"{comparison['missed']} / {comparison['added']}"),
+    ])
+    rows = pd.DataFrame(comparison["rows"])
+    if rows.empty:
+        st.info("Brak elementów do porównania.")
+        return
+    status_filter = st.multiselect(
+        "Status",
+        ["OK", "Przesunięte", "Pominięte", "Dodane"],
+        default=["OK", "Przesunięte", "Pominięte", "Dodane"],
+        key="our_radio_compare_status",
+    )
+    type_filter = st.multiselect(
+        "Typ",
+        list(LOCAL_EVENT_LABELS),
+        default=list(LOCAL_EVENT_LABELS),
+        format_func=lambda value: LOCAL_EVENT_LABELS.get(value, value),
+        key="our_radio_compare_type",
+    )
+    rows = rows[rows["status"].isin(status_filter) & rows["event_type"].isin(type_filter)].copy()
+    rows["Typ"] = rows["event_type"].map(LOCAL_EVENT_LABELS)
+    rows = rows.rename(columns={
+        "status": "Status",
+        "category": "Kategoria",
+        "artist": "Wykonawca",
+        "title": "Element / tytuł",
+        "scheduled_time": "Scheduled",
+        "played_time": "Played",
+        "delta_seconds": "Δ s",
+        "external_id": "ID",
+    })
+    st.dataframe(
+        rows[["Status", "Scheduled", "Played", "Δ s", "Typ", "Kategoria", "Wykonawca", "Element / tytuł", "ID"]],
+        hide_index=True,
+        use_container_width=True,
+        height=690,
+    )
+    if comparison.get("avg_abs_delta_seconds") is not None:
+        st.caption(f"Średnie bezwzględne przesunięcie dopasowanych elementów: {comparison['avg_abs_delta_seconds']:.1f} s.")
+
+
+def _render_local_song_stats() -> None:
+    schedule_dates = local_available_dates("schedule")
+    played_dates = local_available_dates("played")
+    available_kinds = []
+    if schedule_dates:
+        available_kinds.append("schedule")
+    if played_dates:
+        available_kinds.append("played")
+    if not available_kinds:
+        st.info("Brak danych do statystyk.")
+        return
+    labels = {"schedule": "Scheduled", "played": "Played"}
+    source_kind = st.radio(
+        "Źródło",
+        available_kinds,
+        format_func=lambda value: labels[value],
+        horizontal=True,
+        key="our_radio_stats_kind",
+    )
+    dates = schedule_dates if source_kind == "schedule" else played_dates
+    c1, c2 = st.columns(2)
+    start = c1.selectbox(
+        "Od",
+        dates,
+        index=0,
+        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
+        key=f"our_radio_stats_start_{source_kind}",
+    )
+    end = c2.selectbox(
+        "Do",
+        dates,
+        index=len(dates) - 1,
+        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
+        key=f"our_radio_stats_end_{source_kind}",
+    )
+    if start > end:
+        start, end = end, start
+    stats = local_song_stats(source_kind, start, end)
+    if not stats:
+        st.info("Brak utworów w wybranym okresie.")
+        return
+    frame = pd.DataFrame(stats).rename(columns={
+        "artist": "Wykonawca",
+        "title": "Tytuł",
+        "category": "Kategoria",
+        "external_id": "ID",
+        "plays": "Emisje / plan",
+        "days_with_play": "Dni",
+        "per_calendar_day": "Na dzień",
+        "avg_active_day": "Na aktywny dzień",
+        "max_day": "Max/dzień",
+        "peak_hour": "Najczęstsza godz.",
+        "song_id": "song_id",
+    })
+    frame["Najczęstsza godz."] = frame["Najczęstsza godz."].map(
+        lambda value: "—" if pd.isna(value) else f"{int(value):02d}:00"
+    )
+    render_compact_metrics([
+        ("Różne utwory", len(frame)),
+        ("Wszystkie emisje/sloty", int(frame["Emisje / plan"].sum())),
+        ("Śr. na utwór", round(float(frame["Emisje / plan"].mean()), 1)),
+        ("Zakres", f"{date.fromisoformat(start).strftime('%d.%m')}–{date.fromisoformat(end).strftime('%d.%m')}"),
+    ])
+    st.dataframe(
+        frame[["Wykonawca", "Tytuł", "Kategoria", "Emisje / plan", "Dni", "Na dzień", "Na aktywny dzień", "Max/dzień", "Najczęstsza godz.", "ID"]],
+        hide_index=True,
+        use_container_width=True,
+        height=690,
+    )
+
+
+def _render_local_import() -> None:
+    st.markdown("#### Ręczny importer GSelector")
+    st.caption(
+        "Importer przyjmuje obecny eksport TSV/TXT. Wielodniowy plik jest dzielony po znacznikach UTF-8 BOM, "
+        "a nowszy import tego samego dnia staje się bieżącym snapshotem; starsza wersja zostaje w historii."
+    )
+    upload = st.file_uploader("Plik GSelector", type=["txt", "tsv", "log"], key="our_radio_file")
+    if upload is not None:
+        payload = upload.getvalue()
+        preview = preview_local_import(payload, upload.name)
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Wiersze", preview["rows"])
+        p2.metric("Dni", preview["days"])
+        p3.metric("Zakres z nazwy", f"{preview.get('inferred_start') or '—'} → {preview.get('inferred_end') or '—'}")
+        counts = preview.get("event_counts") or {}
+        st.caption(" · ".join(f"{LOCAL_EVENT_LABELS.get(k,k)}: {v}" for k, v in sorted(counts.items())))
+        for warning in preview.get("warnings") or []:
+            st.warning(warning)
+
+        kind_col, date_col = st.columns(2)
+        kind_label = kind_col.radio("Rodzaj", ["Scheduled", "Played"], horizontal=True, key="our_radio_import_kind")
+        kind = "schedule" if kind_label == "Scheduled" else "played"
+        inferred = preview.get("inferred_start")
+        default_start = date.fromisoformat(inferred) if inferred else date.today()
+        import_start = date_col.date_input("Data pierwszego dnia w pliku", value=default_start, key="our_radio_import_start")
+        if st.button("Importuj do Nasze radio", type="primary", key="our_radio_import_btn"):
+            result = import_local_gselector_export(
+                payload,
+                filename=upload.name,
+                kind=kind,
+                start_date=import_start,
+                source="manual-ui",
+            )
+            st.session_state["our_radio_import_result"] = result
+            st.rerun()
+
+    result = st.session_state.pop("our_radio_import_result", None)
+    if result:
+        verb = "już był zaimportowany" if result.get("duplicate") else "zaimportowano"
+        st.success(
+            f"{verb}: {result['rows']} wierszy / {result['days']} dni · "
+            f"{result['date_from']} → {result['date_to']}."
+        )
+
+    history = pd.DataFrame(local_import_history())
+    if not history.empty:
+        history = history.rename(columns={
+            "kind": "Typ", "source_name": "Plik", "date_from": "Od", "date_to": "Do",
+            "day_count": "Dni", "row_count": "Wiersze", "source": "Źródło", "imported_at": "Import",
+        })
+        st.markdown("#### Historia importów")
+        st.dataframe(history[["Typ", "Plik", "Od", "Do", "Dni", "Wiersze", "Źródło", "Import"]], hide_index=True, use_container_width=True)
+
+
 view_key = str(st.query_params.get("view", "dashboard"))
-if view_key not in {"dashboard", "song", "archive", "airplay", "library", "data", "methodology"}:
+if view_key not in {"dashboard", "song", "archive", "airplay", "library", "our_radio", "data", "methodology"}:
     view_key = "dashboard"
 render_nav_tabs(view_key)
 install_client_helpers()
@@ -3197,6 +3510,26 @@ elif view_key == "library":
             "Zasięg i Radio Presence odnoszą się do wybranego okresu; Zasięg 7d i Emisje 7d są globalne dla ostatnich 7 dni, a Popularity dla ostatnich 28 dni."
         )
 
+elif view_key == "our_radio":
+    st.subheader("🏠 Nasze radio")
+    st.caption(
+        "Własna emisja jest trzymana osobno od monitoringu rynku. Scheduled = plan wyeksportowany z GSelectora, "
+        "Played = stan po reconciliation. Importy są wersjonowane, więc ponowny eksport dnia nie kasuje poprzedniego snapshotu."
+    )
+    tab_schedule, tab_played, tab_compare, tab_songs, tab_import = st.tabs(
+        ["Scheduled", "Played", "Porównanie", "Utwory", "Import"]
+    )
+    with tab_schedule:
+        _render_local_timeline("schedule", "our_radio_schedule")
+    with tab_played:
+        _render_local_timeline("played", "our_radio_played")
+    with tab_compare:
+        _render_local_comparison()
+    with tab_songs:
+        _render_local_song_stats()
+    with tab_import:
+        _render_local_import()
+
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")
     st.caption("Pobieranie działa w tle i można je zatrzymać. OLiA/OLiS wróciły do starszego, sprawdzonego mechanizmu renderowania/eksportu; UI pozostaje responsywne.")
@@ -3604,5 +3937,19 @@ Worker sprawdza automatyczne źródła dwa razy dziennie — 07:30 i 20:30 czasu
 **▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł; w tabelach obsługa kliknięcia jest realizowana bezpiecznie przez AG Grid, a Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania bieżącego widoku. Kolumna **Udostępnij ↗** wyszukuje dokładny utwór przez iTunes i otwiera jego smart-link Songlink/Odesli; w razie braku trafienia wraca do wyszukiwania Spotify. Na karcie **Utwór** przycisk **OLiS wyróżnienia ↗** prowadzi do oficjalnej, przeszukiwalnej bazy ZPAV/OLiS ze Złotymi, Platynowymi i Diamentowymi Płytami.
 
 Twoje pola **Status, Downloaded i Notatka** są warstwą redakcyjną i nie zmieniają automatycznych wskaźników. Notatka jest celowo ostatnią kolumną tabel, żeby nie zabierała miejsca najważniejszym danym liczbowym.
+            """
+        )
+
+
+    with st.expander("14. Nasze radio — Scheduled, Played i reconciliation", expanded=False):
+        st.markdown(
+            """
+Zakładka **Nasze radio** jest oddzielona od monitoringu rynku. **Scheduled** to snapshot planu wyeksportowany z GSelectora przed emisją, a **Played** to plik po reconciliation / zakończeniu dnia.
+
+Importer przyjmuje obecny TSV/TXT, zachowuje wszystkie typy elementów (utwory, jingle, audycje, podkłady, informacje, ETM-y, reklamy i pozostałe wpisy) oraz surowe pola wiersza. Wielodniowy eksport jest rozbijany na dni po znacznikach BOM. Ponowny import tego samego dnia tworzy nowy bieżący snapshot, ale starszy zostaje w bazie jako historia rewizji planu.
+
+**Porównanie** dopasowuje elementy przede wszystkim po stabilnym ID z eksportu, a gdy go brakuje — po typie/kategorii i nazwie. Pokazuje `OK`, `Przesunięte`, `Pominięte` oraz `Dodane`. Widok **Utwory** liczy rotację w wybranym zakresie: liczbę slotów/emisji, liczbę dni, średnią na dzień, maksimum dzienne i najczęstszą godzinę.
+
+Na etapie 1.2.0 import jest ręczny. Automatyczne pobieranie z udziału sieciowego może zostać dołożone bez zmiany schematu bazy, bo importer i model danych są już oddzielone od sposobu dostarczenia pliku.
             """
         )

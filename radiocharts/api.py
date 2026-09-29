@@ -34,12 +34,19 @@ from radiocharts.db import (
     normalize,
     update_note,
 )
+from radiocharts.local_station import (
+    available_dates as local_available_dates,
+    compare_day as local_compare_day,
+    ensure_seed_data as ensure_local_station_seed_data,
+    events_for_day as local_events_for_day,
+    song_stats as local_song_stats,
+)
 from radiocharts.metrics import compute_scores, song_history
 
 API_VERSION = "1"
 POPULARITY_CHART_WEIGHTS = {"OLIA": 35.0, "OLIS": 25.0, "RMF": 20.0, "ZET": 12.0, "ESKA": 8.0}
 POPULARITY_CHART_SIZES = {"OLIA": 100, "OLIS": 100, "RMF": 20, "ZET": 20, "ESKA": 20}
-RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F1"]
+RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F3"]
 RADIO_STATUS_TOP_DOWN = list(reversed(RADIO_STATUS_BOTTOM_UP))
 BASE_STATUSES = [f"Baza {code}" for code in RADIO_STATUS_TOP_DOWN]
 CANDIDATE_STATUSES = [f"{code} Candidate" for code in RADIO_STATUS_TOP_DOWN]
@@ -50,6 +57,7 @@ STATUSES = [
 STATUS_ALIASES = {
     "Ignore": "Poza formatem", "Candidate": "CF1 Candidate", "CF Candidate": "CF1 Candidate",
     "Current": "Baza CF2", "Current Familiar": "Baza CF1", "Recurrent": "Baza R1", "Poza bazą": "Baza Hold",
+    "F1 Candidate": "F3 Candidate", "Baza F1": "Baza F3",
 }
 
 ANDROID_APK_FILENAME = "RadioCharts.apk"
@@ -347,6 +355,7 @@ class NotePatch(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    ensure_local_station_seed_data()
     yield
 
 
@@ -476,6 +485,43 @@ def song_airplay(
         "airplay_per_day": round(spins / days, 1), "airplay_per_station_day": round(per_station_day, 2),
     })
     return {k: _clean(v) if not isinstance(v, list) else [{kk: _clean(vv) for kk, vv in x.items()} for x in v] for k, v in detail.items()}
+
+
+@app.get("/api/v1/local-radio/dates")
+def local_radio_dates(kind: Literal["schedule", "played"] = "schedule") -> list[str]:
+    return local_available_dates(kind)
+
+
+@app.get("/api/v1/local-radio/events/{kind}/{service_date}")
+def local_radio_events(
+    kind: Literal["schedule", "played"],
+    service_date: date,
+    hour: int | None = Query(default=None, ge=0, le=23),
+) -> list[dict[str, Any]]:
+    return [{k: _clean(v) for k, v in row.items()} for row in local_events_for_day(kind, service_date, hour=hour)]
+
+
+@app.get("/api/v1/local-radio/compare/{service_date}")
+def local_radio_compare(service_date: date) -> dict[str, Any]:
+    result = local_compare_day(service_date)
+    return {
+        k: ([{kk: _clean(vv) for kk, vv in row.items()} for row in v] if k == "rows" else _clean(v))
+        for k, v in result.items()
+    }
+
+
+@app.get("/api/v1/local-radio/song-stats")
+def local_radio_song_stats(
+    kind: Literal["schedule", "played"] = "played",
+    start: date | None = None,
+    end: date | None = None,
+) -> list[dict[str, Any]]:
+    dates = local_available_dates(kind)
+    if not dates:
+        return []
+    resolved_start = start or date.fromisoformat(dates[0])
+    resolved_end = end or date.fromisoformat(dates[-1])
+    return [{k: _clean(v) for k, v in row.items()} for row in local_song_stats(kind, resolved_start, resolved_end)]
 
 
 @app.get("/api/v1/android/update")
