@@ -11,11 +11,8 @@ from radiocharts.local_station import (
     import_gselector_export,
     parse_gselector_export,
     song_stats,
-<<<<<<< HEAD
     song_activity,
     ensure_song_links_current,
-=======
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,16 +97,11 @@ def test_song_stats_and_our_radio_ui_contract(tmp_path, monkeypatch):
     rows = song_stats("played", "2026-09-30", "2026-09-30")
     assert rows[0]["plays"] == 2
     assert rows[0]["per_calendar_day"] == 2.0
-<<<<<<< HEAD
     assert '("our_radio", "EMAUS")' in APP
-=======
-    assert '("our_radio", "Nasze radio")' in APP
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
     assert '["Scheduled", "Played", "Porównanie", "Utwory", "Import"]' in APP
     assert 'st.file_uploader("Plik GSelector"' in APP
 
 
-<<<<<<< HEAD
 
 def test_60plus_air_time_is_overtime_not_anomaly(tmp_path, monkeypatch):
     _use_db(monkeypatch, tmp_path / "gap.db")
@@ -146,8 +138,6 @@ def test_song_raw_fields_and_emaus_song_activity(tmp_path, monkeypatch):
     assert activity["daily"][0]["played"] == 1
 
 
-=======
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 def test_release_contains_real_seed_exports():
     schedule = ROOT / "radiocharts/data/gselector_schedule_2026-09-30_2026-10-12.tsv"
     played = ROOT / "radiocharts/data/gselector_played_2026-09-28.tsv"

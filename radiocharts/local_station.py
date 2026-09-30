@@ -19,7 +19,6 @@ STATION_KEY = "EMAUS"
 LOCAL_KINDS = ("schedule", "played")
 EVENT_TYPES = ("song", "jingle", "show", "bed", "info", "etm", "traffic", "command", "other")
 
-<<<<<<< HEAD
 # Current EMAUS/GSelector Song sub-format.  The first 17 positions are stable
 # in the export used by RadioCharts; four trailing technical fields are kept
 # verbatim because their exact GSelector labels can vary with the sub-format.
@@ -43,8 +42,6 @@ GSELECTOR_SONG_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("extra_21", "Pole 21", 20),
 )
 
-=======
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 
 @dataclass(frozen=True)
 class ParsedLocalStationFile:
@@ -142,7 +139,6 @@ def _parse_time(raw: str) -> tuple[float | None, bool]:
     hour, minute, second = int(m.group(1)), int(m.group(2)), float(m.group(3))
     if hour < 0 or second >= 60:
         return None, True
-<<<<<<< HEAD
     # With GSelector's "60+ minutes/hour" option a value such as 08:62:47.3
     # is deliberate: the 08 hour is 2:47.3 over.  Keep it sortable, but do
     # NOT mark the normal 60+ representation as an anomaly.  Values in the
@@ -188,15 +184,6 @@ def _format_gap(seconds: float | None) -> str:
     if abs(secs - round(secs)) < 1e-9:
         return f"+{minutes:02d}:{int(round(secs)):02d}"
     return f"+{minutes:02d}:{secs:04.1f}"
-=======
-    # GSelector's 60+ minutes/hour option can legitimately emit 08:62:47.3.
-    # Huge minute values (seen as 1439) are a reconciliation/export anomaly;
-    # preserve raw text but do not pretend it is a reliable sortable timestamp.
-    if minute >= 180:
-        return None, True
-    total = hour * 3600.0 + minute * 60.0 + second
-    return total % 86400.0, minute >= 60 or hour >= 24
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 
 
 def _parse_duration(raw: str) -> float | None:
@@ -275,25 +262,19 @@ def _event_fields(row: list[str], line_no: int) -> dict[str, Any]:
     else:
         sort_seconds = air_seconds
 
-<<<<<<< HEAD
     projected = {
         key: (values[index] if typ == "song" and len(values) > index else "")
         for key, _label, index in GSELECTOR_SONG_COLUMNS
     }
-=======
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
     return {
         "line_no": int(line_no),
         "air_time_raw": air_raw,
         "air_seconds": air_seconds,
         "sort_seconds": sort_seconds,
-<<<<<<< HEAD
         "schedule_hour": _schedule_hour(air_raw),
         "gap_seconds": _gap_overrun_seconds(air_raw),
         "gap_raw": _format_gap(_gap_overrun_seconds(air_raw)),
         "etm_delta_raw": (values[2] if typ == "etm" and len(values) > 2 else ""),
-=======
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
         "time_anomaly": bool(odd_time or exact_odd),
         "event_type": typ,
         "category": category,
@@ -305,10 +286,7 @@ def _event_fields(row: list[str], line_no: int) -> dict[str, Any]:
         "runtime_raw": runtime_raw,
         "runtime_seconds": _parse_duration(runtime_raw) if runtime_raw else None,
         "raw_fields": values,
-<<<<<<< HEAD
         **projected,
-=======
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
     }
 
 
@@ -349,12 +327,8 @@ def parse_gselector_export(data: bytes | str, filename: str = "") -> ParsedLocal
     anomalous = sum(1 for day in days for event in day if event["time_anomaly"])
     if anomalous:
         warnings.append(
-<<<<<<< HEAD
             f"{anomalous} wierszy ma nietypowy/uszkodzony zapis czasu; surowy czas zostaje zachowany. "
             "Normalny zapis 60+ minutes/hour nie jest traktowany jako błąd."
-=======
-            f"{anomalous} wierszy ma nietypowy zapis czasu (np. minuty >59); surowy czas zostaje zachowany."
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
         )
 
     return ParsedLocalStationFile(
@@ -575,7 +549,6 @@ def events_for_day(
         rows = con.execute(
             f"""SELECT id,service_date,sequence_no,line_no,air_time_raw,air_seconds,sort_seconds,
                        time_anomaly,event_type,category,artist,title,external_id,exact_time_raw,
-<<<<<<< HEAD
                        runtime_raw,runtime_seconds,song_id,import_id,payload_json
                 FROM local_station_events WHERE {' AND '.join(where)}
                 ORDER BY sequence_no""",
@@ -601,17 +574,6 @@ def events_for_day(
         # Filter by GSelector's scheduling hour, not normalized wall-clock time.
         # Thus 08:62:47 remains in the 08 hour as an explicit +02:47 overtime.
         out = [r for r in out if r.get("schedule_hour") == int(hour)]
-=======
-                       runtime_raw,runtime_seconds,song_id,import_id
-                FROM local_station_events WHERE {' AND '.join(where)}
-                ORDER BY CASE WHEN sort_seconds IS NULL THEN 1 ELSE 0 END, sort_seconds, sequence_no""",
-            params,
-        ).fetchall()
-    out = [dict(row) for row in rows]
-    if hour is not None:
-        lo, hi = int(hour) * 3600, (int(hour) + 1) * 3600
-        out = [r for r in out if r.get("sort_seconds") is not None and lo <= float(r["sort_seconds"]) < hi]
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
     return out
 
 
@@ -642,11 +604,7 @@ def song_stats(
     db.init_db()
     with db.connect() as con:
         rows = con.execute(
-<<<<<<< HEAD
             """SELECT service_date,sort_seconds,air_time_raw,artist,title,category,external_id,song_id
-=======
-            """SELECT service_date,sort_seconds,artist,title,category,external_id,song_id
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
                FROM local_station_events
                WHERE station_key=? AND kind=? AND active=1 AND event_type='song'
                  AND service_date BETWEEN ? AND ?
@@ -680,14 +638,10 @@ def song_stats(
         if cat:
             item["categories"][cat] += 1
         sec = row["sort_seconds"]
-<<<<<<< HEAD
         raw_hour = _schedule_hour(str(row["air_time_raw"] or ""))
         if raw_hour is not None:
             item["hours"][raw_hour] += 1
         elif sec is not None:
-=======
-        if sec is not None:
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
             item["hours"][int(float(sec) // 3600) % 24] += 1
         stamp = (day, float(sec) if sec is not None else 999999.0)
         if item["first"] is None or stamp < item["first"]:
@@ -805,7 +759,6 @@ def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dic
     }
 
 
-<<<<<<< HEAD
 
 def ensure_song_links_current(station_key: str = STATION_KEY) -> dict[str, int]:
     """Relink previously unmatched EMAUS songs against current identities.
@@ -903,8 +856,6 @@ def song_activity(
         "daily": [daily_map[k] for k in sorted(daily_map)],
     }
 
-=======
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 def ensure_seed_data() -> dict[str, Any]:
     """One-shot production seed for the files supplied with RadioCharts 1.2.0."""
     db.init_db()

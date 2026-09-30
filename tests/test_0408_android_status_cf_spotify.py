@@ -12,19 +12,10 @@ def test_android_017_keeps_api_status_order_and_scrollable_picker_with_spotify()
     assert 'items(androidStatusOrder(statuses))' in main
     assert 'SpotifyButton(s, compact = true)' in main
     assert 'https://open.spotify.com/search/$q' in main
-<<<<<<< HEAD
     assert 'versionCode = 26' in gradle
     assert 'versionName = "1.2.1"' in gradle
-=======
-    assert 'versionCode = 25' in gradle
-    assert 'versionName = "1.2.0"' in gradle
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 
 
 def test_version_0409():
     root = Path(__file__).resolve().parents[1]
-<<<<<<< HEAD
     assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.1"
-=======
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
->>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
