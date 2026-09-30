@@ -171,6 +171,60 @@ CREATE TABLE IF NOT EXISTS airplay_windows (
     PRIMARY KEY(station_id, play_date, start_hour)
 );
 
+-- Own-station GSelector/Zetta reconciliation data.  This subsystem stays
+-- separate from market airplay_plays: schedule=planned, played=post-reconciliation.
+-- Every re-import archives the previous active snapshot instead of deleting it.
+CREATE TABLE IF NOT EXISTS local_station_imports (
+    id INTEGER PRIMARY KEY,
+    station_key TEXT NOT NULL DEFAULT 'EMAUS',
+    kind TEXT NOT NULL CHECK(kind IN ('schedule','played')),
+    source_name TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    date_from TEXT NOT NULL,
+    date_to TEXT NOT NULL,
+    day_count INTEGER NOT NULL,
+    row_count INTEGER NOT NULL,
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT 'manual',
+    imported_at TEXT NOT NULL,
+    UNIQUE(station_key, kind, source_hash)
+);
+
+CREATE TABLE IF NOT EXISTS local_station_events (
+    id INTEGER PRIMARY KEY,
+    import_id INTEGER NOT NULL REFERENCES local_station_imports(id) ON DELETE CASCADE,
+    station_key TEXT NOT NULL DEFAULT 'EMAUS',
+    kind TEXT NOT NULL CHECK(kind IN ('schedule','played')),
+    service_date TEXT NOT NULL,
+    sequence_no INTEGER NOT NULL,
+    line_no INTEGER NOT NULL,
+    air_time_raw TEXT NOT NULL DEFAULT '',
+    air_seconds REAL,
+    sort_seconds REAL,
+    time_anomaly INTEGER NOT NULL DEFAULT 0,
+    event_type TEXT NOT NULL DEFAULT 'other',
+    category TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    external_id TEXT NOT NULL DEFAULT '',
+    exact_time_raw TEXT NOT NULL DEFAULT '',
+    exact_seconds REAL,
+    runtime_raw TEXT NOT NULL DEFAULT '',
+    runtime_seconds REAL,
+    song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
+    payload_json TEXT NOT NULL DEFAULT '[]',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_local_station_current_day
+    ON local_station_events(station_key,kind,service_date,active,sort_seconds);
+CREATE INDEX IF NOT EXISTS idx_local_station_external
+    ON local_station_events(station_key,external_id,service_date);
+CREATE INDEX IF NOT EXISTS idx_local_station_song
+    ON local_station_events(song_id,service_date,kind);
+CREATE INDEX IF NOT EXISTS idx_local_station_import_kind_date
+    ON local_station_imports(station_key,kind,date_from,date_to,imported_at);
+
 """
 
 
@@ -939,6 +993,9 @@ def _merge_song_ids(
             else:
                 con.execute("UPDATE chart_entries SET song_id=? WHERE id=?", (cid, int(ent["id"])))
         con.execute("UPDATE airplay_plays SET song_id=? WHERE song_id=?", (cid, did))
+        # EMAUS/GSelector rows are part of the same canonical song identity.
+        # Preserve that link when a duplicate RadioCharts song is merged.
+        con.execute("UPDATE local_station_events SET song_id=? WHERE song_id=?", (cid, did))
         con.execute("DELETE FROM song_notes WHERE song_id=?", (did,))
         con.execute("DELETE FROM songs WHERE id=?", (did,))
         merged += 1
@@ -1606,6 +1663,7 @@ def init_db() -> None:
         "radio_library_heard_downloaded_v3",
         "airplay_dead_station_cleanup_v1",
         "airplay_eska_jingle_cleanup_v1",
+        "local_station_schema_v1",
     }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
         # Hot-path for a running web/worker process. Migrations are checked once
@@ -1683,6 +1741,7 @@ def init_db() -> None:
                         if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                             raise
                     con.executescript(SCHEMA)
+                    con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('local_station_schema_v1','done')")
                     quarantined_daily = _ensure_airplay_schema(con)
 
                     # Lightweight migrations for existing MVP databases.

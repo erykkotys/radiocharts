@@ -1,3 +1,26 @@
+## 1.2.1 — EMAUS: pełne kolumny GSelectora, gap time i powiązanie z kartą utworu
+
+- zakładka **Nasze radio** została nazwana **EMAUS**;
+- timeline Scheduled/Played ma wybór widocznych kolumn, w tym **Mood, Opener, Timing, Content, Energy, Texture Close/Open, Edit Code, Exact Time, Failure Code, Vocal** oraz pola techniczne; **ID** pozostaje dostępne do diagnostyki, ale nie jest już domyślnie eksponowane;
+- typ `Utwór` w EMAUS jest prezentowany jako **Song**; Song zachowuje zwykłe tło, a Audycje, Jingle, Reklamy, Informacje, Podkłady i ETM-y dostają subtelne kolory dla szybszego czytania logu;
+- zapis GSelectora **60+ minutes/hour** nie jest traktowany jako błąd: np. `08:62:47.3` pozostaje w godzinie 08 i pokazuje `Gap +02:47.3`; prawdziwie uszkodzone czasy nadal dostają ostrzeżenie;
+- istniejące i przyszłe wpisy EMAUS są wiązane z canonical `song_id` RadioCharts; scalanie duplikatów zachowuje link, a brakujące powiązania są ponownie sprawdzane po starcie;
+- karta **Utwór** ma sekcję **EMAUS** z liczbą Scheduled/Played, średnią Played/dzień, następnym planem oraz tabelą dzienną; dane pojawią się automatycznie wraz z kolejnymi importami Played;
+- API dostało `/api/v1/local-radio/song/{song_id}` pod późniejszy Android/automat;
+- Android 1.2.1 / `versionCode = 26` (bez osobnego ekranu EMAUS w tej iteracji).
+
+## 1.2.0 — Nasze radio: GSelector Scheduled / Played
+
+- nowa zakładka **Nasze radio** z widokami **Scheduled**, **Played**, **Porównanie**, **Utwory** i **Import**;
+- osobny backend SQLite dla własnej stacji, niezależny od zewnętrznych `airplay_plays`;
+- ręczny importer aktualnego eksportu GSelectora TSV/TXT, także wielodniowego; rozpoznaje utwory, jingle, audycje, podkłady, informacje, ETM-y, reklamy/traffic, komendy Zetta i inne elementy;
+- kolejne importy tego samego dnia tworzą nowy bieżący snapshot, a poprzedni zostaje w historii;
+- porównanie Scheduled↔Played dopasowuje przede wszystkim po stabilnym ID i pokazuje `OK`, `Przesunięte`, `Pominięte` oraz `Dodane`;
+- statystyki utworów obejmują liczbę slotów/emisji, dni, średnią na dzień, maksimum dzienne i najczęstszą godzinę;
+- release zawiera początkowy Scheduled **30.09–12.10.2026** oraz próbny/realny Played **28.09.2026**, więc po wdrożeniu dane są od razu widoczne;
+- dodane endpointy API `/api/v1/local-radio/...` pod przyszły Android i automatyczny import;
+- Android 1.2.0 / `versionCode = 25` (bez nowego ekranu Nasze radio w tej iteracji).
+
 ## 1.1.5 — większy limit backfillu emisji
 
 - limit jednego backfillu odSluchane został zwiększony z **100 000 do 500 000 okien 2h**;

@@ -18,7 +18,7 @@ def test_0326_bundled_radio_library_contains_full_user_export():
     assert len(rows) == 928
     assert meta["categories"] == {
         "G2": 287, "R2": 189, "G1": 136, "R1": 117, "SP2": 63,
-        "SP1": 41, "CF2": 40, "CF1": 29, "NB": 18, "F1": 8,
+        "SP1": 41, "CF2": 40, "CF1": 29, "NB": 18, "F3": 8,
     }
 
 
@@ -54,14 +54,14 @@ def test_0326_radio_library_sync_adds_missing_and_updates_existing(tmp_path, mon
                WHERE s.artist_key=? AND s.title_key=?""",
             (db.normalize("Nowy Artysta"), db.normalize("Nowy Test")),
         ).fetchone()
-        assert tuple(new) == ("Nowy Artysta", "Nowy Test", "Baza F1", 1)
+        assert tuple(new) == ("Nowy Artysta", "Nowy Test", "Baza F3", 1)
 
 
 def test_0326_status_taxonomy_covers_every_radio_category():
     assert 'CANDIDATE_STATUSES = [f"{code} Candidate" for code in RADIO_STATUS_TOP_DOWN]' in APP
     assert 'BASE_STATUSES = [f"Baza {code}" for code in RADIO_STATUS_TOP_DOWN]' in APP
     for code in db.RADIO_LIBRARY_CATEGORIES:
-        assert code in {"R2", "R1", "CF2", "CF1", "F1", "G1", "G2", "SP1", "SP2", "NB"}
+        assert code in {"R2", "R1", "CF2", "CF1", "F3", "G1", "G2", "SP1", "SP2", "NB"}
 
 
 def test_0326_airplay_has_period_reach_compact_weeks_and_workflow_order():
@@ -87,6 +87,6 @@ def test_0326_auto_seed_can_be_forced_for_deploy_migration(tmp_path, monkeypatch
     with db.connect() as con:
         assert con.execute("SELECT COUNT(*) FROM songs").fetchone()[0] == 928
         assert con.execute("SELECT COUNT(*) FROM song_notes WHERE downloaded=1").fetchone()[0] == 928
-        assert con.execute("SELECT COUNT(*) FROM song_notes WHERE status='Baza F1'").fetchone()[0] == 8
+        assert con.execute("SELECT COUNT(*) FROM song_notes WHERE status='Baza F3'").fetchone()[0] == 8
         marker = con.execute("SELECT value FROM app_meta WHERE key='radio_library_seed_20260825_v2'").fetchone()[0]
         assert "rows=928" in marker

@@ -44,7 +44,7 @@ def test_0323_status_v3_migrates_old_cf_candidate(tmp_path, monkeypatch):
 
 
 def test_0323_dashboard_cleanup_and_status_order_contract():
-    assert 'RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F1"]' in APP
+    assert 'RADIO_STATUS_BOTTOM_UP = ["CF1", "CF2", "R1", "R2", "G1", "G2", "SP1", "SP2", "NB", "F3"]' in APP
     assert '*CANDIDATE_STATUSES' in APP
     assert '"Baza Hold"' in APP
     assert '*BASE_STATUSES' in APP
