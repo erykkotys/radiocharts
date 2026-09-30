@@ -13,4 +13,8 @@ def test_android_ci_workflow_present_and_builds_apk():
 
 def test_version_current():
     root = Path(__file__).resolve().parents[1]
+<<<<<<< HEAD
     assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.1"
+=======
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f

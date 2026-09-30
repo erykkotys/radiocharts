@@ -5,10 +5,17 @@ APP = (ROOT / "radiocharts" / "app.py").read_text(encoding="utf-8")
 
 
 def test_release_version_106():
+<<<<<<< HEAD
     assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.1"
     gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
     assert 'versionCode = 26' in gradle
     assert 'versionName = "1.2.1"' in gradle
+=======
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
+    gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+    assert 'versionCode = 25' in gradle
+    assert 'versionName = "1.2.0"' in gradle
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 
 
 def test_status_editor_is_bounded_and_page_has_bottom_room():

@@ -38,10 +38,15 @@ from radiocharts.local_station import (
     available_dates as local_available_dates,
     compare_day as local_compare_day,
     ensure_seed_data as ensure_local_station_seed_data,
+<<<<<<< HEAD
     ensure_song_links_current as ensure_local_station_song_links,
     events_for_day as local_events_for_day,
     song_stats as local_song_stats,
     song_activity as local_song_activity,
+=======
+    events_for_day as local_events_for_day,
+    song_stats as local_song_stats,
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 )
 from radiocharts.metrics import compute_scores, song_history
 
@@ -358,7 +363,10 @@ class NotePatch(BaseModel):
 async def lifespan(app: FastAPI):
     init_db()
     ensure_local_station_seed_data()
+<<<<<<< HEAD
     ensure_local_station_song_links()
+=======
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
     yield
 
 
@@ -513,6 +521,7 @@ def local_radio_compare(service_date: date) -> dict[str, Any]:
     }
 
 
+<<<<<<< HEAD
 @app.get("/api/v1/local-radio/song/{song_id}")
 def local_radio_song_activity(
     song_id: int,
@@ -526,6 +535,8 @@ def local_radio_song_activity(
     }
 
 
+=======
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 @app.get("/api/v1/local-radio/song-stats")
 def local_radio_song_stats(
     kind: Literal["schedule", "played"] = "played",

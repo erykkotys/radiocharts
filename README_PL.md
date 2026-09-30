@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ## 1.2.1 — EMAUS: pełne kolumny GSelectora, gap time i powiązanie z kartą utworu
 
 - zakładka **Nasze radio** została nazwana **EMAUS**;
@@ -9,6 +10,8 @@
 - API dostało `/api/v1/local-radio/song/{song_id}` pod późniejszy Android/automat;
 - Android 1.2.1 / `versionCode = 26` (bez osobnego ekranu EMAUS w tej iteracji).
 
+=======
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 ## 1.2.0 — Nasze radio: GSelector Scheduled / Played
 
 - nowa zakładka **Nasze radio** z widokami **Scheduled**, **Played**, **Porównanie**, **Utwory** i **Import**;

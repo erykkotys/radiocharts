@@ -4,7 +4,11 @@ Natywny klient Android (Kotlin + Jetpack Compose) dla prywatnego RadioCharts API
 
 ## Wersja
 
+<<<<<<< HEAD
 Android 1.2.1 (`versionCode = 25`).
+=======
+Android 1.2.0 (`versionCode = 25`).
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 
 ## Release signing
 

@@ -12,8 +12,13 @@ def test_android_014_player_is_not_owned_by_lazy_row_and_library_has_inline_cont
     assert 'composable("library") { SongListScreen("library", "Baza", nav::navigate, withPeriod=true, previewVm = previewVm) }' in main
     assert "PreviewButton(s, previewVm)" in main
     assert "InlineStatusMenu(" in main
+<<<<<<< HEAD
     assert 'versionCode = 26' in gradle
     assert 'versionName = "1.2.1"' in gradle
+=======
+    assert 'versionCode = 25' in gradle
+    assert 'versionName = "1.2.0"' in gradle
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
 
 
 def test_android_014_airplay_defaults_to_period_spins_and_has_exact_dates():
@@ -30,4 +35,8 @@ def test_android_014_airplay_defaults_to_period_spins_and_has_exact_dates():
 
 def test_version_0406():
     root = Path(__file__).resolve().parents[1]
+<<<<<<< HEAD
     assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.1"
+=======
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
+>>>>>>> a98c8593defab725ea67d3c33366c2c60006ed9f
