@@ -33,6 +33,7 @@ from radiocharts.local_station import (
     available_dates as local_available_dates,
     compare_day as local_compare_day,
     day_summary as local_day_summary,
+    delete_import as local_delete_import,
     ensure_seed_data as ensure_local_station_seed_data,
     ensure_song_links_current as ensure_local_station_song_links,
     events_for_day as local_events_for_day,
@@ -2572,7 +2573,23 @@ def _render_local_import() -> None:
             f"{result['date_from']} → {result['date_to']}."
         )
 
-    history = pd.DataFrame(local_import_history())
+    delete_result = st.session_state.pop("our_radio_delete_result", None)
+    if delete_result:
+        restored = len(delete_result.get("restored_dates") or [])
+        empty = len(delete_result.get("empty_dates") or [])
+        extra = []
+        if restored:
+            extra.append(f"przywrócono starszy snapshot dla {restored} dni")
+        if empty:
+            extra.append(f"{empty} dni nie ma już danych tego typu")
+        suffix = f" · {'; '.join(extra)}" if extra else ""
+        st.success(
+            f"Usunięto import #{delete_result['import_id']}: {delete_result['source_name']} · "
+            f"{delete_result['date_from']} → {delete_result['date_to']}{suffix}."
+        )
+
+    history_rows = local_import_history()
+    history = pd.DataFrame(history_rows)
     if not history.empty:
         history = history.rename(columns={
             "kind": "Typ", "source_name": "Plik", "date_from": "Od", "date_to": "Do",
@@ -2580,6 +2597,43 @@ def _render_local_import() -> None:
         })
         st.markdown("#### Historia importów")
         st.dataframe(history[["Typ", "Plik", "Od", "Do", "Dni", "Wiersze", "Źródło", "Import"]], hide_index=True, use_container_width=True)
+
+        with st.expander("🗑️ Usuń błędny import", expanded=False):
+            st.caption(
+                "Usuwa cały wskazany import z bazy. Jeśli dla któregoś dnia istnieje starszy snapshot tego samego typu, "
+                "zostanie automatycznie przywrócony jako bieżący. Potem możesz zaimportować ten sam plik ponownie z poprawną datą."
+            )
+            by_id = {int(row["id"]): row for row in history_rows}
+            import_ids = list(by_id)
+            def _import_label(import_id: int) -> str:
+                row = by_id[import_id]
+                kind_label = "Scheduled" if row["kind"] == "schedule" else "Played"
+                return (
+                    f"#{import_id} · {kind_label} · {row['source_name']} · "
+                    f"{row['date_from']} → {row['date_to']} · {row['row_count']} wierszy"
+                )
+            selected_import_id = st.selectbox(
+                "Import do usunięcia",
+                import_ids,
+                format_func=_import_label,
+                key="our_radio_delete_import_id",
+            )
+            selected = by_id[int(selected_import_id)]
+            st.warning(
+                f"Wybrano: {selected['source_name']} · "
+                f"{selected['date_from']} → {selected['date_to']} · {selected['row_count']} wierszy."
+            )
+            confirm_delete = st.checkbox(
+                "Potwierdzam usunięcie tego importu",
+                key=f"our_radio_delete_confirm_{selected_import_id}",
+            )
+            if st.button(
+                "Usuń import",
+                disabled=not confirm_delete,
+                key=f"our_radio_delete_btn_{selected_import_id}",
+            ):
+                st.session_state["our_radio_delete_result"] = local_delete_import(int(selected_import_id))
+                st.rerun()
 
 
 view_key = str(st.query_params.get("view", "dashboard"))

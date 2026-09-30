@@ -7,6 +7,7 @@ import radiocharts.db as db
 from radiocharts.local_station import (
     available_dates,
     compare_day,
+    delete_import,
     events_for_day,
     import_gselector_export,
     parse_gselector_export,
@@ -143,3 +144,42 @@ def test_release_contains_real_seed_exports():
     played = ROOT / "radiocharts/data/gselector_played_2026-09-28.tsv"
     assert schedule.is_file() and schedule.stat().st_size > 1_000_000
     assert played.is_file() and played.stat().st_size > 50_000
+
+
+def test_delete_import_removes_wrong_date_and_restores_previous_snapshot(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "delete.db")
+    first = import_gselector_export(
+        _song("10:00:00.0", "Artist", "Original", "A1"),
+        filename="30.09_original.txt",
+        kind="schedule",
+        start_date="2026-09-30",
+    )
+    wrong = import_gselector_export(
+        _song("10:01:00.0", "Artist", "Wrong date", "A2"),
+        filename="wrong_date.txt",
+        kind="schedule",
+        start_date="2026-09-30",
+    )
+    assert [r["title"] for r in events_for_day("schedule", "2026-09-30")] == ["Wrong date"]
+
+    result = delete_import(wrong["import_id"])
+    assert result["deleted"] is True
+    assert result["restored_dates"] == ["2026-09-30"]
+    assert [r["title"] for r in events_for_day("schedule", "2026-09-30")] == ["Original"]
+
+    with db.connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM local_station_imports WHERE id=?", (wrong["import_id"],)
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM local_station_events WHERE import_id=?", (wrong["import_id"],)
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM local_station_imports WHERE id=?", (first["import_id"],)
+        ).fetchone()[0] == 1
+
+
+def test_emaus_import_ui_has_delete_control():
+    assert '🗑️ Usuń błędny import' in APP
+    assert 'Potwierdzam usunięcie tego importu' in APP
+    assert 'local_delete_import(int(selected_import_id))' in APP

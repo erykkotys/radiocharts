@@ -527,6 +527,81 @@ def import_history(station_key: str = STATION_KEY, limit: int = 50) -> list[dict
     return [dict(row) for row in rows]
 
 
+def delete_import(import_id: int, station_key: str = STATION_KEY) -> dict[str, Any]:
+    """Delete one GSelector import and restore the newest older snapshot per affected day.
+
+    The delete is import-scoped on purpose: when a file was imported with a
+    wrong start date, remove that import and then import the same file again
+    with the corrected date.
+    """
+    db.init_db()
+    import_id = int(import_id)
+    with db.connect() as con:
+        meta = con.execute(
+            """SELECT id,station_key,kind,source_name,date_from,date_to,day_count,row_count,source,imported_at
+               FROM local_station_imports WHERE id=? AND station_key=? LIMIT 1""",
+            (import_id, station_key),
+        ).fetchone()
+        if meta is None:
+            raise ValueError(f"Nie znaleziono importu #{import_id} dla {station_key}.")
+
+        affected_dates = [
+            str(row["service_date"])
+            for row in con.execute(
+                """SELECT DISTINCT service_date FROM local_station_events
+                   WHERE import_id=? ORDER BY service_date""",
+                (import_id,),
+            ).fetchall()
+        ]
+        kind = str(meta["kind"])
+
+        # ON DELETE CASCADE removes every event that came from this import.
+        con.execute("DELETE FROM local_station_imports WHERE id=?", (import_id,))
+
+        restored: list[str] = []
+        empty: list[str] = []
+        for service_date in affected_dates:
+            # Recalculate the current snapshot from the imports that remain.
+            # This also makes deletion of an archived import safe.
+            con.execute(
+                """UPDATE local_station_events SET active=0
+                   WHERE station_key=? AND kind=? AND service_date=?""",
+                (station_key, kind, service_date),
+            )
+            previous = con.execute(
+                """SELECT e.import_id
+                   FROM local_station_events e
+                   JOIN local_station_imports i ON i.id=e.import_id
+                   WHERE e.station_key=? AND e.kind=? AND e.service_date=?
+                   ORDER BY i.imported_at DESC, i.id DESC
+                   LIMIT 1""",
+                (station_key, kind, service_date),
+            ).fetchone()
+            if previous is None:
+                empty.append(service_date)
+                continue
+            previous_id = int(previous["import_id"])
+            con.execute(
+                """UPDATE local_station_events SET active=1
+                   WHERE import_id=? AND station_key=? AND kind=? AND service_date=?""",
+                (previous_id, station_key, kind, service_date),
+            )
+            restored.append(service_date)
+
+    return {
+        "deleted": True,
+        "import_id": import_id,
+        "kind": kind,
+        "source_name": str(meta["source_name"]),
+        "date_from": str(meta["date_from"]),
+        "date_to": str(meta["date_to"]),
+        "rows": int(meta["row_count"]),
+        "affected_dates": affected_dates,
+        "restored_dates": restored,
+        "empty_dates": empty,
+    }
+
+
 def events_for_day(
     kind: str,
     service_date: date | str,

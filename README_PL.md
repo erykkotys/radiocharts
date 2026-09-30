@@ -489,3 +489,7 @@ RadioCharts wychodzi z etapu MVP i dostaje stabilne wersjonowanie 1.x. Osobny ch
 Na karcie **Utwór** zmiana Statusu oraz Downloaded zapisuje się automatycznie, a przycisk **Zapisz** służy wyłącznie do zapisania notatki. W Emisjach i Bazie dodano preset **Dzisiaj (1d)** obok dotychczasowych zakresów, przy zachowaniu domyślnego 7d.
 
 Android 1.0.0 otwiera wykresy w bieżącej orientacji — typowo pionowej — i pozwala normalnie obracać telefon przy włączonym auto-rotate. Dodatkowy przycisk **Poziomo** wymusza landscape także przy systemowej blokadzie portretu; **Auto** zwalnia wymuszenie.
+
+### 1.2.2
+- EMAUS → Import: możliwość usunięcia całego błędnego importu i ponownego importu z poprawną datą.
+- Po usunięciu bieżącego snapshotu wcześniejszy snapshot dla danego dnia jest automatycznie przywracany.
