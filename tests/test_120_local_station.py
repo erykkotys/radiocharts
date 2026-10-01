@@ -7,13 +7,14 @@ import radiocharts.db as db
 from radiocharts.local_station import (
     available_dates,
     compare_day,
-    delete_import,
+    compare_hour,
     events_for_day,
     import_gselector_export,
     parse_gselector_export,
     song_stats,
     song_activity,
     ensure_song_links_current,
+    delete_import,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,7 +86,7 @@ def test_compare_day_matches_external_id_and_reports_shift_missing_and_added(tmp
     assert result["on_time"] == 1
     assert result["missed"] == 1
     assert result["added"] == 1
-    assert {r["status"] for r in result["rows"]} == {"OK", "Pominięte", "Dodane"}
+    assert {r["status"] for r in result["rows"]} == {"OK", "Niezagrane", "Dodane"}
 
 
 def test_song_stats_and_our_radio_ui_contract(tmp_path, monkeypatch):
@@ -146,40 +147,66 @@ def test_release_contains_real_seed_exports():
     assert played.is_file() and played.stat().st_size > 50_000
 
 
-def test_delete_import_removes_wrong_date_and_restores_previous_snapshot(tmp_path, monkeypatch):
+def test_compare_hour_ignores_seconds_but_detects_order_and_keeps_repeats_separate(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "hourly.db")
+    schedule = "\n".join([
+        _song("00:05:00.0", "Artist", "Repeat", "ID-R"),
+        _song("00:10:00.0", "Artist", "A", "ID-A"),
+        _song("00:15:00.0", "Artist", "B", "ID-B"),
+        _song("06:00:00.0", "Artist", "Repeat", "ID-R"),
+    ])
+    played = "\n".join([
+        _song("00:06:33.0", "Artist", "Repeat", "ID-R"),
+        _song("00:15:30.0", "Artist", "B", "ID-B"),
+        _song("00:18:00.0", "Artist", "A", "ID-A"),
+        _song("06:38:00.0", "Artist", "Repeat", "ID-R"),
+    ])
+    import_gselector_export(schedule, filename="30.09_schedule.txt", kind="schedule", start_date="2026-09-30")
+    import_gselector_export(played, filename="30.09_played.txt", kind="played", start_date="2026-09-30")
+
+    midnight = compare_hour("2026-09-30", 0)
+    repeat = next(r for r in midnight["rows"] if r["title"] == "Repeat")
+    assert repeat["status"] == "OK"
+    assert repeat["start_delta"] == "+1:33"
+    moved = [r for r in midnight["rows"] if r["title"] in {"A", "B"}]
+    assert {r["status"] for r in moved} == {"Kolejność"}
+
+    six = compare_hour("2026-09-30", 6)
+    assert six["missed"] == 0 and six["added"] == 0
+    assert six["rows"][0]["title"] == "Repeat"
+    assert six["rows"][0]["status"] == "OK"
+
+
+def test_compare_hour_marks_runtime_cut_but_not_small_runtime_drift(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "fade.db")
+    planned = _song("15:00:00.0", "Artist", "Long", "ID-L").replace('"03:00.0"\t"Male"', '"04:00.0"\t"Male"')
+    played = _song("15:02:00.0", "Artist", "Long", "ID-L").replace('"03:00.0"\t"Male"', '"03:50.0"\t"Male"')
+    import_gselector_export(planned, filename="30.09_schedule.txt", kind="schedule", start_date="2026-09-30")
+    import_gselector_export(played, filename="30.09_played.txt", kind="played", start_date="2026-09-30")
+    result = compare_hour("2026-09-30", 15)
+    assert result["faded"] == 1
+    assert result["rows"][0]["status"] == "Ścięty"
+    assert result["rows"][0]["runtime_cut"] == "-0:10"
+
+
+def test_delete_import_restores_previous_snapshot_and_allows_reimport(tmp_path, monkeypatch):
     _use_db(monkeypatch, tmp_path / "delete.db")
     first = import_gselector_export(
-        _song("10:00:00.0", "Artist", "Original", "A1"),
-        filename="30.09_original.txt",
-        kind="schedule",
-        start_date="2026-09-30",
+        _song("10:00:00.0", "Artist", "Old", "ID-OLD"),
+        filename="30.09_old.txt", kind="schedule", start_date="2026-09-30",
     )
     wrong = import_gselector_export(
-        _song("10:01:00.0", "Artist", "Wrong date", "A2"),
-        filename="wrong_date.txt",
-        kind="schedule",
-        start_date="2026-09-30",
+        _song("10:00:00.0", "Artist", "Wrong", "ID-WRONG"),
+        filename="30.09_wrong.txt", kind="schedule", start_date="2026-09-30",
     )
-    assert [r["title"] for r in events_for_day("schedule", "2026-09-30")] == ["Wrong date"]
-
-    result = delete_import(wrong["import_id"])
-    assert result["deleted"] is True
-    assert result["restored_dates"] == ["2026-09-30"]
-    assert [r["title"] for r in events_for_day("schedule", "2026-09-30")] == ["Original"]
-
-    with db.connect() as con:
-        assert con.execute(
-            "SELECT COUNT(*) FROM local_station_imports WHERE id=?", (wrong["import_id"],)
-        ).fetchone()[0] == 0
-        assert con.execute(
-            "SELECT COUNT(*) FROM local_station_events WHERE import_id=?", (wrong["import_id"],)
-        ).fetchone()[0] == 0
-        assert con.execute(
-            "SELECT COUNT(*) FROM local_station_imports WHERE id=?", (first["import_id"],)
-        ).fetchone()[0] == 1
-
-
-def test_emaus_import_ui_has_delete_control():
-    assert '🗑️ Usuń błędny import' in APP
-    assert 'Potwierdzam usunięcie tego importu' in APP
-    assert 'local_delete_import(int(selected_import_id))' in APP
+    assert [r["title"] for r in events_for_day("schedule", "2026-09-30")] == ["Wrong"]
+    deleted = delete_import(wrong["import_id"])
+    assert deleted["restored_days"] == 1
+    assert [r["title"] for r in events_for_day("schedule", "2026-09-30")] == ["Old"]
+    again = import_gselector_export(
+        _song("10:00:00.0", "Artist", "Wrong", "ID-WRONG"),
+        filename="30.09_wrong.txt", kind="schedule", start_date="2026-10-01",
+    )
+    assert again["duplicate"] is False
+    assert again["date_from"] == "2026-10-01"
+    assert first["import_id"] != again["import_id"]

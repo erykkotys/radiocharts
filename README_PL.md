@@ -1,3 +1,18 @@
+## 1.2.3 — EMAUS: porównanie godzinowe Scheduled vs Played
+
+- Porównanie działa osobno dla każdego bloku godzinnego 00–23; ten sam utwór z innej godziny nie może zostać błędnie sparowany.
+- Zgodność jest oparta na zawartości i kolejności, nie na sekundach startu. Jeżeli elementy są te same i w tej samej kolejności, blok jest OK.
+- Widok porównania pokazuje pełny log Scheduled po lewej i Played po prawej, w rzeczywistej kolejności.
+- Różnice raportują tylko: Niezagrane, Dodane, zmienioną kolejność oraz wykryte ścięcie/fade.
+- Delta startu jest pomocnicza i ma format +M:SS / -M:SS; nie wpływa sama w sobie na status.
+- Wykrywanie fade korzysta z tekstowego kodu fade (jeżeli eksport go udostępnia) albo z runtime Played krótszego od Scheduled o ponad 5 s.
+- Kolory logu: Song biały, reklamy/spoty czerwone, pozostałe elementy żółte na czarnym tle; niezagrane elementy są szare.
+- Techniczne wpisy `Zetta Play Asset` są domyślnie ukryte z porównania.
+- Reklamowe grupy o wspólnym Air Time są klasyfikowane razem, również dla już istniejących importów.
+- Import można usunąć z historii; po skasowaniu bieżącego snapshotu wcześniejszy snapshot tego dnia jest automatycznie przywracany.
+- Pole z wartościami typu `CLOSER` / `LONG SONG 4:30+` jest pokazywane jako Sound Code.
+- Android 1.2.3 / `versionCode = 27` (bez osobnego ekranu EMAUS w tej iteracji).
+
 ## 1.2.1 — EMAUS: pełne kolumny GSelectora, gap time i powiązanie z kartą utworu
 
 - zakładka **Nasze radio** została nazwana **EMAUS**;
@@ -489,7 +504,3 @@ RadioCharts wychodzi z etapu MVP i dostaje stabilne wersjonowanie 1.x. Osobny ch
 Na karcie **Utwór** zmiana Statusu oraz Downloaded zapisuje się automatycznie, a przycisk **Zapisz** służy wyłącznie do zapisania notatki. W Emisjach i Bazie dodano preset **Dzisiaj (1d)** obok dotychczasowych zakresów, przy zachowaniu domyślnego 7d.
 
 Android 1.0.0 otwiera wykresy w bieżącej orientacji — typowo pionowej — i pozwala normalnie obracać telefon przy włączonym auto-rotate. Dodatkowy przycisk **Poziomo** wymusza landscape także przy systemowej blokadzie portretu; **Auto** zwalnia wymuszenie.
-
-### 1.2.2
-- EMAUS → Import: możliwość usunięcia całego błędnego importu i ponownego importu z poprawną datą.
-- Po usunięciu bieżącego snapshotu wcześniejszy snapshot dla danego dnia jest automatycznie przywracany.

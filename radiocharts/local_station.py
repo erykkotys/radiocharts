@@ -32,7 +32,7 @@ GSELECTOR_SONG_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("texture_open", "Texture Open", 10),
     ("edit_code", "Edit Code", 11),
     ("exact_time_raw", "Exact Time", 12),
-    ("failure_code", "Failure Code", 13),
+    ("sound_code", "Sound Code", 13),
     ("runtime_raw", "Runtime", 14),
     ("vocal", "Vocal", 15),
     ("external_id", "ID", 16),
@@ -205,6 +205,8 @@ def _event_type(row: list[str]) -> str:
         return "etm"
     if upper == "ZETTA PLAY ASSET":
         return "command"
+    if "SPOT BLOCK" in upper:
+        return "traffic"
     # Song rows in the current RadioCharts export have the long Song sub-format
     # (artist=column 5, title=column 6). This remains intentionally structural,
     # not category-hardcoded, so future music categories still import as songs.
@@ -290,6 +292,22 @@ def _event_fields(row: list[str], line_no: int) -> dict[str, Any]:
     }
 
 
+def _mark_traffic_groups(events: list[dict[str, Any]]) -> None:
+    """Mark bare spot rows that share an Air Time with an advertising marker."""
+    start = 0
+    while start < len(events):
+        raw_time = str(events[start].get("air_time_raw") or "")
+        end = start + 1
+        while end < len(events) and str(events[end].get("air_time_raw") or "") == raw_time:
+            end += 1
+        group = events[start:end]
+        if any(item.get("event_type") == "traffic" for item in group):
+            for item in group:
+                if item.get("event_type") in {"other", "traffic"}:
+                    item["event_type"] = "traffic"
+        start = end
+
+
 def parse_gselector_export(data: bytes | str, filename: str = "") -> ParsedLocalStationFile:
     text = _decode(data)
     chunks = _split_export_days(text)
@@ -311,6 +329,7 @@ def parse_gselector_export(data: bytes | str, filename: str = "") -> ParsedLocal
             counts[event["event_type"]] += 1
             total_rows += 1
         if parsed_day:
+            _mark_traffic_groups(parsed_day)
             days.append(parsed_day)
 
     start, end = _filename_date_range(filename)
@@ -527,81 +546,6 @@ def import_history(station_key: str = STATION_KEY, limit: int = 50) -> list[dict
     return [dict(row) for row in rows]
 
 
-def delete_import(import_id: int, station_key: str = STATION_KEY) -> dict[str, Any]:
-    """Delete one GSelector import and restore the newest older snapshot per affected day.
-
-    The delete is import-scoped on purpose: when a file was imported with a
-    wrong start date, remove that import and then import the same file again
-    with the corrected date.
-    """
-    db.init_db()
-    import_id = int(import_id)
-    with db.connect() as con:
-        meta = con.execute(
-            """SELECT id,station_key,kind,source_name,date_from,date_to,day_count,row_count,source,imported_at
-               FROM local_station_imports WHERE id=? AND station_key=? LIMIT 1""",
-            (import_id, station_key),
-        ).fetchone()
-        if meta is None:
-            raise ValueError(f"Nie znaleziono importu #{import_id} dla {station_key}.")
-
-        affected_dates = [
-            str(row["service_date"])
-            for row in con.execute(
-                """SELECT DISTINCT service_date FROM local_station_events
-                   WHERE import_id=? ORDER BY service_date""",
-                (import_id,),
-            ).fetchall()
-        ]
-        kind = str(meta["kind"])
-
-        # ON DELETE CASCADE removes every event that came from this import.
-        con.execute("DELETE FROM local_station_imports WHERE id=?", (import_id,))
-
-        restored: list[str] = []
-        empty: list[str] = []
-        for service_date in affected_dates:
-            # Recalculate the current snapshot from the imports that remain.
-            # This also makes deletion of an archived import safe.
-            con.execute(
-                """UPDATE local_station_events SET active=0
-                   WHERE station_key=? AND kind=? AND service_date=?""",
-                (station_key, kind, service_date),
-            )
-            previous = con.execute(
-                """SELECT e.import_id
-                   FROM local_station_events e
-                   JOIN local_station_imports i ON i.id=e.import_id
-                   WHERE e.station_key=? AND e.kind=? AND e.service_date=?
-                   ORDER BY i.imported_at DESC, i.id DESC
-                   LIMIT 1""",
-                (station_key, kind, service_date),
-            ).fetchone()
-            if previous is None:
-                empty.append(service_date)
-                continue
-            previous_id = int(previous["import_id"])
-            con.execute(
-                """UPDATE local_station_events SET active=1
-                   WHERE import_id=? AND station_key=? AND kind=? AND service_date=?""",
-                (previous_id, station_key, kind, service_date),
-            )
-            restored.append(service_date)
-
-    return {
-        "deleted": True,
-        "import_id": import_id,
-        "kind": kind,
-        "source_name": str(meta["source_name"]),
-        "date_from": str(meta["date_from"]),
-        "date_to": str(meta["date_to"]),
-        "rows": int(meta["row_count"]),
-        "affected_dates": affected_dates,
-        "restored_dates": restored,
-        "empty_dates": empty,
-    }
-
-
 def events_for_day(
     kind: str,
     service_date: date | str,
@@ -645,6 +589,9 @@ def events_for_day(
         item["gap_raw"] = _format_gap(item["gap_seconds"])
         item["etm_delta_raw"] = str(raw_fields[2]) if item.get("event_type") == "etm" and len(raw_fields) > 2 else ""
         out.append(item)
+    # Older imports may predate complete traffic-block classification. Reapply
+    # the same-time grouping on read so users do not have to re-import files.
+    _mark_traffic_groups(out)
     if hour is not None:
         # Filter by GSelector's scheduling hour, not normalized wall-clock time.
         # Thus 08:62:47 remains in the 08 hour as an explicit +02:47 overtime.
@@ -747,67 +694,180 @@ def song_stats(
 
 
 def _identity_key(row: dict[str, Any]) -> tuple[str, ...]:
+    """Stable identity used only inside one hourly reconciliation block."""
     ext = db.normalize(str(row.get("external_id") or ""))
     typ = str(row.get("event_type") or "other")
     if ext:
         return (typ, "id", ext)
     if typ == "song":
+        song_id = row.get("song_id")
+        if song_id is not None:
+            return (typ, "song", str(int(song_id)))
         return (typ, "text", db.normalize(str(row.get("artist") or "")), db.normalize(str(row.get("title") or "")))
     return (typ, "text", db.normalize(str(row.get("category") or "")), db.normalize(str(row.get("title") or "")))
 
 
-def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dict[str, Any]:
-    scheduled = events_for_day("schedule", service_date, station_key=station_key)
-    played = events_for_day("played", service_date, station_key=station_key)
-    by_key: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
-    for row in played:
-        by_key[_identity_key(row)].append(row)
-    for bucket in by_key.values():
-        bucket.sort(key=lambda r: (r.get("sort_seconds") is None, r.get("sort_seconds") or 0, r.get("sequence_no") or 0))
+def _occurrence_tokens(rows: list[dict[str, Any]]) -> tuple[list[tuple[Any, ...]], dict[tuple[Any, ...], dict[str, Any]]]:
+    """Make duplicate-safe tokens: the second play of a song is a separate event."""
+    seen: Counter[tuple[str, ...]] = Counter()
+    tokens: list[tuple[Any, ...]] = []
+    lookup: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = _identity_key(row)
+        seen[key] += 1
+        token: tuple[Any, ...] = (*key, "occ", int(seen[key]))
+        tokens.append(token)
+        lookup[token] = row
+    return tokens, lookup
 
-    used: set[int] = set()
-    comparison: list[dict[str, Any]] = []
-    for sched in scheduled:
-        candidates = [r for r in by_key.get(_identity_key(sched), []) if int(r["id"]) not in used]
-        chosen = None
-        if candidates:
-            ssec = sched.get("sort_seconds")
-            with_time = [r for r in candidates if r.get("sort_seconds") is not None and ssec is not None]
-            chosen = min(with_time, key=lambda r: abs(float(r["sort_seconds"]) - float(ssec))) if with_time else candidates[0]
-        if chosen:
-            used.add(int(chosen["id"]))
-            delta = None
-            if sched.get("sort_seconds") is not None and chosen.get("sort_seconds") is not None:
-                delta = float(chosen["sort_seconds"]) - float(sched["sort_seconds"])
-            status = "OK" if delta is not None and abs(delta) <= 30 else "Przesunięte"
-            comparison.append({
-                "status": status,
-                "event_type": sched["event_type"],
-                "category": sched["category"],
-                "artist": sched["artist"],
-                "title": sched["title"],
-                "scheduled_time": sched["air_time_raw"],
-                "played_time": chosen["air_time_raw"],
-                "delta_seconds": round(delta, 1) if delta is not None else None,
-                "external_id": sched["external_id"] or chosen["external_id"],
-            })
-        else:
-            comparison.append({
-                "status": "Pominięte",
+
+def _format_signed_delta(seconds: float | None) -> str:
+    if seconds is None:
+        return ""
+    value = int(round(float(seconds)))
+    sign = "+" if value >= 0 else "-"
+    value = abs(value)
+    minutes, secs = divmod(value, 60)
+    return f"{sign}{minutes}:{secs:02d}"
+
+
+def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool, float | None, str]:
+    """Detect a cut/fade only when the export gives us evidence for it."""
+    text_parts = [
+        str(played.get("edit_code") or ""),
+        str(played.get("sound_code") or ""),
+        str(played.get("extra_18") or ""),
+        str(played.get("extra_19") or ""),
+        str(played.get("extra_20") or ""),
+        str(played.get("extra_21") or ""),
+    ]
+    edit_text = " ".join(text_parts).casefold()
+    textual_fade = any(term in edit_text for term in ("fade", "faded", "ścięt", "sciet"))
+
+    sr = scheduled.get("runtime_seconds")
+    pr = played.get("runtime_seconds")
+    cut = None
+    if sr is not None and pr is not None:
+        diff = float(sr) - float(pr)
+        if diff > 5.0:
+            cut = diff
+    if textual_fade:
+        return True, cut, "Faded/ścięty wg danych playout"
+    if cut is not None:
+        return True, cut, f"Ścięty o {_format_signed_delta(-cut).lstrip('-')} (runtime)"
+    return False, None, ""
+
+
+def compare_hour(
+    service_date: date | str,
+    hour: int,
+    station_key: str = STATION_KEY,
+    *,
+    include_technical: bool = False,
+) -> dict[str, Any]:
+    """Compare Scheduled vs Played inside one GSelector hour block.
+
+    Time is not a matching criterion. Matching uses identity plus occurrence
+    number, and order is evaluated only among events that exist on both sides.
+    """
+    hour = int(hour)
+    if not 0 <= hour <= 23:
+        raise ValueError("hour must be 0..23")
+
+    scheduled_all = events_for_day("schedule", service_date, hour=hour, station_key=station_key)
+    played_all = events_for_day("played", service_date, hour=hour, station_key=station_key)
+
+    def relevant(row: dict[str, Any]) -> bool:
+        return include_technical or str(row.get("event_type") or "") != "command"
+
+    scheduled = [row for row in scheduled_all if relevant(row)]
+    played = [row for row in played_all if relevant(row)]
+    sched_tokens, sched_lookup = _occurrence_tokens(scheduled)
+    play_tokens, play_lookup = _occurrence_tokens(played)
+    common = set(sched_tokens) & set(play_tokens)
+
+    # Added/missing events are removed before ranking, so they do not make all
+    # following rows look reordered. Only true swaps/moves change common ranks.
+    sched_common = [token for token in sched_tokens if token in common]
+    play_common = [token for token in play_tokens if token in common]
+    sched_rank = {token: idx for idx, token in enumerate(sched_common)}
+    play_rank = {token: idx for idx, token in enumerate(play_common)}
+    reordered = {token for token in common if sched_rank.get(token) != play_rank.get(token)}
+
+    rows: list[dict[str, Any]] = []
+    schedule_status: dict[int, str] = {}
+    played_status: dict[int, str] = {}
+
+    for token in sched_tokens:
+        sched = sched_lookup[token]
+        sid = int(sched["id"])
+        if token not in common:
+            schedule_status[sid] = "Niezagrane"
+            rows.append({
+                "status": "Niezagrane",
                 "event_type": sched["event_type"],
                 "category": sched["category"],
                 "artist": sched["artist"],
                 "title": sched["title"],
                 "scheduled_time": sched["air_time_raw"],
                 "played_time": "",
-                "delta_seconds": None,
-                "external_id": sched["external_id"],
+                "start_delta_seconds": None,
+                "start_delta": "",
+                "runtime_cut_seconds": None,
+                "runtime_cut": "",
+                "scheduled_position": int(sched.get("sequence_no") or 0) + 1,
+                "played_position": None,
+                "scheduled_id": sid,
+                "played_id": None,
+                "external_id": sched.get("external_id") or "",
+                "note": "Nie ma odpowiadającego elementu w Played tej godziny.",
             })
-
-    for row in played:
-        if int(row["id"]) in used:
             continue
-        comparison.append({
+
+        played_row = play_lookup[token]
+        pid = int(played_row["id"])
+        delta = None
+        if sched.get("sort_seconds") is not None and played_row.get("sort_seconds") is not None:
+            delta = float(played_row["sort_seconds"]) - float(sched["sort_seconds"])
+        faded, cut_seconds, fade_note = _fade_info(sched, played_row)
+        moved = token in reordered
+        if moved and faded:
+            status = "Kolejność + ścięty"
+        elif moved:
+            status = "Kolejność"
+        elif faded:
+            status = "Ścięty"
+        else:
+            status = "OK"
+        schedule_status[sid] = status
+        played_status[pid] = status
+        rows.append({
+            "status": status,
+            "event_type": sched["event_type"],
+            "category": sched["category"],
+            "artist": sched["artist"],
+            "title": sched["title"],
+            "scheduled_time": sched["air_time_raw"],
+            "played_time": played_row["air_time_raw"],
+            "start_delta_seconds": round(delta, 1) if delta is not None else None,
+            "start_delta": _format_signed_delta(delta),
+            "runtime_cut_seconds": round(cut_seconds, 1) if cut_seconds is not None else None,
+            "runtime_cut": (_format_signed_delta(-cut_seconds) if cut_seconds is not None else ""),
+            "scheduled_position": int(sched.get("sequence_no") or 0) + 1,
+            "played_position": int(played_row.get("sequence_no") or 0) + 1,
+            "scheduled_id": sid,
+            "played_id": pid,
+            "external_id": sched.get("external_id") or played_row.get("external_id") or "",
+            "note": fade_note,
+        })
+
+    for token in play_tokens:
+        if token in common:
+            continue
+        row = play_lookup[token]
+        pid = int(row["id"])
+        played_status[pid] = "Dodane"
+        rows.append({
             "status": "Dodane",
             "event_type": row["event_type"],
             "category": row["category"],
@@ -815,24 +875,130 @@ def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dic
             "title": row["title"],
             "scheduled_time": "",
             "played_time": row["air_time_raw"],
-            "delta_seconds": None,
-            "external_id": row["external_id"],
+            "start_delta_seconds": None,
+            "start_delta": "",
+            "runtime_cut_seconds": None,
+            "runtime_cut": "",
+            "scheduled_position": None,
+            "played_position": int(row.get("sequence_no") or 0) + 1,
+            "scheduled_id": None,
+            "played_id": pid,
+            "external_id": row.get("external_id") or "",
+            "note": "Element pojawił się w Played, ale nie było go w Scheduled tej godziny.",
         })
 
-    status_counts = Counter(row["status"] for row in comparison)
-    deltas = [abs(float(row["delta_seconds"])) for row in comparison if row.get("delta_seconds") is not None]
+    counts = Counter(row["status"] for row in rows)
+    matched = sum(1 for row in rows if row["status"] not in {"Niezagrane", "Dodane"})
+    reordered_count = sum(1 for row in rows if "Kolejność" in row["status"])
+    faded_count = sum(1 for row in rows if "ścięty" in row["status"].casefold())
+    differences = [row for row in rows if row["status"] != "OK"]
+
     return {
         "service_date": service_date.isoformat() if isinstance(service_date, date) else str(service_date),
+        "hour": hour,
         "scheduled": len(scheduled),
         "played": len(played),
-        "matched": status_counts.get("OK", 0) + status_counts.get("Przesunięte", 0),
-        "missed": status_counts.get("Pominięte", 0),
-        "added": status_counts.get("Dodane", 0),
-        "on_time": status_counts.get("OK", 0),
-        "avg_abs_delta_seconds": round(sum(deltas) / len(deltas), 1) if deltas else None,
-        "rows": comparison,
+        "matched": matched,
+        "missed": counts.get("Niezagrane", 0),
+        "added": counts.get("Dodane", 0),
+        "reordered": reordered_count,
+        "faded": faded_count,
+        "ok": counts.get("OK", 0),
+        "differences": len(differences),
+        "rows": rows,
+        "difference_rows": differences,
+        "scheduled_rows": scheduled,
+        "played_rows": played,
+        "schedule_status": schedule_status,
+        "played_status": played_status,
     }
 
+
+def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dict[str, Any]:
+    """Daily summary built strictly from 24 independent hourly comparisons."""
+    hourly = [compare_hour(service_date, hour, station_key=station_key) for hour in range(24)]
+    rows = [row for item in hourly for row in item["rows"]]
+    return {
+        "service_date": service_date.isoformat() if isinstance(service_date, date) else str(service_date),
+        "scheduled": sum(int(item["scheduled"]) for item in hourly),
+        "played": sum(int(item["played"]) for item in hourly),
+        "matched": sum(int(item["matched"]) for item in hourly),
+        "missed": sum(int(item["missed"]) for item in hourly),
+        "added": sum(int(item["added"]) for item in hourly),
+        "reordered": sum(int(item["reordered"]) for item in hourly),
+        "faded": sum(int(item["faded"]) for item in hourly),
+        "on_time": sum(int(item["ok"]) for item in hourly),
+        "avg_abs_delta_seconds": None,
+        "rows": rows,
+        "hours": [
+            {
+                "hour": int(item["hour"]),
+                "scheduled": int(item["scheduled"]),
+                "played": int(item["played"]),
+                "differences": int(item["differences"]),
+                "missed": int(item["missed"]),
+                "added": int(item["added"]),
+                "reordered": int(item["reordered"]),
+                "faded": int(item["faded"]),
+            }
+            for item in hourly
+        ],
+    }
+
+
+def delete_import(import_id: int, station_key: str = STATION_KEY) -> dict[str, Any]:
+    """Delete one import and reactivate the previous snapshot for its days."""
+    db.init_db()
+    iid = int(import_id)
+    with db.connect() as con:
+        info = con.execute(
+            """SELECT id,station_key,kind,source_name,date_from,date_to,row_count
+               FROM local_station_imports WHERE id=? AND station_key=?""",
+            (iid, station_key),
+        ).fetchone()
+        if not info:
+            raise ValueError(f"Nie znaleziono importu #{iid} dla {station_key}.")
+        affected_rows = con.execute(
+            "SELECT DISTINCT service_date FROM local_station_events WHERE import_id=? ORDER BY service_date",
+            (iid,),
+        ).fetchall()
+        affected_dates = [str(row["service_date"]) for row in affected_rows]
+        kind = str(info["kind"])
+        con.execute("DELETE FROM local_station_imports WHERE id=?", (iid,))
+
+        restored = 0
+        for service_date in affected_dates:
+            con.execute(
+                """UPDATE local_station_events SET active=0
+                   WHERE station_key=? AND kind=? AND service_date=?""",
+                (station_key, kind, service_date),
+            )
+            previous = con.execute(
+                """SELECT e.import_id
+                   FROM local_station_events e
+                   JOIN local_station_imports i ON i.id=e.import_id
+                   WHERE e.station_key=? AND e.kind=? AND e.service_date=?
+                   ORDER BY i.imported_at DESC, i.id DESC LIMIT 1""",
+                (station_key, kind, service_date),
+            ).fetchone()
+            if previous:
+                con.execute(
+                    """UPDATE local_station_events SET active=1
+                       WHERE import_id=? AND service_date=?""",
+                    (int(previous["import_id"]), service_date),
+                )
+                restored += 1
+
+    return {
+        "deleted_import_id": iid,
+        "kind": kind,
+        "source_name": str(info["source_name"]),
+        "date_from": str(info["date_from"]),
+        "date_to": str(info["date_to"]),
+        "rows": int(info["row_count"]),
+        "affected_days": len(affected_dates),
+        "restored_days": restored,
+    }
 
 
 def ensure_song_links_current(station_key: str = STATION_KEY) -> dict[str, int]:

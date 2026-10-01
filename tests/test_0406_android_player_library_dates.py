@@ -13,7 +13,7 @@ def test_android_014_player_is_not_owned_by_lazy_row_and_library_has_inline_cont
     assert "PreviewButton(s, previewVm)" in main
     assert "InlineStatusMenu(" in main
     assert 'versionCode = 27' in gradle
-    assert 'versionName = "1.2.2"' in gradle
+    assert 'versionName = "1.2.3"' in gradle
 
 
 def test_android_014_airplay_defaults_to_period_spins_and_has_exact_dates():
@@ -30,4 +30,4 @@ def test_android_014_airplay_defaults_to_period_spins_and_has_exact_dates():
 
 def test_version_0406():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.2"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == "1.2.3"

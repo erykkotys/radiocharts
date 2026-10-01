@@ -32,13 +32,14 @@ from radiocharts.local_station import (
     GSELECTOR_SONG_COLUMNS as LOCAL_GSELECTOR_SONG_COLUMNS,
     available_dates as local_available_dates,
     compare_day as local_compare_day,
+    compare_hour as local_compare_hour,
     day_summary as local_day_summary,
-    delete_import as local_delete_import,
     ensure_seed_data as ensure_local_station_seed_data,
     ensure_song_links_current as ensure_local_station_song_links,
     events_for_day as local_events_for_day,
     import_gselector_export as import_local_gselector_export,
     import_history as local_import_history,
+    delete_import as delete_local_import,
     preview_import as preview_local_import,
     song_stats as local_song_stats,
     song_activity as local_song_activity,
@@ -2198,7 +2199,7 @@ LOCAL_TIMELINE_DEFAULT_COLUMNS = [
 ]
 LOCAL_TIMELINE_EXTRA_COLUMNS = [
     "Mood", "Opener", "Timing", "Content", "Energy", "Texture Close", "Texture Open",
-    "Edit Code", "Exact Time", "Failure Code", "Vocal", "ETM Δ", "ID",
+    "Edit Code", "Exact Time", "Sound Code", "Vocal", "ETM Δ", "ID",
     "Pole 18", "Pole 19", "Pole 20", "Pole 21", "⚠",
 ]
 
@@ -2206,14 +2207,10 @@ LOCAL_TIMELINE_ROW_STYLE = JsCode("""
 function(params) {
   if (!params || !params.data) return {};
   const t = String(params.data._event_type || '');
-  if (t === 'show')    return {backgroundColor:'rgba(59,130,246,0.16)'};
-  if (t === 'jingle')  return {backgroundColor:'rgba(168,85,247,0.13)'};
-  if (t === 'traffic') return {backgroundColor:'rgba(245,158,11,0.18)'};
-  if (t === 'info')    return {backgroundColor:'rgba(14,165,233,0.10)'};
-  if (t === 'bed')     return {backgroundColor:'rgba(34,197,94,0.08)'};
-  if (t === 'etm')     return {backgroundColor:'rgba(148,163,184,0.07)', color:'#b9c0cb'};
-  if (t === 'command') return {backgroundColor:'rgba(239,68,68,0.10)'};
-  return {}; // Song intentionally keeps the normal table background.
+  const base = {backgroundColor:'#0d1117'};
+  if (t === 'song')    return {...base, color:'#f4f4f5'};
+  if (t === 'traffic') return {...base, color:'#ff5d5d'};
+  return {...base, color:'#f4cf57'};
 }
 """)
 
@@ -2237,7 +2234,7 @@ def _render_local_timeline_grid(frame: pd.DataFrame, columns: list[str], *, key:
             gb.configure_column(col, width=82, minWidth=74, headerTooltip="Nadczas wynikający z GSelector 60+ minutes/hour, np. 08:62:47 = +02:47.")
         elif col == "Typ":
             gb.configure_column(col, width=105, minWidth=92, pinned="left")
-        elif col in {"Runtime", "Mood", "Opener", "Energy", "Texture Close", "Texture Open", "Edit Code", "Failure Code", "Vocal", "ETM Δ", "⚠"}:
+        elif col in {"Runtime", "Mood", "Opener", "Energy", "Texture Close", "Texture Open", "Edit Code", "Sound Code", "Vocal", "ETM Δ", "⚠"}:
             gb.configure_column(col, width=105, minWidth=88)
         elif col in {"Kategoria", "Wykonawca", "ID"}:
             gb.configure_column(col, minWidth=165, width=195)
@@ -2334,9 +2331,63 @@ def _render_local_timeline(kind: str, key_prefix: str) -> None:
         key=f"{key_prefix}_grid_{selected_date}_{selected_hour}",
     )
     st.caption(
-        "Kolory są celowo subtelne: Song bez tła, Audycja niebieska, Jingle fioletowy, Reklama bursztynowa; "
-        "informacje/podkłady/ETM mają tylko lekkie wyróżnienie. Gap pokazuje prawidłowy nadczas z trybu 60+ minutes/hour. "
-        "⚠ pozostaje wyłącznie dla naprawdę uszkodzonego zapisu czasu (np. 1439 minut)."
+        "Kolory jak w logu playout: Song = biały, reklamy/spoty = czerwone, pozostałe elementy = żółte na czarnym tle. "
+        "Gap pokazuje nadczas z trybu 60+ minutes/hour. ⚠ zostaje tylko dla naprawdę uszkodzonego zapisu czasu."
+    )
+
+def _local_log_row_html(row: dict, status: str = "OK") -> str:
+    event_type = str(row.get("event_type") or "other")
+    missed = status == "Niezagrane"
+    if missed:
+        color = "#737a84"
+    elif event_type == "song":
+        color = "#f4f4f5"
+    elif event_type == "traffic":
+        color = "#ff5d5d"
+    else:
+        color = "#f4cf57"
+
+    category = str(row.get("category") or "")
+    short_cat = category.split("/", 1)[0] if category else LOCAL_EVENT_LABELS.get(event_type, event_type)
+    artist = str(row.get("artist") or "").strip()
+    title = str(row.get("title") or "").strip()
+    content = f"{artist} — {title}" if event_type == "song" and artist else (title or category)
+    raw_time = str(row.get("air_time_raw") or "")
+    gap = str(row.get("gap_raw") or "")
+    time_label = raw_time + (f"  ({gap} gap)" if gap else "")
+    runtime = str(row.get("runtime_raw") or "")
+    type_label = LOCAL_EVENT_LABELS.get(event_type, event_type)
+
+    badge = ""
+    if status == "Niezagrane":
+        badge = '<span class="rc-log-badge rc-log-badge-muted">NIE ZAGRANO</span>'
+    elif status == "Dodane":
+        badge = '<span class="rc-log-badge">DODANE</span>'
+    elif "Kolejność" in status:
+        badge = '<span class="rc-log-badge">↕ KOLEJNOŚĆ</span>'
+    if "ścięty" in status.casefold():
+        badge += '<span class="rc-log-badge rc-log-badge-fade">FADE</span>'
+
+    return (
+        f'<div class="rc-log-row" style="color:{color}">'
+        f'<div class="rc-log-time">{html.escape(time_label)}</div>'
+        f'<div class="rc-log-cat">{html.escape(short_cat)}</div>'
+        f'<div class="rc-log-main"><div class="rc-log-title">{html.escape(content)}</div>'
+        f'<div class="rc-log-meta">{html.escape(type_label)} · {html.escape(category)}</div></div>'
+        f'<div class="rc-log-runtime">{html.escape(runtime)}</div>'
+        f'<div class="rc-log-flags">{badge}</div></div>'
+    )
+
+
+def _render_local_log_panel(title: str, rows: list[dict], statuses: dict[int, str]) -> None:
+    body = "".join(
+        _local_log_row_html(row, statuses.get(int(row.get("id") or 0), "OK"))
+        for row in rows
+    ) or '<div class="rc-log-empty">Brak elementów w tej godzinie.</div>'
+    st.markdown(
+        f'<div class="rc-log-panel"><div class="rc-log-panel-title">{html.escape(title)}</div>'
+        f'<div class="rc-log-scroll">{body}</div></div>',
+        unsafe_allow_html=True,
     )
 
 def _render_local_comparison() -> None:
@@ -2346,9 +2397,35 @@ def _render_local_comparison() -> None:
     if not overlap:
         st.info(
             "Nie ma jeszcze dnia, dla którego są jednocześnie Scheduled i Played. "
-            "Po pierwszym eksporcie Played dla 30.09 lub później porównanie pojawi się automatycznie."
+            "Po pierwszym eksporcie Played dla dnia z planem porównanie pojawi się automatycznie."
         )
         return
+
+    st.markdown(
+        """
+        <style>
+          .rc-log-panel { background:#090d12; border:1px solid #313844; border-radius:7px; overflow:hidden; }
+          .rc-log-panel-title { padding:.48rem .62rem; background:#11161d; border-bottom:1px solid #313844; font-weight:700; color:#e7e9ed; }
+          .rc-log-scroll { max-height:690px; overflow-y:auto; }
+          .rc-log-row { display:grid; grid-template-columns:118px 52px minmax(0,1fr) 62px; gap:.42rem; align-items:start; padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.80rem; }
+          .rc-log-row:hover { background:#0f151d; }
+          .rc-log-time { font-variant-numeric:tabular-nums; white-space:nowrap; font-weight:650; }
+          .rc-log-cat { font-weight:760; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+          .rc-log-main { min-width:0; }
+          .rc-log-title { font-weight:650; white-space:normal; overflow-wrap:anywhere; }
+          .rc-log-meta { margin-top:.08rem; font-size:.67rem; opacity:.66; white-space:normal; overflow-wrap:anywhere; }
+          .rc-log-runtime { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; opacity:.88; }
+          .rc-log-flags { grid-column:3 / 5; margin-top:-.10rem; }
+          .rc-log-badge { display:inline-block; margin:.10rem .25rem 0 0; padding:.02rem .24rem; border:1px solid #8a792e; border-radius:4px; color:#f4cf57; font-size:.60rem; font-weight:750; }
+          .rc-log-badge-muted { border-color:#555d68; color:#858c96; }
+          .rc-log-badge-fade { border-color:#a84848; color:#ff6b6b; }
+          .rc-log-empty { padding:1rem; color:#858c96; }
+          @media (max-width:900px) { .rc-log-row { grid-template-columns:92px 46px minmax(0,1fr) 52px; font-size:.74rem; } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     selected_date = st.selectbox(
         "Dzień do porównania",
         overlap,
@@ -2356,51 +2433,105 @@ def _render_local_comparison() -> None:
         format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
         key="our_radio_compare_date",
     )
-    comparison = local_compare_day(selected_date)
+    day_cmp = local_compare_day(selected_date)
+    hour_meta = {int(item["hour"]): item for item in day_cmp.get("hours", [])}
+
+    def _hour_label(hour: int) -> str:
+        item = hour_meta.get(int(hour), {})
+        diffs = int(item.get("differences") or 0)
+        suffix = "OK" if diffs == 0 else f"{diffs} różn."
+        return f"{int(hour):02d}:00–{int(hour):02d}:59+  ·  {suffix}"
+
+    default_hour = 0
+    problem_hours = [h for h in range(24) if int(hour_meta.get(h, {}).get("differences") or 0) > 0]
+    if selected_date == date.today().isoformat():
+        default_hour = datetime.now().hour
+    elif problem_hours:
+        default_hour = problem_hours[0]
+
+    selected_hour = st.selectbox(
+        "Blok godzinny",
+        list(range(24)),
+        index=default_hour,
+        format_func=_hour_label,
+        key="our_radio_compare_hour",
+    )
+    comparison = local_compare_hour(selected_date, int(selected_hour))
+
     render_compact_metrics([
         ("Scheduled", comparison["scheduled"]),
         ("Played", comparison["played"]),
-        ("Dopasowane", comparison["matched"]),
-        ("Pominięte / dodane", f"{comparison['missed']} / {comparison['added']}"),
+        ("Różnice", comparison["differences"]),
+        ("Niezagrane / dodane", f"{comparison['missed']} / {comparison['added']}"),
     ])
-    rows = pd.DataFrame(comparison["rows"])
-    if rows.empty:
-        st.info("Brak elementów do porównania.")
-        return
-    status_filter = st.multiselect(
-        "Status",
-        ["OK", "Przesunięte", "Pominięte", "Dodane"],
-        default=["OK", "Przesunięte", "Pominięte", "Dodane"],
-        key="our_radio_compare_status",
+    st.caption(
+        "Dopasowanie działa wyłącznie wewnątrz wybranego bloku godzinnego. Sekundy nie decydują o zgodności — "
+        "jeżeli elementy są te same i w tej samej kolejności, wynik to OK. Techniczne wpisy „Zetta Play Asset” są ukryte."
     )
-    type_filter = st.multiselect(
-        "Typ",
-        list(LOCAL_EVENT_LABELS),
-        default=list(LOCAL_EVENT_LABELS),
-        format_func=lambda value: LOCAL_EVENT_LABELS.get(value, value),
-        key="our_radio_compare_type",
-    )
-    rows = rows[rows["status"].isin(status_filter) & rows["event_type"].isin(type_filter)].copy()
-    rows["Typ"] = rows["event_type"].map(LOCAL_EVENT_LABELS)
-    rows = rows.rename(columns={
-        "status": "Status",
-        "category": "Kategoria",
-        "artist": "Wykonawca",
-        "title": "Element / tytuł",
-        "scheduled_time": "Scheduled",
-        "played_time": "Played",
-        "delta_seconds": "Δ s",
-        "external_id": "ID",
-    })
-    st.dataframe(
-        rows[["Status", "Scheduled", "Played", "Δ s", "Typ", "Kategoria", "Wykonawca", "Element / tytuł"]],
-        hide_index=True,
-        use_container_width=True,
-        height=690,
-    )
-    if comparison.get("avg_abs_delta_seconds") is not None:
-        st.caption(f"Średnie bezwzględne przesunięcie dopasowanych elementów: {comparison['avg_abs_delta_seconds']:.1f} s.")
 
+    left, right = st.columns(2, gap="medium")
+    with left:
+        _render_local_log_panel(
+            f"Scheduled · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
+            comparison["scheduled_rows"],
+            comparison["schedule_status"],
+        )
+    with right:
+        _render_local_log_panel(
+            f"Played · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
+            comparison["played_rows"],
+            comparison["played_status"],
+        )
+
+    st.markdown("#### Różnice w tej godzinie")
+    diffs = pd.DataFrame(comparison["difference_rows"])
+    if diffs.empty:
+        st.success("Kolejność i zawartość bloku są zgodne. Różnice czasu startu są ignorowane.")
+    else:
+        diffs["Typ"] = diffs["event_type"].map(LOCAL_EVENT_LABELS).fillna(diffs["event_type"])
+        diffs["Pozycja"] = diffs.apply(
+            lambda r: (
+                f"{int(r['scheduled_position'])} → {int(r['played_position'])}"
+                if pd.notna(r.get("scheduled_position")) and pd.notna(r.get("played_position"))
+                else (f"plan {int(r['scheduled_position'])}" if pd.notna(r.get("scheduled_position")) else f"played {int(r['played_position'])}")
+            ),
+            axis=1,
+        )
+        diffs = diffs.rename(columns={
+            "status": "Status",
+            "scheduled_time": "Plan",
+            "played_time": "Played",
+            "start_delta": "Δ startu",
+            "runtime_cut": "Ścięcie",
+            "artist": "Wykonawca",
+            "title": "Element / tytuł",
+            "note": "Uwagi",
+        })
+        st.dataframe(
+            diffs[["Status", "Pozycja", "Plan", "Played", "Δ startu", "Ścięcie", "Typ", "Wykonawca", "Element / tytuł", "Uwagi"]],
+            hide_index=True,
+            use_container_width=True,
+            height=min(620, 42 + 35 * len(diffs)),
+        )
+        st.caption(
+            "Δ startu ma format +M:SS / -M:SS i jest informacją pomocniczą — sama różnica czasu nie tworzy błędu. "
+            "„Ścięty” pojawia się tylko, gdy eksport zawiera sygnał fade albo runtime Played jest >5 s krótszy od Scheduled."
+        )
+
+    with st.expander("Podsumowanie wszystkich 24 godzin", expanded=False):
+        hours = pd.DataFrame(day_cmp.get("hours") or [])
+        if not hours.empty:
+            hours["Godzina"] = hours["hour"].map(lambda h: f"{int(h):02d}:00")
+            hours = hours.rename(columns={
+                "scheduled": "Scheduled", "played": "Played", "differences": "Różnice",
+                "missed": "Niezagrane", "added": "Dodane", "reordered": "Kolejność", "faded": "Ścięte",
+            })
+            st.dataframe(
+                hours[["Godzina", "Scheduled", "Played", "Różnice", "Niezagrane", "Dodane", "Kolejność", "Ścięte"]],
+                hide_index=True,
+                use_container_width=True,
+                height=430,
+            )
 
 def _render_local_song_stats() -> None:
     schedule_dates = local_available_dates("schedule")
@@ -2573,66 +2704,53 @@ def _render_local_import() -> None:
             f"{result['date_from']} → {result['date_to']}."
         )
 
-    delete_result = st.session_state.pop("our_radio_delete_result", None)
-    if delete_result:
-        restored = len(delete_result.get("restored_dates") or [])
-        empty = len(delete_result.get("empty_dates") or [])
-        extra = []
-        if restored:
-            extra.append(f"przywrócono starszy snapshot dla {restored} dni")
-        if empty:
-            extra.append(f"{empty} dni nie ma już danych tego typu")
-        suffix = f" · {'; '.join(extra)}" if extra else ""
+    deleted = st.session_state.pop("our_radio_deleted_import", None)
+    if deleted:
         st.success(
-            f"Usunięto import #{delete_result['import_id']}: {delete_result['source_name']} · "
-            f"{delete_result['date_from']} → {delete_result['date_to']}{suffix}."
+            f"Usunięto import #{deleted['deleted_import_id']}: {deleted['source_name']} · "
+            f"{deleted['date_from']} → {deleted['date_to']}. "
+            f"Przywrócono wcześniejszy snapshot dla {deleted['restored_days']} dni."
         )
 
-    history_rows = local_import_history()
-    history = pd.DataFrame(history_rows)
+    history_raw = local_import_history()
+    history = pd.DataFrame(history_raw)
     if not history.empty:
-        history = history.rename(columns={
+        history_view = history.rename(columns={
             "kind": "Typ", "source_name": "Plik", "date_from": "Od", "date_to": "Do",
             "day_count": "Dni", "row_count": "Wiersze", "source": "Źródło", "imported_at": "Import",
         })
         st.markdown("#### Historia importów")
-        st.dataframe(history[["Typ", "Plik", "Od", "Do", "Dni", "Wiersze", "Źródło", "Import"]], hide_index=True, use_container_width=True)
+        st.dataframe(history_view[["Typ", "Plik", "Od", "Do", "Dni", "Wiersze", "Źródło", "Import"]], hide_index=True, use_container_width=True)
 
         with st.expander("🗑️ Usuń błędny import", expanded=False):
-            st.caption(
-                "Usuwa cały wskazany import z bazy. Jeśli dla któregoś dnia istnieje starszy snapshot tego samego typu, "
-                "zostanie automatycznie przywrócony jako bieżący. Potem możesz zaimportować ten sam plik ponownie z poprawną datą."
-            )
-            by_id = {int(row["id"]): row for row in history_rows}
-            import_ids = list(by_id)
-            def _import_label(import_id: int) -> str:
-                row = by_id[import_id]
-                kind_label = "Scheduled" if row["kind"] == "schedule" else "Played"
-                return (
-                    f"#{import_id} · {kind_label} · {row['source_name']} · "
-                    f"{row['date_from']} → {row['date_to']} · {row['row_count']} wierszy"
+            choices = {
+                int(row["id"]): (
+                    f"#{int(row['id'])} · {'Scheduled' if row['kind'] == 'schedule' else 'Played'} · "
+                    f"{row['source_name']} · {row['date_from']} → {row['date_to']} · {int(row['row_count'])} wierszy"
                 )
+                for row in history_raw
+            }
             selected_import_id = st.selectbox(
                 "Import do usunięcia",
-                import_ids,
-                format_func=_import_label,
+                list(choices),
+                format_func=lambda value: choices[int(value)],
                 key="our_radio_delete_import_id",
             )
-            selected = by_id[int(selected_import_id)]
-            st.warning(
-                f"Wybrano: {selected['source_name']} · "
-                f"{selected['date_from']} → {selected['date_to']} · {selected['row_count']} wierszy."
-            )
             confirm_delete = st.checkbox(
-                "Potwierdzam usunięcie tego importu",
-                key=f"our_radio_delete_confirm_{selected_import_id}",
+                "Potwierdzam usunięcie tego importu i jego elementów",
+                key="our_radio_delete_import_confirm",
+            )
+            st.caption(
+                "Jeżeli usuwany import był bieżącym snapshotem dnia, RadioCharts automatycznie przywróci poprzedni import tego samego typu i dnia."
             )
             if st.button(
                 "Usuń import",
                 disabled=not confirm_delete,
-                key=f"our_radio_delete_btn_{selected_import_id}",
+                type="secondary",
+                key="our_radio_delete_import_btn",
             ):
-                st.session_state["our_radio_delete_result"] = local_delete_import(int(selected_import_id))
+                result = delete_local_import(int(selected_import_id))
+                st.session_state["our_radio_deleted_import"] = result
                 st.rerun()
 
 
@@ -4152,7 +4270,7 @@ Twoje pola **Status, Downloaded i Notatka** są warstwą redakcyjną i nie zmien
             """
 Zakładka **EMAUS** jest oddzielona od monitoringu rynku. **Scheduled** to snapshot planu wyeksportowany z GSelectora przed emisją, a **Played** to plik po reconciliation / zakończeniu dnia.
 
-Importer przyjmuje obecny TSV/TXT, zachowuje wszystkie typy elementów (Song, jingle, audycje, podkłady, informacje, ETM-y, reklamy i pozostałe wpisy) oraz surowe pola wiersza. Wielodniowy eksport jest rozbijany na dni po znacznikach BOM. Ponowny import tego samego dnia tworzy nowy bieżący snapshot, ale starszy zostaje w bazie jako historia rewizji planu. W Scheduled/Played przycisk **Kolumny** pozwala dołożyć m.in. Mood, Opener, Timing, Content, Energy, Texture, Edit Code, Exact Time, Failure Code, Vocal i techniczne ID.
+Importer przyjmuje obecny TSV/TXT, zachowuje wszystkie typy elementów (Song, jingle, audycje, podkłady, informacje, ETM-y, reklamy i pozostałe wpisy) oraz surowe pola wiersza. Wielodniowy eksport jest rozbijany na dni po znacznikach BOM. Ponowny import tego samego dnia tworzy nowy bieżący snapshot, ale starszy zostaje w bazie jako historia rewizji planu. W Scheduled/Played przycisk **Kolumny** pozwala dołożyć m.in. Mood, Opener, Timing, Content, Energy, Texture, Edit Code, Exact Time, Sound Code, Vocal i techniczne ID.
 
 Tryb GSelectora **60+ minutes/hour** jest traktowany jako informacja o bilansie godziny, nie błąd. Przykładowo `08:62:47.3` zostaje przypisane do godziny 08 i pokazuje `Gap +02:47.3`; ostrzeżenie ⚠ jest zarezerwowane dla naprawdę uszkodzonych zapisów czasu.
 
