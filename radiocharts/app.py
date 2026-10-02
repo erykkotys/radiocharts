@@ -22,7 +22,7 @@ from radiocharts.db import (
     airplay_coverage, airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
     airplay_spin_counts, airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
-    source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision,
+    source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision, catalog_revision,
     parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
     merge_song_group,
 )
@@ -156,9 +156,31 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+VALID_VIEW_KEYS = {"dashboard", "song", "archive", "airplay", "library", "our_radio", "data", "methodology"}
+BOOT_VIEW_KEY = str(st.query_params.get("view", "dashboard"))
+if BOOT_VIEW_KEY not in VALID_VIEW_KEYS:
+    BOOT_VIEW_KEY = "dashboard"
+
+
+@st.cache_resource(show_spinner=False)
+def _bootstrap_local_station_seed_once() -> dict:
+    # The bundled GSelector seed is only needed by EMAUS/song views. Keeping it
+    # out of the global startup path avoids a file lock + SQLite round-trip on
+    # every first render of Dashboard/Emisje/Baza after a process restart.
+    return ensure_local_station_seed_data()
+
+
+@st.cache_resource(show_spinner=False, max_entries=16)
+def _cached_local_station_song_links(catalog_rev: str) -> dict:
+    # Unmatched EMAUS rows need a relink only when the shared song catalogue
+    # changes. Import itself already links against the current catalogue.
+    return ensure_local_station_song_links()
+
+
 init_db()
-ensure_local_station_seed_data()
-ensure_local_station_song_links()
+if BOOT_VIEW_KEY in {"our_radio", "song"}:
+    _bootstrap_local_station_seed_once()
+    _cached_local_station_song_links(catalog_revision())
 
 
 def copyable_json(data: dict, key: str) -> None:
@@ -586,17 +608,17 @@ def cached_airplay_song_presence(revision: str, song_id: int, days: int = 7) -> 
     return airplay_song_presence(int(song_id), days=days)
 
 
-def radio_presence_frame(days: int = 7) -> tuple[pd.DataFrame, dict]:
-    snapshot = cached_airplay_presence(airplay_revision(), days)
+def radio_presence_frame(days: int = 7, air_rev: str = "") -> tuple[pd.DataFrame, dict]:
+    snapshot = cached_airplay_presence(air_rev or airplay_revision(), days)
     rows = pd.DataFrame(snapshot.get("rows") or [])
     return rows, snapshot
 
 
-def with_radio_presence(frame: pd.DataFrame, days: int = 7) -> pd.DataFrame:
+def with_radio_presence(frame: pd.DataFrame, days: int = 7, air_rev: str = "") -> pd.DataFrame:
     out = frame.copy()
     if out.empty or "song_id" not in out.columns:
         return out
-    presence, meta = radio_presence_frame(days)
+    presence, meta = radio_presence_frame(days, air_rev)
     reporting = int(meta.get("reporting_stations") or 0)
     cols = [
         "song_id", "radio_presence", "radio_reach", "radio_rotation", "stations_count", "spins", "airplay_spins_per_day",
@@ -2533,15 +2555,14 @@ def _local_log_row_html(row: dict, status: str = "OK") -> str:
     )
 
 
-def _render_local_log_panel(title: str, rows: list[dict], statuses: dict[int, str]) -> None:
+def _local_log_panel_html(title: str, rows: list[dict], statuses: dict[int, str]) -> str:
     body = "".join(
         _local_log_row_html(row, statuses.get(int(row.get("id") or 0), "OK"))
         for row in rows
     ) or '<div class="rc-log-empty">Brak elementów w tej godzinie.</div>'
-    st.markdown(
+    return (
         f'<div class="rc-log-panel"><div class="rc-log-panel-title">{html.escape(title)}</div>'
-        f'<div class="rc-log-scroll">{body}</div></div>',
-        unsafe_allow_html=True,
+        f'<div class="rc-log-body">{body}</div></div>'
     )
 
 def _render_local_comparison() -> None:
@@ -2558,9 +2579,13 @@ def _render_local_comparison() -> None:
     st.markdown(
         """
         <style>
-          .rc-log-panel { background:#090d12; border:1px solid #313844; border-radius:7px; overflow:hidden; }
+          .rc-log-panel { background:#090d12; border:1px solid #313844; border-radius:7px; overflow:visible; }
           .rc-log-panel-title { padding:.48rem .62rem; background:#11161d; border-bottom:1px solid #313844; font-weight:700; color:#e7e9ed; }
-          .rc-log-scroll { max-height:690px; overflow-y:auto; }
+          .rc-compare-scroll { max-height:690px; overflow:auto; border-radius:7px; }
+          .rc-compare-grid { display:grid; grid-template-columns:minmax(520px,1fr) minmax(520px,1fr); gap:1rem; min-width:1080px; align-items:start; }
+          .rc-log-panel { min-width:0; }
+          .rc-log-panel-title { position:sticky; top:0; z-index:3; }
+          .rc-log-body { min-width:0; }
           .rc-log-row { display:grid; grid-template-columns:118px 52px minmax(0,1fr) 62px; gap:.42rem; align-items:start; padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.80rem; }
           .rc-log-row:hover { background:#0f151d; }
           .rc-log-time { font-variant-numeric:tabular-nums; white-space:nowrap; font-weight:650; }
@@ -2574,7 +2599,10 @@ def _render_local_comparison() -> None:
           .rc-log-badge-muted { border-color:#555d68; color:#858c96; }
           .rc-log-badge-fade { border-color:#a84848; color:#ff6b6b; }
           .rc-log-empty { padding:1rem; color:#858c96; }
-          @media (max-width:900px) { .rc-log-row { grid-template-columns:92px 46px minmax(0,1fr) 52px; font-size:.74rem; } }
+          @media (max-width:900px) {
+            .rc-compare-grid { min-width:980px; grid-template-columns:minmax(470px,1fr) minmax(470px,1fr); }
+            .rc-log-row { grid-template-columns:92px 46px minmax(0,1fr) 52px; font-size:.74rem; }
+          }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2623,19 +2651,21 @@ def _render_local_comparison() -> None:
         "jeżeli elementy są te same i w tej samej kolejności, wynik to OK. Techniczne wpisy „Zetta Play Asset” są ukryte."
     )
 
-    left, right = st.columns(2, gap="medium")
-    with left:
-        _render_local_log_panel(
-            f"Scheduled · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
-            comparison["scheduled_rows"],
-            comparison["schedule_status"],
-        )
-    with right:
-        _render_local_log_panel(
-            f"Played · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
-            comparison["played_rows"],
-            comparison["played_status"],
-        )
+    scheduled_panel = _local_log_panel_html(
+        f"Scheduled · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
+        comparison["scheduled_rows"],
+        comparison["schedule_status"],
+    )
+    played_panel = _local_log_panel_html(
+        f"Played · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
+        comparison["played_rows"],
+        comparison["played_status"],
+    )
+    st.markdown(
+        f'<div class="rc-compare-scroll"><div class="rc-compare-grid">{scheduled_panel}{played_panel}</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Scheduled i Played mają wspólny pionowy scroll — rolka myszy przewija oba logi jednocześnie.")
 
     st.markdown("#### Różnice w tej godzinie")
     diffs = pd.DataFrame(comparison["difference_rows"])
@@ -2908,9 +2938,7 @@ def _render_local_import() -> None:
                 st.rerun()
 
 
-view_key = str(st.query_params.get("view", "dashboard"))
-if view_key not in {"dashboard", "song", "archive", "airplay", "library", "our_radio", "data", "methodology"}:
-    view_key = "dashboard"
+view_key = BOOT_VIEW_KEY
 render_nav_tabs(view_key)
 install_client_helpers()
 
@@ -2926,7 +2954,7 @@ REVISION = CHART_REV
 if view_key in {"dashboard", "archive"}:
     df = with_notes(cached_scores(REVISION))
     if view_key == "dashboard":
-        df = with_popularity(with_radio_presence(df, days=7), AIR_REV)
+        df = with_popularity(with_radio_presence(df, days=7, air_rev=AIR_REV), AIR_REV)
 else:
     df = pd.DataFrame()
 
@@ -2968,7 +2996,10 @@ if view_key == "dashboard":
             help="Chart Score i Momentum są liczone ponownie tylko z obserwacji z wybranego okresu. Widok Całość najlepiej oddaje historię list; krótsze okresy służą do analizy świeżego zachowania.",
         )
         lookback = int(period_map[period_label])
-        period_df = df if lookback == 0 else with_popularity(with_radio_presence(with_notes(cached_scores(REVISION, lookback_days=lookback)), days=7), AIR_REV)
+        period_df = df if lookback == 0 else with_popularity(
+            with_radio_presence(with_notes(cached_scores(REVISION, lookback_days=lookback)), days=7, air_rev=AIR_REV),
+            AIR_REV,
+        )
 
         # Dashboard: exact spin count for the selected indicator period.  Use a
         # lightweight SQL GROUP BY rather than the richer Emisje summary so this

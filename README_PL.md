@@ -1,3 +1,11 @@
+## 1.2.5 — EMAUS: wspólny scroll porównania i szybszy start
+
+- Porównanie Scheduled/Played ma jeden wspólny pionowy scrollbar; rolka myszy przewija oba logi równocześnie.
+- Podsumowanie 24 godzin ładuje Scheduled i Played tylko raz na dzień, zamiast ponownie czytać pełny log dla każdej z 24 godzin.
+- Start Dashboard/Emisje/Baza nie wykonuje już seedowania EMAUS ani pełnego relinkowania utworów EMAUS; te operacje są ładowane dopiero w EMAUS/Utwór i cache'owane.
+- Dashboard przekazuje już odczytaną rewizję airplay do agregatów, więc nie wykonuje zbędnego dodatkowego odczytu rewizji.
+- Android 1.2.5 / `versionCode = 29` (bez osobnego ekranu EMAUS w tej iteracji).
+
 ## 1.2.4 — EMAUS: ETM gaps i presety filtrów
 
 - Scheduled pokazuje zwięzłe podsumowanie całego dnia dla wszystkich ETM Hard/Soft: czas, typ i gap +/- z GSelectora.

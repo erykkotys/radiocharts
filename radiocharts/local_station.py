@@ -758,24 +758,16 @@ def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool,
     return False, None, ""
 
 
-def compare_hour(
+def _compare_hour_rows(
     service_date: date | str,
     hour: int,
-    station_key: str = STATION_KEY,
+    scheduled_all: list[dict[str, Any]],
+    played_all: list[dict[str, Any]],
     *,
     include_technical: bool = False,
 ) -> dict[str, Any]:
-    """Compare Scheduled vs Played inside one GSelector hour block.
-
-    Time is not a matching criterion. Matching uses identity plus occurrence
-    number, and order is evaluated only among events that exist on both sides.
-    """
+    """Compare two already-loaded rows lists for one GSelector hour."""
     hour = int(hour)
-    if not 0 <= hour <= 23:
-        raise ValueError("hour must be 0..23")
-
-    scheduled_all = events_for_day("schedule", service_date, hour=hour, station_key=station_key)
-    played_all = events_for_day("played", service_date, hour=hour, station_key=station_key)
 
     def relevant(row: dict[str, Any]) -> bool:
         return include_technical or str(row.get("event_type") or "") != "command"
@@ -914,9 +906,62 @@ def compare_hour(
     }
 
 
+def compare_hour(
+    service_date: date | str,
+    hour: int,
+    station_key: str = STATION_KEY,
+    *,
+    include_technical: bool = False,
+) -> dict[str, Any]:
+    """Compare Scheduled vs Played inside one GSelector hour block.
+
+    Time is not a matching criterion. Matching uses identity plus occurrence
+    number, and order is evaluated only among events that exist on both sides.
+    """
+    hour = int(hour)
+    if not 0 <= hour <= 23:
+        raise ValueError("hour must be 0..23")
+
+    scheduled = events_for_day("schedule", service_date, hour=hour, station_key=station_key)
+    played = events_for_day("played", service_date, hour=hour, station_key=station_key)
+    return _compare_hour_rows(
+        service_date,
+        hour,
+        scheduled,
+        played,
+        include_technical=include_technical,
+    )
+
 def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dict[str, Any]:
-    """Daily summary built strictly from 24 independent hourly comparisons."""
-    hourly = [compare_hour(service_date, hour, station_key=station_key) for hour in range(24)]
+    """Daily summary built from 24 independent hour blocks.
+
+    Scheduled and Played are loaded once per day and then partitioned in memory.
+    The old implementation reopened SQLite and decoded the full payload 48
+    times (2 sides × 24 hours), which made the comparison tab needlessly slow.
+    """
+    scheduled_rows = events_for_day("schedule", service_date, station_key=station_key)
+    played_rows = events_for_day("played", service_date, station_key=station_key)
+
+    scheduled_by_hour: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    played_by_hour: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in scheduled_rows:
+        hour = row.get("schedule_hour")
+        if hour is not None:
+            scheduled_by_hour[int(hour)].append(row)
+    for row in played_rows:
+        hour = row.get("schedule_hour")
+        if hour is not None:
+            played_by_hour[int(hour)].append(row)
+
+    hourly = [
+        _compare_hour_rows(
+            service_date,
+            hour,
+            scheduled_by_hour.get(hour, []),
+            played_by_hour.get(hour, []),
+        )
+        for hour in range(24)
+    ]
     rows = [row for item in hourly for row in item["rows"]]
     return {
         "service_date": service_date.isoformat() if isinstance(service_date, date) else str(service_date),

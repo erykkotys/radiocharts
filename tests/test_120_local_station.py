@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 
 import radiocharts.db as db
+import radiocharts.local_station as local_station
 from radiocharts.local_station import (
     available_dates,
     compare_day,
@@ -229,3 +230,38 @@ def test_v124_etm_gap_presets_and_daily_summary_contract(tmp_path, monkeypatch):
     assert '"Programowe (bez ETM/komend)"' in APP
     assert 'ETM Hard / Soft — gapy całego dnia' in APP
     assert 'frame.loc[etm_mask, "Gap"]' in APP
+
+
+def test_v125_compare_day_reads_each_daily_log_once(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "compare125.db")
+    schedule = "\n".join([
+        _song("10:00:00.0", "Artist", "A", "ID-A"),
+        _song("11:00:00.0", "Artist", "B", "ID-B"),
+    ])
+    played = "\n".join([
+        _song("10:00:10.0", "Artist", "A", "ID-A"),
+        _song("11:00:10.0", "Artist", "B", "ID-B"),
+    ])
+    import_gselector_export(schedule, filename="30.09_schedule.txt", kind="schedule", start_date="2026-09-30")
+    import_gselector_export(played, filename="30.09_played.txt", kind="played", start_date="2026-09-30")
+
+    original = local_station.events_for_day
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(local_station, "events_for_day", counted)
+    result = local_station.compare_day("2026-09-30")
+    assert result["matched"] == 2
+    assert len(calls) == 2
+    assert all(call_kwargs.get("hour") is None for _call_args, call_kwargs in calls)
+
+
+def test_v125_shared_compare_scroll_and_lazy_emaus_boot_contract():
+    assert 'class="rc-compare-scroll"' in APP
+    assert 'Scheduled i Played mają wspólny pionowy scroll' in APP
+    assert 'BOOT_VIEW_KEY in {"our_radio", "song"}' in APP
+    assert '_cached_local_station_song_links(catalog_revision())' in APP
+    assert 'with_radio_presence(df, days=7, air_rev=AIR_REV)' in APP
