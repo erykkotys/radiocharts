@@ -1,3 +1,13 @@
+## 1.2.7 — szybszy Dashboard
+
+- Dashboard liczy 7-dniowy sygnał radiowy i 28-dniowy wolumen w jednym przebiegu SQL zamiast dwóch dużych agregacji.
+- Domyślne „Całość” dla kolumny Emisje okres nie skanuje już archiwum stacja-po-stacji; używa indeksu po song_id i odejmuje tylko wyłączone stacje.
+- Zakresy czasowe Dashboardu korzystają z nowego indeksu pokrywającego `played_at, song_id, station_id`.
+- Rewizja danych emisji jest dużo tańsza i nie unieważnia ciężkich cache'y tylko dlatego, że katalog stacji został ponownie odkryty bez zmian.
+- Wyszukiwanie ostatniej daty emisji używa indeksowanego `MAX(played_at)` zamiast `MAX(substr(...))`.
+- Pierwszy start po aktualizacji może potrwać dłużej jednorazowo, bo SQLite buduje nowy indeks Dashboardu; kolejne wejścia powinny być wyraźnie szybsze.
+- Android 1.2.7 / `versionCode = 31`.
+
 ## 1.2.6 — EMAUS: szybkie podwidoki, czytelne różnice i diagnostyka ETM
 
 - EMAUS nie renderuje już pięciu zakładek naraz: Scheduled / Played / Porównanie / Utwory / Import są ładowane dopiero po wybraniu, co usuwa największy koszt pierwszego wejścia do widoku.

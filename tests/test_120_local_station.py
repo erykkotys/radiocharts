@@ -274,7 +274,7 @@ def test_v126_shared_compare_scroll_lazy_subviews_and_status_contract():
     assert 'return "+", "rc-status-bad", "Dodane w Played"' in APP
     assert 'return "↻", "rc-status-move", "Zmieniona kolejność"' in APP
     assert 'rc-log-ghost' in APP
-    assert 'with_radio_presence(df, days=7, air_rev=AIR_REV)' in APP
+    assert 'with_dashboard_airplay(df, AIR_DATA_REV)' in APP
 
 
 def test_v126_compare_display_pairs_keep_missing_as_played_ghost(tmp_path, monkeypatch):

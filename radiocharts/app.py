@@ -19,7 +19,8 @@ from radiocharts.build_info import BUILD_DATE, display_version
 from radiocharts.freshness import source_cadence_info
 from radiocharts.airplay import AIRPLAY_BACKFILL_MAX_WINDOWS, completed_windows_in_range
 from radiocharts.db import (
-    airplay_coverage, airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
+    airplay_coverage, airplay_dashboard_metrics, airplay_dashboard_spin_counts, airplay_data_revision,
+    airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
     airplay_spin_counts, airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision, catalog_revision,
@@ -449,6 +450,18 @@ POPULARITY_CHART_SIZES = {"OLIA": 100, "OLIS": 100, "RMF": 20, "ZET": 20, "ESKA"
 
 
 @st.cache_resource(show_spinner=False, max_entries=8)
+def cached_dashboard_airplay(revision: str) -> dict:
+    # Dashboard needs 7d radio breadth and 28d volume. Compute both in one SQL
+    # pass instead of two full GROUP BY scans over airplay_plays.
+    return airplay_dashboard_metrics(days=28, recent_days=7)
+
+
+@st.cache_resource(show_spinner=False, max_entries=24)
+def cached_dashboard_period_spins(revision: str, start_iso: str = "", end_iso: str = "") -> list[dict]:
+    return airplay_dashboard_spin_counts(start_iso or None, end_iso or None)
+
+
+@st.cache_resource(show_spinner=False, max_entries=8)
 def cached_airplay_popularity(revision: str, days: int = 28) -> pd.DataFrame:
     """Relative airplay volume score for a fixed recent window.
 
@@ -505,6 +518,51 @@ def with_popularity(frame: pd.DataFrame, air_rev: str) -> pd.DataFrame:
     out["chart_popularity_bonus"] = _chart_popularity_bonus(out)
     out["popularity"] = (
         0.80 * out["airplay_volume_index"] + 0.20 * out["chart_popularity_bonus"]
+    ).clip(lower=0.0, upper=100.0).round(1)
+    return out
+
+
+def with_dashboard_airplay(frame: pd.DataFrame, air_data_rev: str) -> pd.DataFrame:
+    """Attach all Dashboard airplay metrics from one cached 28-day scan."""
+    out = frame.copy()
+    if out.empty or "song_id" not in out.columns:
+        return out
+    snapshot = cached_dashboard_airplay(air_data_rev)
+    rows = pd.DataFrame(snapshot.get("rows") or [])
+    reporting = int(snapshot.get("reporting_stations") or 0)
+    if not rows.empty and "song_id" in rows.columns:
+        rows["song_id"] = rows["song_id"].astype(int)
+        rows["spins_28d"] = pd.to_numeric(rows.get("spins_28d"), errors="coerce").fillna(0)
+        positive = rows["spins_28d"] > 0
+        rows["airplay_volume_index"] = 0.0
+        if positive.any():
+            rows.loc[positive, "airplay_volume_index"] = (
+                rows.loc[positive, "spins_28d"].rank(method="average", pct=True) * 100.0
+            )
+        rows["airplay_spins_pop_window"] = rows["spins_28d"].astype(int)
+        keep = [
+            "song_id", "airplay_volume_index", "airplay_spins_pop_window",
+            "radio_presence", "radio_reach", "radio_rotation",
+            "airplay_spins_7d", "airplay_stations_count",
+            "airplay_spins_per_day", "airplay_spins_per_station_day", "airplay_last_play",
+        ]
+        out = out.merge(rows[[c for c in keep if c in rows.columns]], on="song_id", how="left")
+    for col in ["radio_presence", "radio_reach", "radio_rotation", "airplay_spins_per_day", "airplay_spins_per_station_day", "airplay_volume_index"]:
+        if col not in out.columns:
+            out[col] = 0.0 if reporting else float("nan")
+        elif reporting:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+    for col in ["airplay_spins_7d", "airplay_stations_count", "airplay_spins_pop_window"]:
+        if col not in out.columns:
+            out[col] = 0
+        else:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(int)
+    out["airplay_reporting_stations"] = reporting
+    out["airplay_presence_days"] = int(snapshot.get("recent_days") or 7)
+    out["chart_popularity_bonus"] = _chart_popularity_bonus(out)
+    out["popularity"] = (
+        0.80 * pd.to_numeric(out["airplay_volume_index"], errors="coerce").fillna(0.0)
+        + 0.20 * out["chart_popularity_bonus"]
     ).clip(lower=0.0, upper=100.0).round(1)
     return out
 
@@ -3036,15 +3094,16 @@ install_client_helpers()
 # script, so repeated revision queries used to add visible latency before the
 # actual page query even started.
 _chart_views = {"dashboard", "archive", "song", "airplay", "library"}
-_air_views = {"dashboard", "archive", "song", "airplay", "library"}
+_air_views = {"archive", "song", "airplay", "library"}
 CHART_REV = chart_revision() if view_key in _chart_views else ""
 AIR_REV = airplay_revision() if view_key in _air_views else ""
+AIR_DATA_REV = airplay_data_revision() if view_key == "dashboard" else ""
 REVISION = CHART_REV
 
 if view_key in {"dashboard", "archive"}:
     df = with_notes(cached_scores(REVISION))
     if view_key == "dashboard":
-        df = with_popularity(with_radio_presence(df, days=7, air_rev=AIR_REV), AIR_REV)
+        df = with_dashboard_airplay(df, AIR_DATA_REV)
 else:
     df = pd.DataFrame()
 
@@ -3086,32 +3145,25 @@ if view_key == "dashboard":
             help="Chart Score i Momentum są liczone ponownie tylko z obserwacji z wybranego okresu. Widok Całość najlepiej oddaje historię list; krótsze okresy służą do analizy świeżego zachowania.",
         )
         lookback = int(period_map[period_label])
-        period_df = df if lookback == 0 else with_popularity(
-            with_radio_presence(with_notes(cached_scores(REVISION, lookback_days=lookback)), days=7, air_rev=AIR_REV),
-            AIR_REV,
+        period_df = df if lookback == 0 else with_dashboard_airplay(
+            with_notes(cached_scores(REVISION, lookback_days=lookback)), AIR_DATA_REV
         )
 
-        # Dashboard: exact spin count for the selected indicator period.  Use a
-        # lightweight SQL GROUP BY rather than the richer Emisje summary so this
-        # extra column does not noticeably slow down the page.
-        dash_station_ids = [int(s["station_id"]) for s in cached_airplay_stations(AIR_REV, True)]
-        dash_air_rev = AIR_REV
-        if dash_station_ids:
-            dash_cov = cached_airplay_coverage(AIR_REV, tuple(sorted(dash_station_ids)))
-            dash_first = dash_cov.get("first_date")
-            dash_last = dash_cov.get("last_date")
-        else:
-            dash_first = dash_last = None
-        if dash_first and dash_last:
+        # Dashboard: selected-period spin count.  Całość uses the song-ordered
+        # index (very fast even for a multi-million-row archive); finite periods
+        # use the time covering index. No station-list/coverage scan is needed.
+        dash_snapshot = cached_dashboard_airplay(AIR_DATA_REV)
+        dash_last = dash_snapshot.get("end_date")
+        if dash_last:
             dash_air_end = date.fromisoformat(str(dash_last))
-            dash_air_first = date.fromisoformat(str(dash_first))
-            dash_air_start = dash_air_first if lookback == 0 else max(
-                dash_air_first, dash_air_end - timedelta(days=max(0, lookback - 1))
-            )
-            dash_counts = pd.DataFrame(cached_airplay_spin_counts(
-                dash_air_rev, tuple(sorted(dash_station_ids)),
-                dash_air_start.isoformat(), dash_air_end.isoformat(),
-            ))
+            if lookback == 0:
+                dash_counts_raw = cached_dashboard_period_spins(AIR_DATA_REV, "", "")
+            else:
+                dash_air_start = dash_air_end - timedelta(days=max(0, lookback - 1))
+                dash_counts_raw = cached_dashboard_period_spins(
+                    AIR_DATA_REV, dash_air_start.isoformat(), dash_air_end.isoformat()
+                )
+            dash_counts = pd.DataFrame(dash_counts_raw)
             if not dash_counts.empty:
                 dash_counts = dash_counts[["song_id", "spins"]].rename(columns={"spins": "airplay_spins_period"})
                 period_df = period_df.merge(dash_counts, on="song_id", how="left")
