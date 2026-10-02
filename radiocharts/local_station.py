@@ -523,6 +523,26 @@ def import_gselector_export(
     }
 
 
+def local_station_revision(station_key: str = STATION_KEY) -> str:
+    """Cheap cache key for EMAUS/GSelector-derived UI data.
+
+    The import table is append-only except for explicit delete/restore operations.
+    max id + row count + newest timestamp therefore invalidates cached dates,
+    timelines and comparisons after every import/delete without scanning events.
+    """
+    db.init_db()
+    with db.connect() as con:
+        row = con.execute(
+            """SELECT COALESCE(MAX(id),0) AS max_id,COUNT(*) AS n,
+                      COALESCE(MAX(imported_at),'') AS newest
+               FROM local_station_imports WHERE station_key=?""",
+            (station_key,),
+        ).fetchone()
+    if not row:
+        return "0|0|"
+    return f"{int(row['max_id'] or 0)}|{int(row['n'] or 0)}|{str(row['newest'] or '')}"
+
+
 def available_dates(kind: str, station_key: str = STATION_KEY) -> list[str]:
     db.init_db()
     with db.connect() as con:
@@ -758,6 +778,71 @@ def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool,
     return False, None, ""
 
 
+def _comparison_display_pairs(
+    scheduled: list[dict[str, Any]],
+    played: list[dict[str, Any]],
+    sched_tokens: list[tuple[Any, int]],
+    play_tokens: list[tuple[Any, int]],
+    sched_lookup: dict[tuple[Any, int], dict[str, Any]],
+    play_lookup: dict[tuple[Any, int], dict[str, Any]],
+    common: set[tuple[Any, int]],
+    schedule_status: dict[int, str],
+    played_status: dict[int, str],
+) -> list[dict[str, Any]]:
+    """Build identity-aligned rows for the two-column visual comparison.
+
+    Common events are displayed opposite the same event even after a reorder.
+    Missing Scheduled events get a ghost copy on Played; Played-only additions
+    get a ghost copy on Scheduled. Added events are inserted close to their
+    real Played position where possible.
+    """
+    play_pos = {token: idx for idx, token in enumerate(play_tokens)}
+    emitted_added: set[tuple[Any, int]] = set()
+    pairs: list[dict[str, Any]] = []
+    play_cursor = -1
+
+    def add_played_only(token: tuple[Any, int]) -> None:
+        if token in emitted_added or token in common:
+            return
+        prow = play_lookup[token]
+        pid = int(prow["id"])
+        pairs.append({
+            "status": played_status.get(pid, "Dodane"),
+            "scheduled_row": None,
+            "played_row": prow,
+        })
+        emitted_added.add(token)
+
+    for token in sched_tokens:
+        srow = sched_lookup[token]
+        sid = int(srow["id"])
+        if token not in common:
+            pairs.append({
+                "status": schedule_status.get(sid, "Niezagrane"),
+                "scheduled_row": srow,
+                "played_row": None,
+            })
+            continue
+
+        target = play_pos[token]
+        if target > play_cursor:
+            for ptoken in play_tokens[play_cursor + 1:target]:
+                add_played_only(ptoken)
+            play_cursor = target
+
+        prow = play_lookup[token]
+        pid = int(prow["id"])
+        pairs.append({
+            "status": schedule_status.get(sid, played_status.get(pid, "OK")),
+            "scheduled_row": srow,
+            "played_row": prow,
+        })
+
+    for token in play_tokens:
+        add_played_only(token)
+    return pairs
+
+
 def _compare_hour_rows(
     service_date: date | str,
     hour: int,
@@ -884,6 +969,10 @@ def _compare_hour_rows(
     reordered_count = sum(1 for row in rows if "Kolejność" in row["status"])
     faded_count = sum(1 for row in rows if "ścięty" in row["status"].casefold())
     differences = [row for row in rows if row["status"] != "OK"]
+    display_pairs = _comparison_display_pairs(
+        scheduled, played, sched_tokens, play_tokens, sched_lookup, play_lookup, common,
+        schedule_status, played_status,
+    )
 
     return {
         "service_date": service_date.isoformat() if isinstance(service_date, date) else str(service_date),
@@ -903,6 +992,7 @@ def _compare_hour_rows(
         "played_rows": played,
         "schedule_status": schedule_status,
         "played_status": played_status,
+        "display_pairs": display_pairs,
     }
 
 
@@ -932,7 +1022,12 @@ def compare_hour(
         include_technical=include_technical,
     )
 
-def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dict[str, Any]:
+def compare_day(
+    service_date: date | str,
+    station_key: str = STATION_KEY,
+    *,
+    include_hour_details: bool = False,
+) -> dict[str, Any]:
     """Daily summary built from 24 independent hour blocks.
 
     Scheduled and Played are loaded once per day and then partitioned in memory.
@@ -963,7 +1058,7 @@ def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dic
         for hour in range(24)
     ]
     rows = [row for item in hourly for row in item["rows"]]
-    return {
+    result = {
         "service_date": service_date.isoformat() if isinstance(service_date, date) else str(service_date),
         "scheduled": sum(int(item["scheduled"]) for item in hourly),
         "played": sum(int(item["played"]) for item in hourly),
@@ -989,6 +1084,9 @@ def compare_day(service_date: date | str, station_key: str = STATION_KEY) -> dic
             for item in hourly
         ],
     }
+    if include_hour_details:
+        result["hour_details"] = hourly
+    return result
 
 
 def delete_import(import_id: int, station_key: str = STATION_KEY) -> dict[str, Any]:

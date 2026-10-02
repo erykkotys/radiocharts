@@ -39,6 +39,7 @@ from radiocharts.local_station import (
     events_for_day as local_events_for_day,
     import_gselector_export as import_local_gselector_export,
     import_history as local_import_history,
+    local_station_revision,
     delete_import as delete_local_import,
     preview_import as preview_local_import,
     song_stats as local_song_stats,
@@ -109,11 +110,12 @@ st.markdown(
       .rc-song-title { font-size:1.18rem; font-weight:720; line-height:1.2; margin:.05rem 0 .08rem; }
       .rc-song-meta { color:#9fa8b5; font-size:.78rem; }
       .rc-etm-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.28rem; margin:.18rem 0 .48rem; }
-      .rc-etm-chip { display:grid; grid-template-columns:auto 1fr auto; gap:.32rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:5px; padding:.24rem .38rem; min-width:0; font-size:.75rem; }
+      .rc-etm-chip { display:grid; grid-template-columns:auto 1fr auto auto; gap:.32rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:5px; padding:.24rem .38rem; min-width:0; font-size:.75rem; }
       .rc-etm-zero { opacity:.48; }
       .rc-etm-time { color:#b9c2cf; font-variant-numeric:tabular-nums; }
       .rc-etm-kind { color:#f4cf57; font-weight:650; overflow:hidden; text-overflow:ellipsis; }
       .rc-etm-gap { color:#f4f4f5; font-weight:700; font-variant-numeric:tabular-nums; }
+      .rc-etm-risk { color:#f4b942; font-weight:800; cursor:help; }
       @media (max-width: 1100px) { .rc-etm-grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
       @media (max-width: 640px) {
         .rc-etm-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -178,9 +180,9 @@ def _cached_local_station_song_links(catalog_rev: str) -> dict:
 
 
 init_db()
-if BOOT_VIEW_KEY in {"our_radio", "song"}:
-    _bootstrap_local_station_seed_once()
-    _cached_local_station_song_links(catalog_revision())
+# EMAUS seed/relink is intentionally deferred until an EMAUS subview (or a song
+# EMAUS panel) is actually rendered. This keeps the first application paint out
+# of the local-station maintenance path.
 
 
 def copyable_json(data: dict, key: str) -> None:
@@ -606,6 +608,39 @@ def cached_airplay_presence_at(revision: str, days: int, end_iso: str) -> dict:
 @st.cache_resource(show_spinner=False, max_entries=128)
 def cached_airplay_song_presence(revision: str, song_id: int, days: int = 7) -> dict:
     return airplay_song_presence(int(song_id), days=days)
+
+
+# EMAUS/GSelector caches. The cheap import revision invalidates them after every
+# import/delete, while ordinary Streamlit reruns no longer reopen SQLite and
+# decode the same payload_json hundreds/thousands of times.
+@st.cache_resource(show_spinner=False, max_entries=16)
+def cached_local_dates(revision: str, kind: str) -> list[str]:
+    return local_available_dates(kind)
+
+
+@st.cache_resource(show_spinner=False, max_entries=96)
+def cached_local_day_events(revision: str, kind: str, service_date: str) -> list[dict]:
+    return local_events_for_day(kind, service_date)
+
+
+@st.cache_resource(show_spinner=False, max_entries=48)
+def cached_local_compare_day(revision: str, service_date: str) -> dict:
+    return local_compare_day(service_date, include_hour_details=True)
+
+
+@st.cache_resource(show_spinner=False, max_entries=48)
+def cached_local_song_stats(revision: str, kind: str, start: str, end: str) -> list[dict]:
+    return local_song_stats(kind, start, end)
+
+
+@st.cache_resource(show_spinner=False, max_entries=128)
+def cached_local_song_activity(revision: str, song_id: int, start: str = "", end: str = "") -> dict:
+    return local_song_activity(int(song_id), start or None, end or None)
+
+
+@st.cache_resource(show_spinner=False, max_entries=16)
+def cached_local_import_history(revision: str) -> list[dict]:
+    return local_import_history()
 
 
 def radio_presence_frame(days: int = 7, air_rev: str = "") -> tuple[pd.DataFrame, dict]:
@@ -2250,6 +2285,27 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
     positives = [value for _row, value in parsed if value is not None and value > 0]
     negatives = [value for _row, value in parsed if value is not None and value < 0]
 
+    # The GSelector export does not contain the runtime of traffic/spot blocks
+    # loaded later by Zetta. It can therefore never reproduce Zetta's ETM Gap
+    # exactly. Mark Hard/Soft segments where this is especially relevant instead
+    # of silently presenting the GSelector number as a Zetta-equivalent value.
+    diagnostic_by_id: dict[int, tuple[int, int]] = {}
+    previous_control_index = 0
+    for idx, row in enumerate(rows):
+        if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) not in {"Hard", "Soft"}:
+            continue
+        segment = rows[previous_control_index:idx]
+        reset_count = sum(
+            1 for item in segment
+            if str(item.get("event_type") or "") == "etm" and _local_etm_kind(item) == "Reset"
+        )
+        unknown_traffic = sum(
+            1 for item in segment
+            if str(item.get("event_type") or "") == "traffic" and item.get("runtime_seconds") is None
+        )
+        diagnostic_by_id[int(row.get("id") or id(row))] = (reset_count, unknown_traffic)
+        previous_control_index = idx + 1
+
     def fmt_seconds(value: float | None) -> str:
         if value is None:
             return "—"
@@ -2263,8 +2319,12 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
 
     max_late = fmt_seconds(max(positives)) if positives else "—"
     max_early = fmt_seconds(min(negatives)) if negatives else "—"
-    st.markdown("#### ETM Hard / Soft — gapy całego dnia")
-    st.caption(f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}")
+    st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
+    st.caption(
+        f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
+        "To są wartości +/- zapisane w eksporcie GSelectora, nie gap Zetty. Zetta może mieć inny wynik po załadowaniu "
+        "realnych bloków reklamowych; ⚠ oznacza segment z RESET-em lub blokiem traffic bez runtime."
+    )
 
     cards = []
     for row, value in parsed:
@@ -2274,10 +2334,21 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
         gap = _local_normalize_gap(str(row.get("etm_delta_raw") or "")) or "—"
         muted = value is not None and abs(value) < .05
         css = "rc-etm-chip rc-etm-zero" if muted else "rc-etm-chip"
+        resets, traffic = diagnostic_by_id.get(int(row.get("id") or id(row)), (0, 0))
+        warnings = []
+        if resets:
+            warnings.append(f"RESET: {resets}")
+        if traffic:
+            warnings.append(f"traffic bez runtime: {traffic}")
+        warning = ""
+        if warnings:
+            warning = (
+                f'<span class="rc-etm-risk" title="{html.escape("; ".join(warnings))}">⚠</span>'
+            )
         cards.append(
             f'<div class="{css}"><span class="rc-etm-time">{html.escape(hhmm)}</span>'
             f'<span class="rc-etm-kind">{html.escape(kind)}</span>'
-            f'<span class="rc-etm-gap">{html.escape(gap)}</span></div>'
+            f'<span class="rc-etm-gap">{html.escape(gap)}</span>{warning}</div>'
         )
     st.markdown(
         '<div class="rc-etm-grid">' + "".join(cards) + "</div>",
@@ -2391,8 +2462,8 @@ def _render_local_timeline_grid(frame: pd.DataFrame, columns: list[str], *, key:
     )
 
 
-def _render_local_timeline(kind: str, key_prefix: str) -> None:
-    dates = local_available_dates(kind)
+def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
+    dates = cached_local_dates(revision, kind)
     if not dates:
         label = "Scheduled" if kind == "schedule" else "Played"
         st.info(f"Brak danych {label}. Zaimportuj plik GSelectora w zakładce Import.")
@@ -2466,27 +2537,29 @@ def _render_local_timeline(kind: str, key_prefix: str) -> None:
         else:
             etm_kinds = set(LOCAL_ETM_PRESETS[etm_preset])
 
-    # Hard/Soft are the quickest view of the actual hourly clock balance. Keep
-    # the summary tied to the selected day, not to the current hour/type filter.
-    full_day_rows = local_events_for_day(kind, selected_date)
+    # One cached SQLite read per selected day. Hour/type filters and summary are
+    # computed in memory instead of reading/decoding the same day 2–3 times.
+    full_day_rows = cached_local_day_events(revision, kind, selected_date)
     if kind == "schedule":
         _render_local_etm_gap_summary(full_day_rows)
 
-    rows = local_events_for_day(
-        kind,
-        selected_date,
-        hour=None if selected_hour == "Cały dzień" else int(selected_hour),
-        event_types=selected_types,
-    )
+    rows = [
+        row for row in full_day_rows
+        if (selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour))
+        and (not selected_types or str(row.get("event_type") or "") in selected_types)
+    ]
     if "etm" in selected_types:
         rows = _local_filter_etm_rows(rows, etm_kinds)
 
-    day = local_day_summary(kind, selected_date)
+    counts: dict[str, int] = {}
+    for row in full_day_rows:
+        typ = str(row.get("event_type") or "other")
+        counts[typ] = counts.get(typ, 0) + 1
     render_compact_metrics([
-        ("Elementy", day["events"]),
-        ("Song", day["songs"]),
-        ("Jingle", day["jingles"]),
-        ("Audycje", day["shows"]),
+        ("Elementy", len(full_day_rows)),
+        ("Song", counts.get("song", 0)),
+        ("Jingle", counts.get("jingle", 0)),
+        ("Audycje", counts.get("show", 0)),
     ])
     frame = _local_timeline_frame(rows)
     if frame.empty:
@@ -2506,16 +2579,35 @@ def _render_local_timeline(kind: str, key_prefix: str) -> None:
         key=f"{key_prefix}_grid_{selected_date}_{selected_hour}_{element_preset}_{'-'.join(sorted(etm_kinds))}",
     )
     st.caption(
-        "Gap przy ETM pokazuje bezpośrednio wartość +/- z markera GSelectora; przy pozostałych elementach pokazuje nadczas 60+ minutes/hour. "
-        "Presety elementów i filtr ETM pozwalają szybko wybrać Hard, Soft, Reset, Hit albo dowolną kombinację."
+        "Gap przy ETM pokazuje wartość +/- z eksportu GSelectora (nie gap wyliczony przez Zettę); przy pozostałych "
+        "elementach pokazuje nadczas 60+ minutes/hour. Presety elementów i filtr ETM pozwalają szybko wybrać Hard, "
+        "Soft, Reset, Hit albo dowolną kombinację."
     )
 
 
-def _local_log_row_html(row: dict, status: str = "OK") -> str:
+def _local_status_symbol(status: str) -> tuple[str, str, str]:
+    lowered = str(status or "OK").casefold()
+    if status == "Niezagrane":
+        return "✕", "rc-status-bad", "Nie zagrano / usunięte"
+    if status == "Dodane":
+        return "+", "rc-status-bad", "Dodane w Played"
+    if "kolejność" in lowered:
+        return "↻", "rc-status-move", "Zmieniona kolejność"
+    if "ścięty" in lowered:
+        return "✂", "rc-status-cut", "Ścięty / fade"
+    return "✓", "rc-status-ok", "Zgodne"
+
+
+def _local_log_row_html(
+    row: dict,
+    status: str = "OK",
+    *,
+    ghost: bool = False,
+    ghost_note: str = "",
+) -> str:
     event_type = str(row.get("event_type") or "other")
-    missed = status == "Niezagrane"
-    if missed:
-        color = "#737a84"
+    if ghost:
+        color = "#8b929c"
     elif event_type == "song":
         color = "#f4f4f5"
     elif event_type == "traffic":
@@ -2533,41 +2625,68 @@ def _local_log_row_html(row: dict, status: str = "OK") -> str:
     time_label = raw_time + (f"  ({gap} gap)" if gap else "")
     runtime = str(row.get("runtime_raw") or "")
     type_label = LOCAL_EVENT_LABELS.get(event_type, event_type)
+    meta = f"{type_label} · {category}"
+    if ghost_note:
+        meta += f" · {ghost_note}"
 
+    symbol, status_class, status_title = _local_status_symbol(status)
     badge = ""
-    if status == "Niezagrane":
-        badge = '<span class="rc-log-badge rc-log-badge-muted">NIE ZAGRANO</span>'
-    elif status == "Dodane":
-        badge = '<span class="rc-log-badge">DODANE</span>'
-    elif "Kolejność" in status:
-        badge = '<span class="rc-log-badge">↕ KOLEJNOŚĆ</span>'
-    if "ścięty" in status.casefold():
-        badge += '<span class="rc-log-badge rc-log-badge-fade">FADE</span>'
+    if "ścięty" in str(status).casefold():
+        badge = '<span class="rc-log-badge rc-log-badge-fade">FADE</span>'
 
+    row_class = "rc-log-row rc-log-ghost" if ghost else "rc-log-row"
     return (
-        f'<div class="rc-log-row" style="color:{color}">'
+        f'<div class="{row_class}" style="color:{color}">'
+        f'<div class="rc-log-status {status_class}" title="{html.escape(status_title)}">{html.escape(symbol)}</div>'
         f'<div class="rc-log-time">{html.escape(time_label)}</div>'
         f'<div class="rc-log-cat">{html.escape(short_cat)}</div>'
         f'<div class="rc-log-main"><div class="rc-log-title">{html.escape(content)}</div>'
-        f'<div class="rc-log-meta">{html.escape(type_label)} · {html.escape(category)}</div></div>'
+        f'<div class="rc-log-meta">{html.escape(meta)}</div></div>'
         f'<div class="rc-log-runtime">{html.escape(runtime)}</div>'
         f'<div class="rc-log-flags">{badge}</div></div>'
     )
 
 
-def _local_log_panel_html(title: str, rows: list[dict], statuses: dict[int, str]) -> str:
-    body = "".join(
-        _local_log_row_html(row, statuses.get(int(row.get("id") or 0), "OK"))
-        for row in rows
-    ) or '<div class="rc-log-empty">Brak elementów w tej godzinie.</div>'
+def _local_compare_rows_html(hour: int, pairs: list[dict]) -> str:
+    body = []
+    for pair in pairs:
+        status = str(pair.get("status") or "OK")
+        scheduled = pair.get("scheduled_row")
+        played = pair.get("played_row")
+        if scheduled is None and played is not None:
+            left = _local_log_row_html(
+                played, status, ghost=True, ghost_note="brak w Scheduled — element dodany",
+            )
+            right = _local_log_row_html(played, status)
+        elif played is None and scheduled is not None:
+            left = _local_log_row_html(scheduled, status)
+            right = _local_log_row_html(
+                scheduled, status, ghost=True, ghost_note="nie zagrano — pozycja z Scheduled",
+            )
+        elif scheduled is not None and played is not None:
+            left = _local_log_row_html(scheduled, status)
+            right = _local_log_row_html(played, status)
+        else:
+            continue
+        body.append(f'<div class="rc-compare-pair">{left}{right}</div>')
+
+    if not body:
+        body.append(
+            '<div class="rc-compare-pair"><div class="rc-log-empty">Brak elementów.</div>'
+            '<div class="rc-log-empty">Brak elementów.</div></div>'
+        )
     return (
-        f'<div class="rc-log-panel"><div class="rc-log-panel-title">{html.escape(title)}</div>'
-        f'<div class="rc-log-body">{body}</div></div>'
+        '<div class="rc-compare-scroll">'
+        '<div class="rc-compare-head">'
+        f'<div>Scheduled · {int(hour):02d}:00–{int(hour):02d}:59+</div>'
+        f'<div>Played · {int(hour):02d}:00–{int(hour):02d}:59+</div>'
+        '</div>' + "".join(body) + '</div>'
     )
 
-def _render_local_comparison() -> None:
-    scheduled_dates = set(local_available_dates("schedule"))
-    played_dates = set(local_available_dates("played"))
+
+def _render_local_comparison(revision: str) -> None:
+    scheduled_dates = set(cached_local_dates(revision, "schedule"))
+    played_dates = set(cached_local_dates(revision, "played"))
     overlap = sorted(scheduled_dates & played_dates)
     if not overlap:
         st.info(
@@ -2579,29 +2698,32 @@ def _render_local_comparison() -> None:
     st.markdown(
         """
         <style>
-          .rc-log-panel { background:#090d12; border:1px solid #313844; border-radius:7px; overflow:visible; }
-          .rc-log-panel-title { padding:.48rem .62rem; background:#11161d; border-bottom:1px solid #313844; font-weight:700; color:#e7e9ed; }
-          .rc-compare-scroll { max-height:690px; overflow:auto; border-radius:7px; }
-          .rc-compare-grid { display:grid; grid-template-columns:minmax(520px,1fr) minmax(520px,1fr); gap:1rem; min-width:1080px; align-items:start; }
-          .rc-log-panel { min-width:0; }
-          .rc-log-panel-title { position:sticky; top:0; z-index:3; }
-          .rc-log-body { min-width:0; }
-          .rc-log-row { display:grid; grid-template-columns:118px 52px minmax(0,1fr) 62px; gap:.42rem; align-items:start; padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.80rem; }
+          .rc-compare-scroll { max-height:690px; overflow:auto; border:1px solid #313844; border-radius:7px; background:#090d12; }
+          .rc-compare-head { display:grid; grid-template-columns:minmax(520px,1fr) minmax(520px,1fr); gap:1rem; min-width:1080px; position:sticky; top:0; z-index:4; }
+          .rc-compare-head > div { padding:.48rem .62rem; background:#11161d; border-bottom:1px solid #313844; font-weight:700; color:#e7e9ed; }
+          .rc-compare-pair { display:grid; grid-template-columns:minmax(520px,1fr) minmax(520px,1fr); gap:1rem; min-width:1080px; align-items:stretch; }
+          .rc-log-row { display:grid; grid-template-columns:28px 118px 52px minmax(0,1fr) 62px; gap:.42rem; align-items:start; padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.80rem; min-width:0; height:100%; }
           .rc-log-row:hover { background:#0f151d; }
+          .rc-log-status { display:flex; align-items:center; justify-content:center; min-height:1.25rem; font-size:1rem; font-weight:850; line-height:1; }
+          .rc-status-ok { color:#45c878; }
+          .rc-status-bad { color:#ff5d5d; }
+          .rc-status-move { color:#f4b942; }
+          .rc-status-cut { color:#ff8c5a; }
           .rc-log-time { font-variant-numeric:tabular-nums; white-space:nowrap; font-weight:650; }
           .rc-log-cat { font-weight:760; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
           .rc-log-main { min-width:0; }
           .rc-log-title { font-weight:650; white-space:normal; overflow-wrap:anywhere; }
           .rc-log-meta { margin-top:.08rem; font-size:.67rem; opacity:.66; white-space:normal; overflow-wrap:anywhere; }
           .rc-log-runtime { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; opacity:.88; }
-          .rc-log-flags { grid-column:3 / 5; margin-top:-.10rem; }
+          .rc-log-flags { grid-column:4 / 6; margin-top:-.10rem; }
           .rc-log-badge { display:inline-block; margin:.10rem .25rem 0 0; padding:.02rem .24rem; border:1px solid #8a792e; border-radius:4px; color:#f4cf57; font-size:.60rem; font-weight:750; }
-          .rc-log-badge-muted { border-color:#555d68; color:#858c96; }
           .rc-log-badge-fade { border-color:#a84848; color:#ff6b6b; }
-          .rc-log-empty { padding:1rem; color:#858c96; }
+          .rc-log-ghost { opacity:.27; filter:grayscale(.85); }
+          .rc-log-ghost:hover { opacity:.36; filter:grayscale(.7); }
+          .rc-log-empty { padding:1rem; color:#858c96; border-bottom:1px solid #1b222c; }
           @media (max-width:900px) {
-            .rc-compare-grid { min-width:980px; grid-template-columns:minmax(470px,1fr) minmax(470px,1fr); }
-            .rc-log-row { grid-template-columns:92px 46px minmax(0,1fr) 52px; font-size:.74rem; }
+            .rc-compare-head, .rc-compare-pair { min-width:980px; grid-template-columns:minmax(470px,1fr) minmax(470px,1fr); }
+            .rc-log-row { grid-template-columns:26px 92px 46px minmax(0,1fr) 52px; font-size:.74rem; }
           }
         </style>
         """,
@@ -2615,8 +2737,11 @@ def _render_local_comparison() -> None:
         format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
         key="our_radio_compare_date",
     )
-    day_cmp = local_compare_day(selected_date)
+    # One cached full-day comparison supplies both the 24 h summary and the
+    # selected hour. 1.2.5 still reopened/decoded SQLite for compare_hour here.
+    day_cmp = cached_local_compare_day(revision, selected_date)
     hour_meta = {int(item["hour"]): item for item in day_cmp.get("hours", [])}
+    hour_details = {int(item["hour"]): item for item in day_cmp.get("hour_details", [])}
 
     def _hour_label(hour: int) -> str:
         item = hour_meta.get(int(hour), {})
@@ -2638,7 +2763,10 @@ def _render_local_comparison() -> None:
         format_func=_hour_label,
         key="our_radio_compare_hour",
     )
-    comparison = local_compare_hour(selected_date, int(selected_hour))
+    comparison = hour_details.get(int(selected_hour))
+    if comparison is None:
+        st.info("Brak danych porównania dla wybranego bloku godzinnego.")
+        return
 
     render_compact_metrics([
         ("Scheduled", comparison["scheduled"]),
@@ -2647,25 +2775,19 @@ def _render_local_comparison() -> None:
         ("Niezagrane / dodane", f"{comparison['missed']} / {comparison['added']}"),
     ])
     st.caption(
-        "Dopasowanie działa wyłącznie wewnątrz wybranego bloku godzinnego. Sekundy nie decydują o zgodności — "
-        "jeżeli elementy są te same i w tej samej kolejności, wynik to OK. Techniczne wpisy „Zetta Play Asset” są ukryte."
+        "✓ zgodne · ✕ niezagrane/usunięte · + dodane w Played · ↻ zmieniona kolejność. "
+        "Szary ghost po stronie Played pokazuje pozycję z planu, która nie została zagrana. "
+        "Sekundy startu nie decydują o zgodności; techniczne wpisy „Zetta Play Asset” są ukryte."
     )
 
-    scheduled_panel = _local_log_panel_html(
-        f"Scheduled · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
-        comparison["scheduled_rows"],
-        comparison["schedule_status"],
-    )
-    played_panel = _local_log_panel_html(
-        f"Played · {int(selected_hour):02d}:00–{int(selected_hour):02d}:59+",
-        comparison["played_rows"],
-        comparison["played_status"],
-    )
     st.markdown(
-        f'<div class="rc-compare-scroll"><div class="rc-compare-grid">{scheduled_panel}{played_panel}</div></div>',
+        _local_compare_rows_html(int(selected_hour), comparison.get("display_pairs") or []),
         unsafe_allow_html=True,
     )
-    st.caption("Scheduled i Played mają wspólny pionowy scroll — rolka myszy przewija oba logi jednocześnie.")
+    st.caption(
+        "Scheduled i Played mają jeden wspólny pionowy scroll — rolka myszy przewija oba logi jednocześnie. "
+        "Celowo nie dokładam osobnych scrolli bocznych, żeby nie komplikować obsługi i synchronizacji."
+    )
 
     st.markdown("#### Różnice w tej godzinie")
     diffs = pd.DataFrame(comparison["difference_rows"])
@@ -2682,20 +2804,13 @@ def _render_local_comparison() -> None:
             axis=1,
         )
         diffs = diffs.rename(columns={
-            "status": "Status",
-            "scheduled_time": "Plan",
-            "played_time": "Played",
-            "start_delta": "Δ startu",
-            "runtime_cut": "Ścięcie",
-            "artist": "Wykonawca",
-            "title": "Element / tytuł",
-            "note": "Uwagi",
+            "status": "Status", "scheduled_time": "Plan", "played_time": "Played",
+            "start_delta": "Δ startu", "runtime_cut": "Ścięcie", "artist": "Wykonawca",
+            "title": "Element / tytuł", "note": "Uwagi",
         })
         st.dataframe(
             diffs[["Status", "Pozycja", "Plan", "Played", "Δ startu", "Ścięcie", "Typ", "Wykonawca", "Element / tytuł", "Uwagi"]],
-            hide_index=True,
-            use_container_width=True,
-            height=min(620, 42 + 35 * len(diffs)),
+            hide_index=True, use_container_width=True, height=min(620, 42 + 35 * len(diffs)),
         )
         st.caption(
             "Δ startu ma format +M:SS / -M:SS i jest informacją pomocniczą — sama różnica czasu nie tworzy błędu. "
@@ -2712,14 +2827,13 @@ def _render_local_comparison() -> None:
             })
             st.dataframe(
                 hours[["Godzina", "Scheduled", "Played", "Różnice", "Niezagrane", "Dodane", "Kolejność", "Ścięte"]],
-                hide_index=True,
-                use_container_width=True,
-                height=430,
+                hide_index=True, use_container_width=True, height=430,
             )
 
-def _render_local_song_stats() -> None:
-    schedule_dates = local_available_dates("schedule")
-    played_dates = local_available_dates("played")
+
+def _render_local_song_stats(revision: str) -> None:
+    schedule_dates = cached_local_dates(revision, "schedule")
+    played_dates = cached_local_dates(revision, "played")
     available_kinds = []
     if schedule_dates:
         available_kinds.append("schedule")
@@ -2730,70 +2844,57 @@ def _render_local_song_stats() -> None:
         return
     labels = {"schedule": "Scheduled", "played": "Played"}
     source_kind = st.radio(
-        "Źródło",
-        available_kinds,
-        format_func=lambda value: labels[value],
-        horizontal=True,
-        key="our_radio_stats_kind",
+        "Źródło", available_kinds, format_func=lambda value: labels[value],
+        horizontal=True, key="our_radio_stats_kind",
     )
     dates = schedule_dates if source_kind == "schedule" else played_dates
     c1, c2 = st.columns(2)
     start = c1.selectbox(
-        "Od",
-        dates,
-        index=0,
+        "Od", dates, index=0,
         format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
         key=f"our_radio_stats_start_{source_kind}",
     )
     end = c2.selectbox(
-        "Do",
-        dates,
-        index=len(dates) - 1,
+        "Do", dates, index=len(dates) - 1,
         format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
         key=f"our_radio_stats_end_{source_kind}",
     )
     if start > end:
         start, end = end, start
-    stats = local_song_stats(source_kind, start, end)
+    stats = cached_local_song_stats(revision, source_kind, start, end)
     if not stats:
         st.info("Brak utworów w wybranym okresie.")
         return
     frame = pd.DataFrame(stats).rename(columns={
-        "artist": "Wykonawca",
-        "title": "Tytuł",
-        "category": "Kategoria",
-        "external_id": "ID",
-        "plays": "Emisje / plan",
-        "days_with_play": "Dni",
-        "per_calendar_day": "Na dzień",
-        "avg_active_day": "Na aktywny dzień",
-        "max_day": "Max/dzień",
-        "peak_hour": "Najczęstsza godz.",
+        "artist": "Wykonawca", "title": "Tytuł", "category": "Kategoria", "external_id": "ID",
+        "plays": "Emisje / plan", "days_with_play": "Dni", "per_calendar_day": "Na dzień",
+        "avg_active_day": "Na aktywny dzień", "max_day": "Max/dzień", "peak_hour": "Najczęstsza godz.",
         "song_id": "song_id",
     })
     frame["Najczęstsza godz."] = frame["Najczęstsza godz."].map(
         lambda value: "—" if pd.isna(value) else f"{int(value):02d}:00"
     )
     render_compact_metrics([
-        ("Różne utwory", len(frame)),
-        ("Wszystkie emisje/sloty", int(frame["Emisje / plan"].sum())),
+        ("Różne utwory", len(frame)), ("Wszystkie emisje/sloty", int(frame["Emisje / plan"].sum())),
         ("Śr. na utwór", round(float(frame["Emisje / plan"].mean()), 1)),
         ("Zakres", f"{date.fromisoformat(start).strftime('%d.%m')}–{date.fromisoformat(end).strftime('%d.%m')}"),
     ])
     st.dataframe(
         frame[["Wykonawca", "Tytuł", "Kategoria", "Emisje / plan", "Dni", "Na dzień", "Na aktywny dzień", "Max/dzień", "Najczęstsza godz."]],
-        hide_index=True,
-        use_container_width=True,
-        height=690,
+        hide_index=True, use_container_width=True, height=690,
     )
 
 
-
 def _render_emaus_song_activity(song_id: int) -> None:
-    dates = sorted(set(local_available_dates("schedule")) | set(local_available_dates("played")))
+    # Song detail is the first place outside /EMAUS that needs local-station
+    # data. Keep seed/relink deferred until this panel is actually rendered.
+    _bootstrap_local_station_seed_once()
+    _cached_local_station_song_links(catalog_revision())
+    revision = local_station_revision()
+    dates = sorted(set(cached_local_dates(revision, "schedule")) | set(cached_local_dates(revision, "played")))
     if not dates:
         return
-    activity_all = local_song_activity(int(song_id))
+    activity_all = cached_local_song_activity(revision, int(song_id))
     if not activity_all.get("date_from"):
         st.markdown("### EMAUS")
         st.caption("Ten utwór nie jest jeszcze powiązany z żadnym zaimportowanym elementem EMAUS.")
@@ -2804,25 +2905,18 @@ def _render_emaus_song_activity(song_id: int) -> None:
     song_dates = [d for d in dates if str(activity_all["date_from"]) <= d <= str(activity_all["date_to"])] or dates
     c1, c2 = st.columns(2)
     start = c1.selectbox(
-        "EMAUS od",
-        song_dates,
-        index=0,
-        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
-        key=f"emaus_song_start_{song_id}",
+        "EMAUS od", song_dates, index=0,
+        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"), key=f"emaus_song_start_{song_id}",
     )
     end = c2.selectbox(
-        "EMAUS do",
-        song_dates,
-        index=len(song_dates) - 1,
-        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
-        key=f"emaus_song_end_{song_id}",
+        "EMAUS do", song_dates, index=len(song_dates) - 1,
+        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"), key=f"emaus_song_end_{song_id}",
     )
     if start > end:
         start, end = end, start
-    activity = local_song_activity(int(song_id), start, end)
+    activity = cached_local_song_activity(revision, int(song_id), start, end)
     render_compact_metrics([
-        ("Played", int(activity.get("played") or 0)),
-        ("Played / dzień", activity.get("played_per_day") or 0),
+        ("Played", int(activity.get("played") or 0)), ("Played / dzień", activity.get("played_per_day") or 0),
         ("Scheduled", int(activity.get("scheduled") or 0)),
         ("Następna", (str(activity.get("next_scheduled") or "—").replace("2026-", ""))),
     ])
@@ -2830,12 +2924,7 @@ def _render_emaus_song_activity(song_id: int) -> None:
     if not daily.empty:
         daily["Δ Played−Scheduled"] = daily["played"] - daily["scheduled"]
         daily = daily.rename(columns={"date": "Dzień", "scheduled": "Scheduled", "played": "Played"})
-        st.dataframe(
-            daily[["Dzień", "Scheduled", "Played", "Δ Played−Scheduled"]],
-            hide_index=True,
-            use_container_width=True,
-            height=min(300, 42 + 35 * len(daily)),
-        )
+        st.dataframe(daily[["Dzień", "Scheduled", "Played", "Δ Played−Scheduled"]], hide_index=True, use_container_width=True, height=min(300, 42 + 35 * len(daily)))
     meta = []
     if activity.get("last_played"):
         meta.append(f"ostatnio: {activity['last_played']}")
@@ -2844,7 +2933,8 @@ def _render_emaus_song_activity(song_id: int) -> None:
     if meta:
         st.caption(" · ".join(meta))
 
-def _render_local_import() -> None:
+
+def _render_local_import(revision: str) -> None:
     st.markdown("#### Ręczny importer GSelector")
     st.caption(
         "Importer przyjmuje obecny eksport TSV/TXT. Wielodniowy plik jest dzielony po znacznikach UTF-8 BOM, "
@@ -2896,7 +2986,7 @@ def _render_local_import() -> None:
             f"Przywrócono wcześniejszy snapshot dla {deleted['restored_days']} dni."
         )
 
-    history_raw = local_import_history()
+    history_raw = cached_local_import_history(revision)
     history = pd.DataFrame(history_raw)
     if not history.empty:
         history_view = history.rename(columns={
@@ -4025,19 +4115,29 @@ elif view_key == "our_radio":
         "EMAUS jest trzymany osobno od monitoringu rynku. Scheduled = plan wyeksportowany z GSelectora, "
         "Played = stan po reconciliation. Importy są wersjonowane, więc ponowny eksport dnia nie kasuje poprzedniego snapshotu."
     )
-    tab_schedule, tab_played, tab_compare, tab_songs, tab_import = st.tabs(
-        ["Scheduled", "Played", "Porównanie", "Utwory", "Import"]
-    )
-    with tab_schedule:
-        _render_local_timeline("schedule", "our_radio_schedule")
-    with tab_played:
-        _render_local_timeline("played", "our_radio_played")
-    with tab_compare:
-        _render_local_comparison()
-    with tab_songs:
-        _render_local_song_stats()
-    with tab_import:
-        _render_local_import()
+    # st.tabs executes every tab body on every rerun. That made /EMAUS load the
+    # timeline, comparison, song stats and import history before the user saw
+    # the first screen. A segmented selector renders only the active subview.
+    _bootstrap_local_station_seed_once()
+    local_rev = local_station_revision()
+    section = st.segmented_control(
+        "Widok EMAUS",
+        ["Scheduled", "Played", "Porównanie", "Utwory", "Import"],
+        default="Scheduled",
+        key="our_radio_section",
+        label_visibility="collapsed",
+    ) or "Scheduled"
+    if section == "Scheduled":
+        _render_local_timeline("schedule", "our_radio_schedule", local_rev)
+    elif section == "Played":
+        _render_local_timeline("played", "our_radio_played", local_rev)
+    elif section == "Porównanie":
+        _render_local_comparison(local_rev)
+    elif section == "Utwory":
+        _cached_local_station_song_links(catalog_revision())
+        _render_local_song_stats(local_rev)
+    elif section == "Import":
+        _render_local_import(local_rev)
 
 elif view_key == "data":
     st.subheader("⬇️ Dane i procesy")

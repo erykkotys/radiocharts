@@ -1,3 +1,12 @@
+## 1.2.6 — EMAUS: szybkie podwidoki, czytelne różnice i diagnostyka ETM
+
+- EMAUS nie renderuje już pięciu zakładek naraz: Scheduled / Played / Porównanie / Utwory / Import są ładowane dopiero po wybraniu, co usuwa największy koszt pierwszego wejścia do widoku.
+- Odczyty dzienne EMAUS są cache'owane po rewizji importów; filtry działają w pamięci, a Porównanie wykorzystuje jeden wynik całego dnia również dla wybranej godziny.
+- Scheduled i Played mają jeden wspólny scroll oraz wiersze ustawione parami. Po stronie Played niezagrany element planu zostaje jako mocno wyszarzony ghost.
+- Statusy porównania: zielone ✓ = zgodne, czerwone ✕ = niezagrane/usunięte, czerwone + = dodane, ↻ = zmieniona kolejność, ✂ = wykryte ścięcie/fade.
+- Podsumowanie ETM Hard/Soft jest teraz jednoznacznie opisane jako gap z planu GSelectora. Segmenty z RESET-em lub traffic bez runtime są oznaczane ⚠, bo nie da się z samego eksportu GSelectora odtworzyć dokładnego gapu Zetty po załadowaniu realnych spotów.
+- Android 1.2.6 / `versionCode = 30` (synchronizacja numeru wydania).
+
 ## 1.2.5 — EMAUS: wspólny scroll porównania i szybszy start
 
 - Porównanie Scheduled/Played ma jeden wspólny pionowy scrollbar; rolka myszy przewija oba logi równocześnie.

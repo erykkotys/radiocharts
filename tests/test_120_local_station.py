@@ -228,7 +228,8 @@ def test_v124_etm_gap_presets_and_daily_summary_contract(tmp_path, monkeypatch):
     assert '"Hard + Soft": {"Hard", "Soft"}' in APP
     assert '"Reset + Hit": {"Reset", "Hit"}' in APP
     assert '"Programowe (bez ETM/komend)"' in APP
-    assert 'ETM Hard / Soft — gapy całego dnia' in APP
+    assert 'ETM Hard / Soft — gapy planu GSelector' in APP
+    assert 'nie gap Zetty' in APP
     assert 'frame.loc[etm_mask, "Gap"]' in APP
 
 
@@ -253,15 +254,43 @@ def test_v125_compare_day_reads_each_daily_log_once(tmp_path, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(local_station, "events_for_day", counted)
-    result = local_station.compare_day("2026-09-30")
+    result = local_station.compare_day("2026-09-30", include_hour_details=True)
     assert result["matched"] == 2
+    assert len(result["hour_details"]) == 24
     assert len(calls) == 2
     assert all(call_kwargs.get("hour") is None for _call_args, call_kwargs in calls)
 
 
-def test_v125_shared_compare_scroll_and_lazy_emaus_boot_contract():
+def test_v126_shared_compare_scroll_lazy_subviews_and_status_contract():
     assert 'class="rc-compare-scroll"' in APP
-    assert 'Scheduled i Played mają wspólny pionowy scroll' in APP
-    assert 'BOOT_VIEW_KEY in {"our_radio", "song"}' in APP
+    assert 'Scheduled i Played mają jeden wspólny pionowy scroll' in APP
+    assert 'st.segmented_control(' in APP
+    assert '["Scheduled", "Played", "Porównanie", "Utwory", "Import"]' in APP
+    assert 'tab_schedule, tab_played, tab_compare, tab_songs, tab_import = st.tabs' not in APP
+    assert '_bootstrap_local_station_seed_once()' in APP
     assert '_cached_local_station_song_links(catalog_revision())' in APP
+    assert 'return "✓", "rc-status-ok", "Zgodne"' in APP
+    assert 'return "✕", "rc-status-bad", "Nie zagrano / usunięte"' in APP
+    assert 'return "+", "rc-status-bad", "Dodane w Played"' in APP
+    assert 'return "↻", "rc-status-move", "Zmieniona kolejność"' in APP
+    assert 'rc-log-ghost' in APP
     assert 'with_radio_presence(df, days=7, air_rev=AIR_REV)' in APP
+
+
+def test_v126_compare_display_pairs_keep_missing_as_played_ghost(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "compare126.db")
+    schedule = "\n".join([
+        _song("10:00:00.0", "Artist", "A", "ID-A"),
+        _song("10:03:00.0", "Artist", "B", "ID-B"),
+    ])
+    played = "\n".join([
+        _song("10:00:05.0", "Artist", "A", "ID-A"),
+        _song("10:06:00.0", "Artist", "C", "ID-C"),
+    ])
+    import_gselector_export(schedule, filename="30.09_schedule.txt", kind="schedule", start_date="2026-09-30")
+    import_gselector_export(played, filename="30.09_played.txt", kind="played", start_date="2026-09-30")
+    result = compare_hour("2026-09-30", 10)
+    pairs = result["display_pairs"]
+    assert any(p["status"] == "Niezagrane" and p["scheduled_row"] and p["played_row"] is None for p in pairs)
+    assert any(p["status"] == "Dodane" and p["scheduled_row"] is None and p["played_row"] for p in pairs)
+    assert any(p["status"] == "OK" and p["scheduled_row"] and p["played_row"] for p in pairs)
