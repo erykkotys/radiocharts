@@ -108,7 +108,15 @@ st.markdown(
       .rc-metric-value { color:#f7f8fa; font-size:1.28rem; font-weight:700; line-height:1.1; margin-top:.05rem; }
       .rc-song-title { font-size:1.18rem; font-weight:720; line-height:1.2; margin:.05rem 0 .08rem; }
       .rc-song-meta { color:#9fa8b5; font-size:.78rem; }
+      .rc-etm-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.28rem; margin:.18rem 0 .48rem; }
+      .rc-etm-chip { display:grid; grid-template-columns:auto 1fr auto; gap:.32rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:5px; padding:.24rem .38rem; min-width:0; font-size:.75rem; }
+      .rc-etm-zero { opacity:.48; }
+      .rc-etm-time { color:#b9c2cf; font-variant-numeric:tabular-nums; }
+      .rc-etm-kind { color:#f4cf57; font-weight:650; overflow:hidden; text-overflow:ellipsis; }
+      .rc-etm-gap { color:#f4f4f5; font-weight:700; font-variant-numeric:tabular-nums; }
+      @media (max-width: 1100px) { .rc-etm-grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
       @media (max-width: 640px) {
+        .rc-etm-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
         .rc-build-badge { display:none; }
         .rc-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
       }
@@ -2152,6 +2160,108 @@ LOCAL_EVENT_LABELS = {
     "other": "Inne",
 }
 
+LOCAL_ELEMENT_FILTER_PRESETS = {
+    "Wszystkie": list(LOCAL_EVENT_LABELS),
+    "Song": ["song"],
+    "Song + Jingle": ["song", "jingle"],
+    "Programowe (bez ETM/komend)": ["song", "jingle", "show", "bed", "info", "traffic", "other"],
+    "Tylko ETM": ["etm"],
+}
+LOCAL_ETM_KINDS = ["Hard", "Soft", "Reset", "Hit", "Inne"]
+LOCAL_ETM_PRESETS = {
+    "Wszystkie": set(LOCAL_ETM_KINDS),
+    "Hard": {"Hard"},
+    "Soft": {"Soft"},
+    "Reset": {"Reset"},
+    "Hit": {"Hit"},
+    "Hard + Soft": {"Hard", "Soft"},
+    "Reset + Hit": {"Reset", "Hit"},
+}
+
+
+def _local_etm_kind(row: dict) -> str:
+    if str(row.get("event_type") or "") != "etm":
+        return ""
+    value = str(row.get("title") or row.get("category") or "").upper()
+    for label in ("HARD", "SOFT", "RESET", "HIT"):
+        if f"_{label}" in value or label in value:
+            return label.title()
+    return "Inne"
+
+
+def _local_normalize_gap(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    # GSelector usually writes +00:54.0. Keep tenths only when meaningful.
+    if re.fullmatch(r"[+-]\d{2,}:\d{2}\.0", value):
+        return value[:-2]
+    return value
+
+
+def _local_filter_etm_rows(rows: list[dict], kinds: set[str]) -> list[dict]:
+    if not kinds:
+        return [r for r in rows if str(r.get("event_type") or "") != "etm"]
+    return [
+        r for r in rows
+        if str(r.get("event_type") or "") != "etm" or _local_etm_kind(r) in kinds
+    ]
+
+
+def _render_local_etm_gap_summary(rows: list[dict]) -> None:
+    markers = [
+        row for row in rows
+        if str(row.get("event_type") or "") == "etm" and _local_etm_kind(row) in {"Hard", "Soft"}
+    ]
+    if not markers:
+        return
+
+    def gap_seconds(raw: str) -> float | None:
+        m = re.fullmatch(r"([+-])(\d+):(\d{2}(?:\.\d+)?)", str(raw or "").strip())
+        if not m:
+            return None
+        value = int(m.group(2)) * 60.0 + float(m.group(3))
+        return value if m.group(1) == "+" else -value
+
+    parsed = [(row, gap_seconds(str(row.get("etm_delta_raw") or ""))) for row in markers]
+    nonzero = sum(1 for _row, value in parsed if value is not None and abs(value) >= .05)
+    positives = [value for _row, value in parsed if value is not None and value > 0]
+    negatives = [value for _row, value in parsed if value is not None and value < 0]
+
+    def fmt_seconds(value: float | None) -> str:
+        if value is None:
+            return "—"
+        sign = "+" if value >= 0 else "-"
+        value = abs(value)
+        minutes = int(value // 60)
+        seconds = value - minutes * 60
+        if abs(seconds - round(seconds)) < .05:
+            return f"{sign}{minutes:02d}:{int(round(seconds)):02d}"
+        return f"{sign}{minutes:02d}:{seconds:04.1f}"
+
+    max_late = fmt_seconds(max(positives)) if positives else "—"
+    max_early = fmt_seconds(min(negatives)) if negatives else "—"
+    st.markdown("#### ETM Hard / Soft — gapy całego dnia")
+    st.caption(f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}")
+
+    cards = []
+    for row, value in parsed:
+        raw_time = str(row.get("air_time_raw") or "")
+        hhmm = raw_time[:5] if len(raw_time) >= 5 else raw_time
+        kind = _local_etm_kind(row).upper()
+        gap = _local_normalize_gap(str(row.get("etm_delta_raw") or "")) or "—"
+        muted = value is not None and abs(value) < .05
+        css = "rc-etm-chip rc-etm-zero" if muted else "rc-etm-chip"
+        cards.append(
+            f'<div class="{css}"><span class="rc-etm-time">{html.escape(hhmm)}</span>'
+            f'<span class="rc-etm-kind">{html.escape(kind)}</span>'
+            f'<span class="rc-etm-gap">{html.escape(gap)}</span></div>'
+        )
+    st.markdown(
+        '<div class="rc-etm-grid">' + "".join(cards) + "</div>",
+        unsafe_allow_html=True,
+    )
+
 
 def _local_default_date(values: list[str], kind: str) -> date | None:
     if not values:
@@ -2172,6 +2282,9 @@ def _local_timeline_frame(rows: list[dict]) -> pd.DataFrame:
     frame["Typ"] = frame["event_type"].map(LOCAL_EVENT_LABELS).fillna(frame["event_type"])
     frame["Czas"] = frame["air_time_raw"].fillna("")
     frame["Gap"] = frame.get("gap_raw", "").fillna("") if "gap_raw" in frame.columns else ""
+    if "etm_delta_raw" in frame.columns:
+        etm_mask = frame["event_type"].fillna("").eq("etm")
+        frame.loc[etm_mask, "Gap"] = frame.loc[etm_mask, "etm_delta_raw"].fillna("").map(_local_normalize_gap)
     frame["Kategoria"] = frame["category"].fillna("")
     frame["Wykonawca"] = frame["artist"].fillna("")
     frame["Element / tytuł"] = frame["title"].fillna("")
@@ -2231,7 +2344,7 @@ def _render_local_timeline_grid(frame: pd.DataFrame, columns: list[str], *, key:
         if col == "Czas":
             gb.configure_column(col, width=105, minWidth=96, pinned="left")
         elif col == "Gap":
-            gb.configure_column(col, width=82, minWidth=74, headerTooltip="Nadczas wynikający z GSelector 60+ minutes/hour, np. 08:62:47 = +02:47.")
+            gb.configure_column(col, width=82, minWidth=74, headerTooltip="ETM: bezpośredni gap +/- z GSelectora. Pozostałe elementy: nadczas 60+ minutes/hour, np. 08:62:47 = +02:47.")
         elif col == "Typ":
             gb.configure_column(col, width=105, minWidth=92, pinned="left")
         elif col in {"Runtime", "Mood", "Opener", "Energy", "Texture Close", "Texture Open", "Edit Code", "Sound Code", "Vocal", "ETM Δ", "⚠"}:
@@ -2264,7 +2377,7 @@ def _render_local_timeline(kind: str, key_prefix: str) -> None:
         return
 
     default_date = _local_default_date(dates, kind) or date.fromisoformat(dates[-1])
-    dcol, hcol, tcol, ccol = st.columns([.78, .78, 1.9, .70], vertical_alignment="bottom")
+    dcol, hcol, pcol, ccol = st.columns([.82, .82, 1.35, .72], vertical_alignment="bottom")
     selected_date = dcol.selectbox(
         "Dzień",
         dates,
@@ -2279,13 +2392,12 @@ def _render_local_timeline(kind: str, key_prefix: str) -> None:
         format_func=lambda value: str(value) if isinstance(value, str) else f"{int(value):02d}:00–{int(value):02d}:59+",
         key=f"{key_prefix}_hour",
     )
-    type_options = list(LOCAL_EVENT_LABELS)
-    selected_types = tcol.multiselect(
-        "Typy elementów",
-        type_options,
-        default=type_options,
-        format_func=lambda value: LOCAL_EVENT_LABELS.get(value, value),
-        key=f"{key_prefix}_types",
+    preset_options = [*LOCAL_ELEMENT_FILTER_PRESETS, "Własny"]
+    element_preset = pcol.selectbox(
+        "Preset elementów",
+        preset_options,
+        index=0,
+        key=f"{key_prefix}_element_preset",
     )
     with ccol:
         with st.popover("Kolumny", use_container_width=True):
@@ -2300,12 +2412,53 @@ def _render_local_timeline(kind: str, key_prefix: str) -> None:
             if not selected_columns:
                 st.caption("Gdy nic nie zaznaczysz, tabela wróci do zestawu domyślnego.")
 
+    if element_preset == "Własny":
+        selected_types = st.multiselect(
+            "Typy elementów",
+            list(LOCAL_EVENT_LABELS),
+            default=list(LOCAL_EVENT_LABELS),
+            format_func=lambda value: LOCAL_EVENT_LABELS.get(value, value),
+            key=f"{key_prefix}_types_custom",
+        )
+    else:
+        selected_types = list(LOCAL_ELEMENT_FILTER_PRESETS[element_preset])
+
+    etm_kinds = set(LOCAL_ETM_KINDS)
+    if "etm" in selected_types:
+        ecol, xcol = st.columns([1.35, 2.7], vertical_alignment="bottom")
+        etm_preset_options = [*LOCAL_ETM_PRESETS, "Własna kombinacja"]
+        etm_preset = ecol.selectbox(
+            "ETM",
+            etm_preset_options,
+            index=0,
+            key=f"{key_prefix}_etm_preset",
+            help="Filtruje ETM-y po nazwie GSelectora: Hard / Soft / Reset / Hit.",
+        )
+        if etm_preset == "Własna kombinacja":
+            etm_kinds = set(xcol.multiselect(
+                "Kombinacja ETM",
+                LOCAL_ETM_KINDS,
+                default=LOCAL_ETM_KINDS,
+                key=f"{key_prefix}_etm_custom",
+            ))
+        else:
+            etm_kinds = set(LOCAL_ETM_PRESETS[etm_preset])
+
+    # Hard/Soft are the quickest view of the actual hourly clock balance. Keep
+    # the summary tied to the selected day, not to the current hour/type filter.
+    full_day_rows = local_events_for_day(kind, selected_date)
+    if kind == "schedule":
+        _render_local_etm_gap_summary(full_day_rows)
+
     rows = local_events_for_day(
         kind,
         selected_date,
         hour=None if selected_hour == "Cały dzień" else int(selected_hour),
         event_types=selected_types,
     )
+    if "etm" in selected_types:
+        rows = _local_filter_etm_rows(rows, etm_kinds)
+
     day = local_day_summary(kind, selected_date)
     render_compact_metrics([
         ("Elementy", day["events"]),
@@ -2328,12 +2481,13 @@ def _render_local_timeline(kind: str, key_prefix: str) -> None:
     _render_local_timeline_grid(
         frame,
         selected_columns or LOCAL_TIMELINE_DEFAULT_COLUMNS,
-        key=f"{key_prefix}_grid_{selected_date}_{selected_hour}",
+        key=f"{key_prefix}_grid_{selected_date}_{selected_hour}_{element_preset}_{'-'.join(sorted(etm_kinds))}",
     )
     st.caption(
-        "Kolory jak w logu playout: Song = biały, reklamy/spoty = czerwone, pozostałe elementy = żółte na czarnym tle. "
-        "Gap pokazuje nadczas z trybu 60+ minutes/hour. ⚠ zostaje tylko dla naprawdę uszkodzonego zapisu czasu."
+        "Gap przy ETM pokazuje bezpośrednio wartość +/- z markera GSelectora; przy pozostałych elementach pokazuje nadczas 60+ minutes/hour. "
+        "Presety elementów i filtr ETM pozwalają szybko wybrać Hard, Soft, Reset, Hit albo dowolną kombinację."
     )
+
 
 def _local_log_row_html(row: dict, status: str = "OK") -> str:
     event_type = str(row.get("event_type") or "other")

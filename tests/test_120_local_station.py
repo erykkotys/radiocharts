@@ -210,3 +210,22 @@ def test_delete_import_restores_previous_snapshot_and_allows_reimport(tmp_path, 
     assert again["duplicate"] is False
     assert again["date_from"] == "2026-10-01"
     assert first["import_id"] != again["import_id"]
+
+
+def test_v124_etm_gap_presets_and_daily_summary_contract(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "etm124.db")
+    text = "\n".join([
+        '"06:00:00.0"\t"ETM_00:00_Hard"\t"+00:00.0"\t"671"',
+        '"06:30:00.0"\t"ETM_30:00_Hard"\t"+01:12.0"\t"668"',
+        '"07:00:00.0"\t"ETM_00:00_Soft"\t"-00:18.0"\t"158"',
+        '"07:15:00.0"\t"ETM_15:00_Reset"\t"+00:05.0"\t"667"',
+        '"07:59:00.0"\t"ETM_59:00_Hit"\t"-00:03.0"\t"2"',
+    ])
+    import_gselector_export(text, filename="30.09_log.txt", kind="schedule", start_date="2026-09-30")
+    rows = events_for_day("schedule", "2026-09-30")
+    assert [r["etm_delta_raw"] for r in rows] == ["+00:00.0", "+01:12.0", "-00:18.0", "+00:05.0", "-00:03.0"]
+    assert '"Hard + Soft": {"Hard", "Soft"}' in APP
+    assert '"Reset + Hit": {"Reset", "Hit"}' in APP
+    assert '"Programowe (bez ETM/komend)"' in APP
+    assert 'ETM Hard / Soft — gapy całego dnia' in APP
+    assert 'frame.loc[etm_mask, "Gap"]' in APP

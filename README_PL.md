@@ -1,3 +1,10 @@
+## 1.2.4 — EMAUS: ETM gaps i presety filtrów
+
+- Scheduled pokazuje zwięzłe podsumowanie całego dnia dla wszystkich ETM Hard/Soft: czas, typ i gap +/- z GSelectora.
+- Kolumna **Gap** pokazuje teraz wartość +/- na każdym ETM; dla zwykłych elementów nadal pokazuje nadczas 60+ minutes/hour.
+- Dodane presety elementów oraz osobny filtr ETM: Hard, Soft, Reset, Hit, Hard+Soft, Reset+Hit lub własna kombinacja.
+- Android 1.2.4 / `versionCode = 28` (bez osobnego ekranu EMAUS w tej iteracji).
+
 ## 1.2.3 — EMAUS: porównanie godzinowe Scheduled vs Played
 
 - Porównanie działa osobno dla każdego bloku godzinnego 00–23; ten sam utwór z innej godziny nie może zostać błędnie sparowany.
