@@ -2351,6 +2351,76 @@ def _local_normalize_gap(raw: str) -> str:
     return value
 
 
+def _local_gap_ms_to_raw(value: object) -> str:
+    try:
+        gap_seconds = float(value) / 1000.0
+    except (TypeError, ValueError):
+        return ""
+    sign = "+" if gap_seconds >= 0 else "-"
+    value_abs = abs(gap_seconds)
+    minutes = int(value_abs // 60)
+    seconds = value_abs - minutes * 60
+    return f"{sign}{minutes:02d}:{seconds:04.1f}".rstrip("0").rstrip(".")
+
+
+def _local_apply_ignore_reset_gaps(rows: list[dict]) -> list[dict]:
+    """Return a display copy where RESET does not zero the ETM gap.
+
+    Native Zetta gap restarts at every RESET even though RESET does not force
+    playout to the nominal marker time.  Accumulate those RESET deltas until the
+    next Hard/Soft anchor.  Import-time precomputed values are preferred because
+    they can also include the previous day's 23:00 block for the 00:00 marker;
+    the in-memory calculation keeps the switch useful for snapshots imported by
+    older RadioCharts versions.
+    """
+    out: list[dict] = []
+    carry_ms = 0.0
+    last_reset_ms: float | None = None
+    reset_count = 0
+    for original in rows:
+        row = dict(original)
+        out.append(row)
+        if str(row.get("source_system") or "") != "zetta2go" or str(row.get("event_type") or "") != "etm":
+            continue
+        kind = _local_etm_kind(row)
+        gap = row.get("zetta_gap_ms")
+        try:
+            gap_ms = float(gap) if gap is not None else None
+        except (TypeError, ValueError):
+            gap_ms = None
+
+        if kind == "Reset":
+            if gap_ms is not None:
+                carry_ms += gap_ms
+                last_reset_ms = gap_ms
+                reset_count += 1
+            continue
+        if kind not in {"Hard", "Soft"}:
+            continue
+
+        precomputed = row.get("zetta_gap_ignore_resets_ms")
+        try:
+            effective_ms = float(precomputed) if precomputed is not None else None
+        except (TypeError, ValueError):
+            effective_ms = None
+        if effective_ms is None and gap_ms is not None:
+            correction = carry_ms
+            if str(row.get("zetta_gap_source") or "") == "previous_hour_reset" and last_reset_ms is not None:
+                correction -= last_reset_ms
+            effective_ms = gap_ms + correction
+            row["zetta_gap_ignore_resets_carry_ms"] = correction
+            row["zetta_gap_ignore_resets_reset_count"] = reset_count
+        if effective_ms is not None:
+            row["etm_delta_raw"] = _local_gap_ms_to_raw(effective_ms)
+            row["zetta_gap_display_mode"] = "ignore_resets"
+
+        # Both Hard and Soft are treated as exact anchors in this view.
+        carry_ms = 0.0
+        last_reset_ms = None
+        reset_count = 0
+    return out
+
+
 def _local_filter_etm_rows(rows: list[dict], kinds: set[str]) -> list[dict]:
     if not kinds:
         return [r for r in rows if str(r.get("event_type") or "") != "etm"]
@@ -2360,7 +2430,7 @@ def _local_filter_etm_rows(rows: list[dict], kinds: set[str]) -> list[dict]:
     ]
 
 
-def _render_local_etm_gap_summary(rows: list[dict]) -> None:
+def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = False) -> None:
     markers = [
         row for row in rows
         if str(row.get("event_type") or "") == "etm" and _local_etm_kind(row) in {"Hard", "Soft"}
@@ -2417,10 +2487,22 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
     max_early = fmt_seconds(min(negatives)) if negatives else "—"
     if direct_zetta:
         st.markdown("#### ETM Hard / Soft — gapy Zetta")
-        st.caption(
-            f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
-            "Wartości pochodzą bezpośrednio z Zetta2GO/GetLog."
-        )
+        if ignore_resets:
+            reset_markers = sum(int(row.get("zetta_gap_ignore_resets_reset_count") or 0) for row, _value in parsed)
+            st.caption(
+                f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
+                f"Ignoruj resety: ON · doliczono {reset_markers} RESET-ów. RESET nie zeruje odchyłki — jego gap jest "
+                "przenoszony do następnego HARD/SOFT. HARD i SOFT są traktowane jako dokładne kotwice czasu."
+            )
+        else:
+            carried_reset = sum(1 for row, _value in parsed if str(row.get("zetta_gap_source") or "") == "previous_hour_reset")
+            carried_tail = sum(1 for row, _value in parsed if str(row.get("zetta_gap_source") or "") == "previous_hour_tail")
+            st.caption(
+                f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
+                "Gapy śródgodzinne pochodzą bezpośrednio z Zetta2GO/GetLog. Przy pełnej godzinie Zetta2GO zeruje TOH, "
+                f"więc RadioCharts przenosi końcowy RESET poprzedniej godziny ({carried_reset}) albo, gdy go nie ma, "
+                f"wylicza ogon z AirTime + DurationMilliseconds po ostatnim Hard/Soft ({carried_tail})."
+            )
     else:
         st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
         st.caption(
@@ -2621,8 +2703,9 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         selected_types = list(LOCAL_ELEMENT_FILTER_PRESETS[element_preset])
 
     etm_kinds = set(LOCAL_ETM_KINDS)
+    ignore_resets = False
     if "etm" in selected_types:
-        ecol, xcol = st.columns([1.35, 2.7], vertical_alignment="bottom")
+        ecol, xcol, rcol = st.columns([1.25, 2.15, 1.05], vertical_alignment="bottom")
         etm_preset_options = [*LOCAL_ETM_PRESETS, "Własna kombinacja"]
         etm_preset = ecol.selectbox(
             "ETM",
@@ -2640,10 +2723,25 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
             ))
         else:
             etm_kinds = set(LOCAL_ETM_PRESETS[etm_preset])
+            xcol.caption(" ")
+        if kind == "schedule":
+            ignore_resets = rcol.toggle(
+                "Ignoruj resety",
+                value=False,
+                key=f"{key_prefix}_ignore_resets",
+                help=(
+                    "RESET nie wymusza startu o swojej godzinie. W tym trybie jego gap jest kumulowany do kolejnego "
+                    "HARD/SOFT; oba traktujemy jako dokładne kotwice czasu."
+                ),
+            )
 
     # One cached SQLite read per selected day. Hour/type filters and summary are
     # computed in memory instead of reading/decoding the same day 2–3 times.
     full_day_rows = cached_local_day_events(revision, kind, selected_date)
+    if kind == "schedule" and ignore_resets:
+        # Recalculate on the complete day before applying the hour filter so
+        # RESET carry can cross hourly GetLog windows.
+        full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)
     hour_rows = [
         row for row in full_day_rows
         if selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour)
@@ -2652,7 +2750,7 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         # ETM cards must follow the selected hour. Previously the hour selector
         # filtered only the table while the ETM summary still showed the whole
         # day, which made e.g. 01:00 look like it contained the 00:00 markers.
-        _render_local_etm_gap_summary(hour_rows)
+        _render_local_etm_gap_summary(hour_rows, ignore_resets=ignore_resets)
 
     rows = [
         row for row in hour_rows
@@ -2686,7 +2784,7 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
     _render_local_timeline_grid(
         frame,
         selected_columns or LOCAL_TIMELINE_DEFAULT_COLUMNS,
-        key=f"{key_prefix}_grid_{selected_date}_{selected_hour}_{element_preset}_{'-'.join(sorted(etm_kinds))}",
+        key=f"{key_prefix}_grid_{selected_date}_{selected_hour}_{element_preset}_{'-'.join(sorted(etm_kinds))}_{int(ignore_resets)}",
     )
     if rows and all(str(r.get("source_system") or "") == "zetta2go" for r in rows):
         st.caption(

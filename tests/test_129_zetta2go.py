@@ -182,6 +182,40 @@ def test_zetta_full_day_merged_hours_reset_toh_grouping():
     assert by_title["Normal 01"]["schedule_hour"] == 1
 
 
+
+def test_zetta_full_hour_gap_carries_previous_reset_and_preserves_native_nonzero():
+    previous = _payload(
+        _toh_row(at="2026-10-03T23:00:00.0000000", uid="toh-prev"),
+        _etm_row(seq=90, at="2026-10-03T23:59:59.0000000", uid="reset-prev", etm_type="Reset", gap=14000),
+    )
+    payload = _payload(
+        _toh_row(at="2026-10-04T00:00:00.0000000", uid="toh-00"),
+        _etm_row(seq=1, at="2026-10-04T00:00:00.0000000", uid="soft-00", etm_type="Soft", gap=0),
+        _toh_row(at="2026-10-04T05:00:00.0000000", uid="toh-05"),
+        _etm_row(seq=2, at="2026-10-04T05:59:59.0000000", uid="reset-0559", etm_type="Reset", gap=-10000),
+        _toh_row(at="2026-10-04T06:00:00.0000000", uid="toh-06"),
+        _etm_row(seq=3, at="2026-10-04T06:00:00.0000000", uid="hard-06", etm_type="Hard", gap=0),
+        _toh_row(at="2026-10-04T07:00:00.0000000", uid="toh-07"),
+        _etm_row(seq=4, at="2026-10-04T07:00:00.0000000", uid="hard-07", etm_type="Hard", gap=4200),
+        _etm_row(seq=5, at="2026-10-04T07:30:00.0000000", uid="hard-0730", etm_type="Hard", gap=0),
+        _asset_row(seq=6, at="2026-10-04T07:58:00.0000000", uid="tail-07", asset_id="tail-a", title="Tail", runtime_ms=134000),
+        _toh_row(at="2026-10-04T08:00:00.0000000", uid="toh-08"),
+        _etm_row(seq=7, at="2026-10-04T08:00:00.0000000", uid="hard-08", etm_type="Hard", gap=0),
+    )
+    payload["radiocharts_previous_hour_rows"] = previous["rows"]
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
+    by_id = {r["external_id"]: r for r in rows}
+    assert by_id["soft-00"]["etm_delta_raw"] == "+00:13"
+    assert by_id["soft-00"]["payload"]["zetta_gap_source"] == "previous_hour_reset"
+    assert by_id["hard-06"]["etm_delta_raw"] == "-00:11"
+    assert by_id["hard-06"]["payload"]["zetta_gap_source"] == "previous_hour_reset"
+    # If Zetta ever supplies a real full-hour gap itself, do not replace it.
+    assert by_id["hard-07"]["etm_delta_raw"] == "+00:04.2"
+    assert "zetta_gap_source" not in by_id["hard-07"]["payload"]
+    assert by_id["hard-08"]["etm_delta_raw"] == "+00:14"
+    assert by_id["hard-08"]["payload"]["zetta_gap_source"] == "previous_hour_tail"
+
+
 def test_zetta_client_get_log_fetches_24_hour_windows(monkeypatch):
     from datetime import date as dt_date
     from radiocharts.zetta2go import Zetta2GoClient, Zetta2GoSettings
@@ -197,6 +231,12 @@ def test_zetta_client_get_log_fetches_24_hour_windows(monkeypatch):
     def fake_range(start, end):
         calls.append((start, end))
         hour = start.hour
+        day = start.date().isoformat()
+        if day == "2026-10-03":
+            return _payload(
+                _toh_row(at="2026-10-03T23:00:00.0000000", uid="prev-toh"),
+                _etm_row(seq=1, at="2026-10-03T23:59:59.0000000", uid="prev-reset", etm_type="Reset", gap=5000),
+            )
         return _payload(
             _toh_row(at=f"2026-10-04T{hour:02d}:00:00.0000000", uid=f"toh-{hour:02d}"),
             _asset_row(
@@ -207,11 +247,73 @@ def test_zetta_client_get_log_fetches_24_hour_windows(monkeypatch):
 
     monkeypatch.setattr(client, "get_log_range", fake_range)
     payload = client.get_log(dt_date(2026, 10, 4))
-    assert len(calls) == 24
-    assert calls[0][0].hour == 0 and calls[0][1].hour == 0
+    assert len(calls) == 25
+    assert calls[0][0].date().isoformat() == "2026-10-03" and calls[0][0].hour == 23
+    assert calls[1][0].hour == 0 and calls[1][1].hour == 0
     assert calls[-1][0].hour == 23 and calls[-1][1].hour == 23
     assert payload["records"] == 48
+    assert len(payload["radiocharts_previous_hour_rows"]) == 2
     parsed = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     assert len(parsed) == 24
     assert {r["schedule_hour"] for r in parsed} == set(range(24))
     assert next(r for r in parsed if r["title"] == "Hour 01")["air_time_raw"] == "01:05:00.0"
+
+
+def test_zetta_ignore_resets_accumulates_until_next_hard_soft_anchor():
+    payload = _payload(
+        _toh_row(at="2026-10-04T08:00:00.0000000", uid="toh-08"),
+        _etm_row(seq=1, at="2026-10-04T08:00:00.0000000", uid="hard-0800", etm_type="Hard", gap=0),
+        _etm_row(seq=2, at="2026-10-04T08:15:00.0000000", uid="reset-0815", etm_type="Reset", gap=34000),
+        _etm_row(seq=3, at="2026-10-04T08:25:00.0000000", uid="reset-0825", etm_type="Reset", gap=-10000),
+        _etm_row(seq=4, at="2026-10-04T08:30:00.0000000", uid="hard-0830", etm_type="Hard", gap=20000),
+        _etm_row(seq=5, at="2026-10-04T08:45:00.0000000", uid="reset-0845", etm_type="Reset", gap=5000),
+        _etm_row(seq=6, at="2026-10-04T08:59:59.0000000", uid="reset-0859", etm_type="Reset", gap=10000),
+        _toh_row(at="2026-10-04T09:00:00.0000000", uid="toh-09"),
+        _etm_row(seq=7, at="2026-10-04T09:00:00.0000000", uid="hard-0900", etm_type="Hard", gap=0),
+        _etm_row(seq=8, at="2026-10-04T09:30:00.0000000", uid="soft-0930", etm_type="Soft", gap=-3000),
+    )
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
+    by_id = {r["external_id"]: r for r in rows}
+
+    # 08:15 +34 and 08:25 -10 do not force playout. The next HARD therefore
+    # sees native +20 plus both RESET deltas = +44 seconds.
+    assert by_id["hard-0830"]["payload"]["zetta_gap_ignore_resets_ms"] == 44000
+    assert by_id["hard-0830"]["payload"]["zetta_gap_ignore_resets_reset_count"] == 2
+
+    # Native 09:00 is reconstructed from the final 08:59:59 RESET: +10s at
+    # 59:59 becomes +9s at the exact boundary. In ignore-reset mode that final
+    # RESET is already in the +9, so only the earlier +5s RESET is added.
+    assert by_id["hard-0900"]["payload"]["zetta_gap_ms"] == 9000
+    assert by_id["hard-0900"]["payload"]["zetta_gap_source"] == "previous_hour_reset"
+    assert by_id["hard-0900"]["payload"]["zetta_gap_ignore_resets_ms"] == 14000
+    assert by_id["hard-0900"]["payload"]["zetta_gap_ignore_resets_reset_count"] == 2
+
+    # HARD resets the alternative carry; with no RESET afterwards SOFT keeps
+    # its native value and then acts as the next exact anchor too.
+    assert by_id["soft-0930"]["payload"]["zetta_gap_ignore_resets_ms"] == -3000
+
+
+def test_zetta_ignore_resets_carries_previous_day_resets_into_midnight():
+    previous = _payload(
+        _toh_row(at="2026-10-03T23:00:00.0000000", uid="toh-prev"),
+        _etm_row(seq=1, at="2026-10-03T23:30:00.0000000", uid="hard-prev", etm_type="Hard", gap=0),
+        _etm_row(seq=2, at="2026-10-03T23:45:00.0000000", uid="reset-prev-a", etm_type="Reset", gap=20000),
+        _etm_row(seq=3, at="2026-10-03T23:59:59.0000000", uid="reset-prev-b", etm_type="Reset", gap=10000),
+    )
+    payload = _payload(
+        _toh_row(at="2026-10-04T00:00:00.0000000", uid="toh-00"),
+        _etm_row(seq=1, at="2026-10-04T00:00:00.0000000", uid="soft-00", etm_type="Soft", gap=0),
+    )
+    payload["radiocharts_previous_hour_rows"] = previous["rows"]
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
+    marker = next(r for r in rows if r["external_id"] == "soft-00")
+    assert marker["payload"]["zetta_gap_ms"] == 9000
+    assert marker["payload"]["zetta_gap_ignore_resets_ms"] == 29000
+    assert marker["payload"]["zetta_gap_ignore_resets_reset_count"] == 2
+
+
+def test_1213_ui_has_ignore_resets_switch_and_recalculates_before_hour_filter():
+    app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
+    assert '"Ignoruj resety"' in app
+    assert 'full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)' in app
+    assert 'HARD i SOFT są traktowane jako dokładne kotwice czasu' in app
