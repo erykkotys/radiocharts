@@ -178,16 +178,25 @@ def test_compare_hour_ignores_seconds_but_detects_order_and_keeps_repeats_separa
     assert six["rows"][0]["status"] == "OK"
 
 
-def test_compare_hour_marks_runtime_cut_but_not_small_runtime_drift(tmp_path, monkeypatch):
+def test_compare_hour_ignores_crossfade_runtime_drift_but_marks_large_cut(tmp_path, monkeypatch):
     _use_db(monkeypatch, tmp_path / "fade.db")
-    planned = _song("15:00:00.0", "Artist", "Long", "ID-L").replace('"03:00.0"\t"Male"', '"04:00.0"\t"Male"')
-    played = _song("15:02:00.0", "Artist", "Long", "ID-L").replace('"03:00.0"\t"Male"', '"03:50.0"\t"Male"')
+    planned = "\n".join([
+        _song("15:00:00.0", "Artist", "Crossfade", "ID-S").replace('"03:00.0"\t"Male"', '"04:00.0"\t"Male"'),
+        _song("15:05:00.0", "Artist", "Big Cut", "ID-L").replace('"03:00.0"\t"Male"', '"04:00.0"\t"Male"'),
+    ])
+    played = "\n".join([
+        _song("15:00:03.0", "Artist", "Crossfade", "ID-S").replace('"03:00.0"\t"Male"', '"03:50.0"\t"Male"'),
+        _song("15:05:02.0", "Artist", "Big Cut", "ID-L").replace('"03:00.0"\t"Male"', '"03:20.0"\t"Male"'),
+    ])
     import_gselector_export(planned, filename="30.09_schedule.txt", kind="schedule", start_date="2026-09-30")
     import_gselector_export(played, filename="30.09_played.txt", kind="played", start_date="2026-09-30")
     result = compare_hour("2026-09-30", 15)
+    by_title = {row["title"]: row for row in result["rows"]}
     assert result["faded"] == 1
-    assert result["rows"][0]["status"] == "Ścięty"
-    assert result["rows"][0]["runtime_cut"] == "-0:10"
+    assert by_title["Crossfade"]["status"] == "OK"
+    assert by_title["Crossfade"]["runtime_cut"] == ""
+    assert by_title["Big Cut"]["status"] == "Ścięty"
+    assert by_title["Big Cut"]["runtime_cut"] == "-0:40"
 
 
 def test_delete_import_restores_previous_snapshot_and_allows_reimport(tmp_path, monkeypatch):

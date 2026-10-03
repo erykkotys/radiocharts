@@ -2379,110 +2379,65 @@ def _local_row_clock_seconds(row: dict) -> float | None:
 def _local_apply_ignore_reset_gaps(rows: list[dict]) -> list[dict]:
     """Return a display copy where RESET does not zero the ETM gap.
 
-    RESET carry is derived from the short timeline segment that ends at the
-    RESET (AirTime + effective RuntimeMilliseconds), not by blindly summing
-    Zetta's raw RESET ``Asset.gap`` values.  The latter can balloon on future
-    log snapshots even when the visible schedule is only seconds over/under.
-
-    Hard/Soft keep Zetta's own gap as the base value; the reconstructed RESET
-    carry is added on top.  This keeps the alternative view anchored in Zetta's
-    calculation while making RESET truly informational.
+    Zetta's own RESET gap is the authoritative delta.  RESET changes the gap
+    calculation baseline but does not force playout to the marker clock, so the
+    deltas are accumulated until the next Hard/Soft anchor.  If a RESET has no
+    gap in GetLog, it is ignored rather than reconstructed from row airtimes;
+    that fallback could produce false +30/+50 minute values on backtimed logs.
     """
     out: list[dict] = []
     carry_ms = 0.0
     last_reset_ms: float | None = None
     reset_count = 0
-    segment_start: float | None = None
-    segment_end: float | None = None
-    segment_has_playable = False
+    missing_reset_count = 0
 
     for original in rows:
         row = dict(original)
         out.append(row)
         if str(row.get("source_system") or "") != "zetta2go":
             continue
-
-        clock = _local_row_clock_seconds(row)
         if str(row.get("event_type") or "") != "etm":
-            if bool(row.get("zetta_skip")) or clock is None:
-                continue
-            try:
-                runtime = float(row.get("runtime_seconds") or 0.0)
-            except (TypeError, ValueError):
-                runtime = 0.0
-            if runtime <= 0:
-                continue
-            if segment_start is None:
-                segment_start = clock
-            end = clock + runtime
-            if segment_end is None or end > segment_end:
-                segment_end = end
-            segment_has_playable = True
             continue
 
         kind = _local_etm_kind(row)
         if kind == "Reset":
-            gap = row.get("zetta_reset_local_gap_ms")
             try:
-                gap_ms = float(gap) if gap is not None else None
+                gap_ms = float(row.get("zetta_gap_ms")) if row.get("zetta_gap_ms") is not None else None
             except (TypeError, ValueError):
                 gap_ms = None
-
-            if gap_ms is None and clock is not None and segment_has_playable:
-                baseline = segment_start if segment_start is not None else clock
-                effective_end = segment_end if segment_end is not None else baseline
-                gap_ms = (effective_end - clock) * 1000.0
-
             if gap_ms is None:
-                # Legacy/fallback snapshots without enough timeline metadata.
-                gap = row.get("zetta_gap_ms")
-                try:
-                    gap_ms = float(gap) if gap is not None else None
-                except (TypeError, ValueError):
-                    gap_ms = None
-
-            if gap_ms is not None:
+                missing_reset_count += 1
+            else:
                 carry_ms += gap_ms
                 last_reset_ms = gap_ms
                 reset_count += 1
-                row["zetta_reset_local_gap_ms"] = gap_ms
-            if clock is not None:
-                segment_start = clock
-                segment_end = clock
-            segment_has_playable = False
             continue
 
         if kind not in {"Hard", "Soft"}:
-            # HIT does not reset the alternative timeline.
+            # HIT remains informational and does not reset the alternative view.
             continue
 
-        gap = row.get("zetta_gap_ms")
         try:
-            base_ms = float(gap) if gap is not None else None
+            base_ms = float(row.get("zetta_gap_ms")) if row.get("zetta_gap_ms") is not None else None
         except (TypeError, ValueError):
             base_ms = None
 
         if base_ms is not None:
             correction = carry_ms
-            # 1.2.12's HH:00 restoration can already contain the final RESET's
-            # local delta; avoid counting precisely that last RESET twice.
             if str(row.get("zetta_gap_source") or "") == "previous_hour_reset" and last_reset_ms is not None:
                 correction -= last_reset_ms
             effective_ms = base_ms + correction
             row["zetta_gap_ignore_resets_ms"] = effective_ms
             row["zetta_gap_ignore_resets_carry_ms"] = correction
             row["zetta_gap_ignore_resets_reset_count"] = reset_count
+            row["zetta_gap_ignore_resets_missing_reset_count"] = missing_reset_count
             row["etm_delta_raw"] = _local_gap_ms_to_raw(effective_ms)
             row["zetta_gap_display_mode"] = "ignore_resets"
 
-        # Both Hard and Soft are exact anchors in this view.
         carry_ms = 0.0
         last_reset_ms = None
         reset_count = 0
-        if clock is not None:
-            segment_start = clock
-            segment_end = clock
-        segment_has_playable = False
+        missing_reset_count = 0
 
     return out
 
@@ -2554,10 +2509,12 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
         st.markdown("#### ETM Hard / Soft — gapy Zetta")
         if ignore_resets:
             reset_markers = sum(int(row.get("zetta_gap_ignore_resets_reset_count") or 0) for row, _value in parsed)
+            missing_resets = sum(int(row.get("zetta_gap_ignore_resets_missing_reset_count") or 0) for row, _value in parsed)
+            missing_note = f" · bez gapu w GetLog: {missing_resets}" if missing_resets else ""
             st.caption(
                 f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
-                f"Ignoruj resety: ON · doliczono {reset_markers} RESET-ów. Carry RESET-u jest odtwarzany z "
-                "AirTime + RuntimeMilliseconds segmentu, a nie przez sumowanie surowych gapów RESET. HARD i SOFT "
+                f"Ignoruj resety: ON · doliczono {reset_markers} RESET-ów{missing_note}. Carry bierze bezpośrednio "
+                "gap RESET zwrócony przez Zetta2GO; RESET bez gapu nie jest zgadywany z AirTime/runtime. HARD i SOFT "
                 "są traktowane jako dokładne kotwice czasu."
             )
         else:
@@ -2951,7 +2908,15 @@ def _local_compare_rows_html(hour: int, pairs: list[dict]) -> str:
             )
         elif scheduled is not None and played is not None:
             left = _local_log_row_html(scheduled, status)
-            right = _local_log_row_html(played, status)
+            if status == "Oczekuje":
+                right = _local_log_row_html(
+                    played,
+                    status,
+                    ghost=True,
+                    ghost_note="jeszcze nie zagrano — oczekuje w Zetta",
+                )
+            else:
+                right = _local_log_row_html(played, status)
         else:
             continue
         body.append(f'<div class="rc-compare-pair">{left}{right}</div>')
@@ -3056,7 +3021,8 @@ def _render_local_comparison(revision: str) -> None:
 
     render_compact_metrics([
         ("Scheduled cutoff", comparison["scheduled"]),
-        ("Live log", comparison["played"]),
+        ("Zagrane / w trakcie", comparison.get("played_actual", comparison["played"])),
+        ("Oczekuje", comparison.get("waiting", 0)),
         ("Różnice", comparison["differences"]),
         ("Niezagrane / dodane", f"{comparison['missed']} / {comparison['added']}"),
     ])
@@ -3100,7 +3066,8 @@ def _render_local_comparison(revision: str) -> None:
         )
         st.caption(
             "Δ startu ma format +M:SS / -M:SS i jest informacją pomocniczą — sama różnica czasu nie tworzy błędu. "
-            "„Ścięty” pojawia się tylko, gdy eksport zawiera sygnał fade albo runtime Played jest >5 s krótszy od Scheduled."
+            "„Ścięty” dla utworu pojawia się dopiero, gdy Played jest co najmniej 10% i minimum 10 s krótszy od Scheduled; "
+            "kilkusekundowe trimy/crossfade'y nie są liczone jako cięcie."
         )
 
     with st.expander("Podsumowanie wszystkich 24 godzin", expanded=False):
@@ -3111,9 +3078,10 @@ def _render_local_comparison(revision: str) -> None:
                 "scheduled": "Scheduled", "played": "Live log", "differences": "Różnice",
                 "missed": "Niezagrane", "added": "Dodane", "reordered": "Kolejność", "faded": "Ścięte",
                 "changed": "Zmienione", "waiting": "Oczekuje", "in_progress": "W trakcie",
+                "played_actual": "Zagrane / w trakcie",
             })
             st.dataframe(
-                hours[[c for c in ["Godzina", "Scheduled", "Live log", "Różnice", "Niezagrane", "Dodane", "Zmienione", "Kolejność", "Ścięte", "Oczekuje", "W trakcie"] if c in hours.columns]],
+                hours[[c for c in ["Godzina", "Scheduled", "Zagrane / w trakcie", "Live log", "Oczekuje", "Różnice", "Niezagrane", "Dodane", "Zmienione", "Kolejność", "Ścięte", "W trakcie"] if c in hours.columns]],
                 hide_index=True, use_container_width=True, height=430,
             )
 

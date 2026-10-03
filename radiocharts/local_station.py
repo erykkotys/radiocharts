@@ -773,16 +773,17 @@ def _raw_zetta_previous_hour_carry(payload: dict[str, Any]) -> tuple[float | Non
                 segment_has_playable = False
                 continue
             if etm_type == "reset":
-                local_gap_ms: float | None = None
-                if segment_has_playable:
+                # Prefer the gap calculated by Zetta itself. Reconstructing it
+                # from displayed AirTime/runtime is only a fallback because the
+                # log can be backtimed around informational RESET markers.
+                try:
+                    local_gap_ms = float(asset.get("gap")) if asset.get("gap") is not None else None
+                except (TypeError, ValueError):
+                    local_gap_ms = None
+                if local_gap_ms is None and segment_has_playable:
                     baseline = segment_start if segment_start is not None else actual
                     effective_end = segment_end if segment_end is not None else baseline
                     local_gap_ms = (effective_end - actual).total_seconds() * 1000.0
-                if local_gap_ms is None:
-                    try:
-                        local_gap_ms = float(asset.get("gap")) if asset.get("gap") is not None else None
-                    except (TypeError, ValueError):
-                        local_gap_ms = None
                 if local_gap_ms is not None and 3590.0 <= offset <= 3600.0 and (best_reset is None or offset > best_reset[0]):
                     best_reset = (offset, local_gap_ms)
                 segment_start = actual
@@ -834,9 +835,8 @@ def _apply_zetta_hour_boundary_gap_carry(events: list[dict[str, Any]], payload: 
     effective ``RuntimeMilliseconds`` (next-play timing), falling back to full
     DurationMilliseconds only for malformed/legacy rows.
     """
-    # First derive RESET deltas from the actual Zetta timeline.  Summing the
-    # raw RESET Asset.gap values can explode on future logs (tens of minutes)
-    # even when the visible tail is only seconds long.
+    # Derive a fallback local RESET delta for rare responses where Zetta does
+    # not include Asset.gap. Native Zetta gap remains the preferred source.
     _annotate_zetta_reset_local_gaps(events)
 
     resets_by_hour: dict[int, tuple[float, float]] = {}
@@ -856,9 +856,9 @@ def _apply_zetta_hour_boundary_gap_carry(events: list[dict[str, Any]], payload: 
             if etm_type in {"hard", "soft"} and offset < 3600.0:
                 controls_by_hour[hour] = max(controls_by_hour.get(hour, 0.0), offset)
             if etm_type == "reset" and 3590.0 <= offset <= 3600.0:
-                gap = meta.get("zetta_reset_local_gap_ms")
+                gap = meta.get("zetta_gap_ms")
                 if gap is None:
-                    gap = meta.get("zetta_gap_ms")
+                    gap = meta.get("zetta_reset_local_gap_ms")
                 if gap is None:
                     continue
                 try:
@@ -960,107 +960,66 @@ def _apply_zetta_hour_boundary_gap_carry(events: list[dict[str, Any]], payload: 
 def _raw_zetta_reset_carry(rows: list[dict[str, Any]] | None) -> tuple[float, float | None, int]:
     """Return RESET carry since the last Hard/Soft in raw Zetta grid rows.
 
-    RESET's carry is reconstructed from the short segment that ends at that
-    marker (AirTime + RuntimeMilliseconds).  This avoids summing raw RESET
-    ``Asset.gap`` values that can be misleading on future log snapshots.
+    For the ``Ignoruj resety`` diagnostic the authoritative quantity is the gap
+    attached by Zetta to each RESET marker.  RESET changes Zetta's calculation
+    baseline but does not force playout to that wall-clock time, so consecutive
+    RESET gaps are deltas that must be accumulated until the next Hard/Soft.
+
+    If Zetta did not provide ``Asset.gap`` for a RESET, do not invent a value
+    from the visual timeline: underfilled/backtimed logs can place rows on both
+    sides of a RESET and such reconstruction produced false +30/+50 minute
+    carries.  Missing RESET gaps are therefore safely ignored.
     """
     carry_ms = 0.0
     last_reset_ms: float | None = None
     reset_count = 0
-    segment_start: datetime | None = None
-    segment_end: datetime | None = None
-    segment_has_playable = False
 
     for source in rows or []:
         if not isinstance(source, dict):
             continue
         cell = source.get("cell")
-        if not isinstance(cell, list) or len(cell) < 16:
+        if not isinstance(cell, list) or len(cell) < 8:
             continue
         try:
             entry_type = int(cell[0] or 0)
         except (TypeError, ValueError):
             entry_type = 0
-        actual = _parse_iso_datetime(cell[5])
-        if actual is not None:
-            actual = actual.replace(tzinfo=None)
-
-        if entry_type == 15:
-            asset = cell[7] if isinstance(cell[7], dict) else {}
-            etm_type = str(asset.get("ETMType") or "").strip().casefold()
-            if etm_type in {"hard", "soft"}:
-                carry_ms = 0.0
-                last_reset_ms = None
-                reset_count = 0
-                if actual is not None:
-                    segment_start = actual
-                    segment_end = actual
-                segment_has_playable = False
-                continue
-            if etm_type != "reset":
-                continue
-
-            gap_ms: float | None = None
-            if actual is not None and segment_has_playable:
-                baseline = segment_start if segment_start is not None else actual
-                effective_end = segment_end if segment_end is not None else baseline
-                gap_ms = (effective_end - actual).total_seconds() * 1000.0
-            if gap_ms is None:
-                try:
-                    gap_ms = float(asset.get("gap")) if asset.get("gap") is not None else None
-                except (TypeError, ValueError):
-                    gap_ms = None
-            if gap_ms is not None:
-                carry_ms += gap_ms
-                last_reset_ms = gap_ms
-                reset_count += 1
-            if actual is not None:
-                segment_start = actual
-                segment_end = actual
-            segment_has_playable = False
+        if entry_type != 15:
             continue
-
-        if entry_type != 106 or actual is None:
+        asset = cell[7] if isinstance(cell[7], dict) else {}
+        etm_type = str(asset.get("ETMType") or "").strip().casefold()
+        if etm_type in {"hard", "soft"}:
+            carry_ms = 0.0
+            last_reset_ms = None
+            reset_count = 0
+            continue
+        if etm_type != "reset":
             continue
         try:
-            skipped = bool(cell[11])
-        except Exception:
-            skipped = False
-        if skipped:
-            continue
-        runtime_ms = cell[15] if cell[15] not in (None, "") else (cell[18] if len(cell) > 18 else None)
-        try:
-            runtime = float(runtime_ms) / 1000.0 if runtime_ms not in (None, "") else 0.0
+            gap_ms = float(asset.get("gap")) if asset.get("gap") is not None else None
         except (TypeError, ValueError):
-            runtime = 0.0
-        if runtime <= 0:
+            gap_ms = None
+        if gap_ms is None:
             continue
-        if segment_start is None:
-            segment_start = actual
-        end_time = actual + timedelta(seconds=runtime)
-        if segment_end is None or end_time > segment_end:
-            segment_end = end_time
-        segment_has_playable = True
+        carry_ms += gap_ms
+        last_reset_ms = gap_ms
+        reset_count += 1
 
     return carry_ms, last_reset_ms, reset_count
 
 def _annotate_zetta_ignore_reset_gaps(events: list[dict[str, Any]], payload: dict[str, Any]) -> None:
     """Precompute Hard/Soft gaps for the UI's ``Ignoruj resety`` switch.
 
-    Zetta's native gap is reset at every RESET ETM.  The sequencer itself does
-    not jump to the RESET clock, so the real lateness/earliness remains and must
-    be carried to the next exact-time anchor.  RadioCharts treats both Hard and
-    Soft as exact anchors in this diagnostic view, per the station workflow.
-
-    Hour-boundary Hard/Soft rows are special: 1.2.12 already restores their
-    missing cross-hour gap.  When that restored value came from the *final*
-    RESET, that RESET is already included in the boundary value, so only earlier
-    RESETs are added to avoid double counting it.
+    Carry comes directly from Zetta's RESET ``Asset.gap`` values.  The marker
+    resets Zetta's gap calculation, not the actual playout clock; therefore the
+    RESET deltas are accumulated until the next Hard/Soft anchor.  Missing RESET
+    gaps are ignored instead of being reconstructed from row airtimes.
     """
     previous_rows = payload.get("radiocharts_previous_hour_rows") if isinstance(payload, dict) else None
     carry_ms, last_reset_ms, reset_count = _raw_zetta_reset_carry(
         previous_rows if isinstance(previous_rows, list) else None
     )
+    missing_reset_count = 0
 
     for row in events:
         if row.get("event_type") != "etm":
@@ -1068,14 +1027,13 @@ def _annotate_zetta_ignore_reset_gaps(events: list[dict[str, Any]], payload: dic
         meta = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         etm_type = str(meta.get("etm_type") or "").strip().casefold()
         if etm_type == "reset":
-            gap = meta.get("zetta_reset_local_gap_ms")
-            if gap is None:
-                gap = meta.get("zetta_gap_ms")
             try:
-                gap_ms = float(gap) if gap is not None else None
+                gap_ms = float(meta.get("zetta_gap_ms")) if meta.get("zetta_gap_ms") is not None else None
             except (TypeError, ValueError):
                 gap_ms = None
-            if gap_ms is not None:
+            if gap_ms is None:
+                missing_reset_count += 1
+            else:
                 carry_ms += gap_ms
                 last_reset_ms = gap_ms
                 reset_count += 1
@@ -1091,20 +1049,20 @@ def _annotate_zetta_ignore_reset_gaps(events: list[dict[str, Any]], payload: dic
         if base_ms is not None:
             correction_ms = carry_ms
             source = str(meta.get("zetta_gap_source") or "native")
-            # For a HH:00 value reconstructed from the final ~59:59 RESET,
-            # ``base_ms`` already contains that RESET's own gap (adjusted by
-            # the one-second distance to the exact boundary).
+            # A HH:00 value restored by 1.2.12 from the final ~59:59 RESET
+            # already contains that RESET's own delta; add only earlier RESETs.
             if source == "previous_hour_reset" and last_reset_ms is not None:
                 correction_ms -= last_reset_ms
             meta["zetta_gap_ignore_resets_ms"] = base_ms + correction_ms
             meta["zetta_gap_ignore_resets_carry_ms"] = correction_ms
             meta["zetta_gap_ignore_resets_reset_count"] = reset_count
+            meta["zetta_gap_ignore_resets_missing_reset_count"] = missing_reset_count
             row["payload"] = meta
 
-        # Hard and Soft are the exact-time anchors for this alternative view.
         carry_ms = 0.0
         last_reset_ms = None
         reset_count = 0
+        missing_reset_count = 0
 
 
 def _zetta_snapshot_digest(events: list[dict[str, Any]]) -> str:
@@ -1752,29 +1710,36 @@ def song_stats(
     return out
 
 
-def _identity_key(row: dict[str, Any]) -> tuple[str, ...]:
-    """Stable cross-system identity used inside one hourly reconciliation block.
+def _identity_key(row: dict[str, Any], *, native_zetta_pair: bool = False) -> tuple[str, ...]:
+    """Stable identity used inside one hourly reconciliation block.
 
-    GSelector numeric IDs and Zetta AssetID GUIDs are unrelated namespaces, so
-    text/canonical-song identity must be symmetric across the two sources.
+    Zetta log-event GUIDs are perfect only when *both* comparison sides come
+    from Zetta2GO.  For historical cutoffs imported from GSelector the GUID
+    namespace does not exist on the Scheduled side, so matching must fall back
+    to the symmetric artist/title identity.  The old code chose the GUID for
+    every Zetta row independently, which made a GSelector-vs-Zetta day look like
+    every single item had been deleted and re-added.
     """
     typ = str(row.get("event_type") or "other")
-    # When both sides come from Zetta2GO, external_id is the log-event GUID
-    # (UniversalIdentifier / row id), so it is the strongest possible identity.
-    # GSelector IDs live in a different namespace and keep using text/song identity.
-    if str(row.get("source_system") or "") == "zetta2go":
+    if native_zetta_pair and str(row.get("source_system") or "") == "zetta2go":
         ext = str(row.get("external_id") or "").strip()
         if ext:
             return (typ, "zetta-event", ext.casefold())
+
     if typ == "song":
-        song_id = row.get("song_id")
-        if song_id is not None:
-            return (typ, "song", str(int(song_id)))
-        return (typ, "text", db.normalize(str(row.get("artist") or "")), db.normalize(str(row.get("title") or "")))
+        # Text identity is intentionally used for cross-system reconciliation.
+        # GSelector song IDs and Zetta GUIDs are unrelated namespaces, while the
+        # normalized credit/title pair is shared by both exports.
+        return (
+            typ,
+            "text",
+            db.normalize(str(row.get("artist") or "")),
+            db.normalize(str(row.get("title") or "")),
+        )
     if typ == "etm":
         title = db.normalize(str(row.get("title") or ""))
         # Imported Zetta ETM titles are synthesized to the same MM:SS/type form
-        # as GSelector. External IDs intentionally do not participate.
+        # as GSelector. External IDs intentionally do not participate here.
         return (typ, "text", title)
     title = db.normalize(str(row.get("title") or ""))
     if title:
@@ -1784,13 +1749,17 @@ def _identity_key(row: dict[str, Any]) -> tuple[str, ...]:
     return (typ, "fallback", category, ext)
 
 
-def _occurrence_tokens(rows: list[dict[str, Any]]) -> tuple[list[tuple[Any, ...]], dict[tuple[Any, ...], dict[str, Any]]]:
+def _occurrence_tokens(
+    rows: list[dict[str, Any]],
+    *,
+    native_zetta_pair: bool = False,
+) -> tuple[list[tuple[Any, ...]], dict[tuple[Any, ...], dict[str, Any]]]:
     """Make duplicate-safe tokens: the second play of a song is a separate event."""
     seen: Counter[tuple[str, ...]] = Counter()
     tokens: list[tuple[Any, ...]] = []
     lookup: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
-        key = _identity_key(row)
+        key = _identity_key(row, native_zetta_pair=native_zetta_pair)
         seen[key] += 1
         token: tuple[Any, ...] = (*key, "occ", int(seen[key]))
         tokens.append(token)
@@ -1809,7 +1778,17 @@ def _format_signed_delta(seconds: float | None) -> str:
 
 
 def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool, float | None, str]:
-    """Detect a cut/fade only when the export gives us evidence for it."""
+    """Detect only a *meaningful* early cut of a song.
+
+    A few seconds shorter runtime is normal in radio automation because of
+    trim/segue/crossfade points.  Treat a song as cut only when the played
+    runtime is at least 10% shorter *and* the missing part is at least 10 s.
+    Zetta's FADE/STOPPED status is still useful evidence, but it does not by
+    itself turn a normal crossfade into a comparison error.
+    """
+    if str(scheduled.get("event_type") or "") != "song":
+        return False, None, ""
+
     text_parts = [
         str(played.get("edit_code") or ""),
         str(played.get("sound_code") or ""),
@@ -1826,20 +1805,29 @@ def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool,
 
     sr = scheduled.get("runtime_seconds")
     pr = played.get("runtime_seconds")
-    cut = None
-    if sr is not None and pr is not None:
-        diff = float(sr) - float(pr)
-        if diff > 5.0:
+    cut: float | None = None
+    significant = False
+    try:
+        planned = float(sr) if sr is not None else 0.0
+        actual = float(pr) if pr is not None else 0.0
+    except (TypeError, ValueError):
+        planned = actual = 0.0
+    if planned > 0 and actual >= 0:
+        diff = planned - actual
+        threshold = max(10.0, planned * 0.10)
+        if diff >= threshold:
             cut = diff
+            significant = True
+
+    if not significant:
+        return False, None, ""
     if zetta_fade:
         label = ZETTA_STATUS_NAMES.get(zetta_status, "")
         reason = played.get("zetta_edit_name") or label or "Zetta"
-        return True, cut, f"{reason}"
+        return True, cut, f"{reason} · ucięto {round((cut / planned) * 100)}%"
     if textual_fade:
-        return True, cut, "Faded/ścięty wg danych playout"
-    if cut is not None:
-        return True, cut, f"Ścięty o {_format_signed_delta(-cut).lstrip('-')} (runtime)"
-    return False, None, ""
+        return True, cut, f"Faded/ścięty wg danych playout · ucięto {round((cut / planned) * 100)}%"
+    return True, cut, f"Ścięty o {_format_signed_delta(-cut).lstrip('-')} ({round((cut / planned) * 100)}% runtime)"
 
 
 def _comparison_display_pairs(
@@ -1923,8 +1911,17 @@ def _compare_hour_rows(
 
     scheduled = [row for row in scheduled_all if relevant(row)]
     played = [row for row in played_all if relevant(row)]
-    sched_tokens, sched_lookup = _occurrence_tokens(scheduled)
-    play_tokens, play_lookup = _occurrence_tokens(played)
+
+    # Exact Zetta log-event GUIDs are meaningful only for Zetta-vs-Zetta.
+    # Historical Scheduled data may still come from GSelector, while Played is
+    # already sourced from Zetta2GO; in that mixed case use symmetric text
+    # identity instead of declaring the whole hour deleted+added.
+    native_zetta_pair = bool(scheduled and played) and all(
+        str(row.get("source_system") or "") == "zetta2go"
+        for row in [*scheduled, *played]
+    )
+    sched_tokens, sched_lookup = _occurrence_tokens(scheduled, native_zetta_pair=native_zetta_pair)
+    play_tokens, play_lookup = _occurrence_tokens(played, native_zetta_pair=native_zetta_pair)
     common = set(sched_tokens) & set(play_tokens)
 
     # Added/missing events are removed before ranking, so they do not make all
@@ -2077,11 +2074,21 @@ def _compare_hour_rows(
         schedule_status, played_status,
     )
 
+    if played and all(str(row.get("source_system") or "") == "zetta2go" for row in played):
+        played_actual = sum(
+            1 for row in played
+            if int(row.get("zetta_status_code") or 0) in ZETTA_PLAYED_STATUS_CODES
+        )
+    else:
+        # Manual/GSelector Played imports are historical by definition.
+        played_actual = len(played)
+
     return {
         "service_date": service_date.isoformat() if isinstance(service_date, date) else str(service_date),
         "hour": hour,
         "scheduled": len(scheduled),
         "played": len(played),
+        "played_actual": played_actual,
         "matched": matched,
         "missed": counts.get("Niezagrane", 0),
         "added": counts.get("Dodane", 0),
@@ -2168,6 +2175,7 @@ def compare_day(
         "service_date": service_date.isoformat() if isinstance(service_date, date) else str(service_date),
         "scheduled": sum(int(item["scheduled"]) for item in hourly),
         "played": sum(int(item["played"]) for item in hourly),
+        "played_actual": sum(int(item.get("played_actual") or 0) for item in hourly),
         "matched": sum(int(item["matched"]) for item in hourly),
         "missed": sum(int(item["missed"]) for item in hourly),
         "added": sum(int(item["added"]) for item in hourly),
@@ -2184,6 +2192,7 @@ def compare_day(
                 "hour": int(item["hour"]),
                 "scheduled": int(item["scheduled"]),
                 "played": int(item["played"]),
+                "played_actual": int(item.get("played_actual") or 0),
                 "differences": int(item["differences"]),
                 "missed": int(item["missed"]),
                 "added": int(item["added"]),

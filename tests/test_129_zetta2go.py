@@ -6,6 +6,7 @@ import radiocharts.db as db
 from radiocharts.local_station import (
     compare_hour,
     events_for_day,
+    import_gselector_export,
     import_zetta2go_snapshot,
     parse_zetta2go_log,
 )
@@ -17,6 +18,14 @@ def _use_db(monkeypatch, path):
     monkeypatch.setattr(db, "DB_PATH", path)
     monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
     monkeypatch.setenv("RADIOCHARTS_AUTO_LIBRARY_SEED", "0")
+
+
+def _gselector_song(at: str, artist: str, title: str, ext: str, runtime: str = "03:00.0") -> str:
+    cols = [
+        at, "CF1/FAMILIAR CURRENT", "3", "5", artist, title, "Stretch", "YES", "", "5", "2", "0",
+        at, "", runtime, "Male", ext, "0", "0", "False", at,
+    ]
+    return "\t".join(f'"{value}"' for value in cols)
 
 
 def _asset_row(
@@ -135,6 +144,7 @@ def test_zetta_live_ready_is_waiting_and_asset_replacement_is_intervention(tmp_p
     assert statuses["Waiting"] == "Oczekuje"
     assert result["changed"] == 1
     assert result["waiting"] == 1
+    assert result["played_actual"] == 0
     with db.connect() as con:
         count = con.execute("SELECT COUNT(*) FROM local_station_imports WHERE kind='played'").fetchone()[0]
     assert count == 1
@@ -313,7 +323,7 @@ def test_zetta_ignore_resets_carries_previous_day_resets_into_midnight():
 
 
 
-def test_zetta_ignore_resets_prefers_timeline_runtime_over_bogus_raw_reset_gap():
+def test_zetta_ignore_resets_uses_native_reset_gap_as_authoritative_delta():
     payload = _payload(
         _toh_row(at="2026-10-04T08:00:00.0000000", uid="toh-08-runtime"),
         _etm_row(seq=1, at="2026-10-04T08:00:00.0000000", uid="hard-runtime-0800", etm_type="Hard", gap=0),
@@ -323,21 +333,57 @@ def test_zetta_ignore_resets_prefers_timeline_runtime_over_bogus_raw_reset_gap()
             uid="song-runtime",
             asset_id="asset-runtime",
             title="Runtime segment",
-            runtime_ms=934_000,  # ends at 08:15:34 -> RESET local carry +34s
+            runtime_ms=934_000,
         ),
+        # The visible timeline would suggest +34 s, but Zetta itself reports
+        # +10 min on RESET. Ignore-reset mode must trust the Zetta marker gap,
+        # not invent a replacement from AirTime/runtime.
         _etm_row(seq=3, at="2026-10-04T08:15:00.0000000", uid="reset-runtime", etm_type="Reset", gap=600_000),
         _etm_row(seq=4, at="2026-10-04T08:30:00.0000000", uid="hard-runtime-0830", etm_type="Hard", gap=20_000),
     )
     rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     by_id = {r["external_id"]: r for r in rows}
-    reset = by_id["reset-runtime"]
     hard = by_id["hard-runtime-0830"]
-    assert reset["payload"]["zetta_reset_local_gap_ms"] == 34_000
-    assert hard["payload"]["zetta_gap_ignore_resets_ms"] == 54_000
-    assert hard["payload"]["zetta_gap_ignore_resets_ms"] != 620_000
+    assert hard["payload"]["zetta_gap_ignore_resets_ms"] == 620_000
+
+
+def test_cross_system_gselector_cutoff_matches_zetta_played_by_text(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "mixed-source.db")
+    import_gselector_export(
+        _gselector_song("04:00:00.0", "Artist", "Same Song", "GSEL-123"),
+        filename="03.10_schedule.txt",
+        kind="schedule",
+        start_date="2026-10-03",
+    )
+    live = _payload(
+        _toh_row(at="2026-10-03T04:00:00.0000000", uid="toh-04"),
+        _asset_row(
+            seq=1,
+            at="2026-10-03T04:00:12.0000000",
+            uid="zetta-guid-unrelated-to-gselector",
+            asset_id="asset-z",
+            title="Same Song",
+            artist="Artist",
+            status=3,
+        ),
+    )
+    import_zetta2go_snapshot(live, service_date="2026-10-03", kind="played", replace_live=True)
+    result = compare_hour("2026-10-03", 4)
+    assert result["matched"] == 1
+    assert result["missed"] == 0
+    assert result["added"] == 0
+    assert result["differences"] == 0
+    assert result["rows"][0]["status"] == "OK"
+
+
+def test_future_waiting_rows_have_pending_ui_contract():
+    app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
+    assert "jeszcze nie zagrano — oczekuje w Zetta" in app
+    assert '("Zagrane / w trakcie", comparison.get("played_actual", comparison["played"]))' in app
+
 
 def test_1213_ui_has_ignore_resets_switch_and_recalculates_before_hour_filter():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
     assert '"Ignoruj resety"' in app
     assert 'full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)' in app
-    assert 'AirTime + RuntimeMilliseconds' in app
+    assert 'RESET bez gapu nie jest zgadywany' in app
