@@ -312,8 +312,32 @@ def test_zetta_ignore_resets_carries_previous_day_resets_into_midnight():
     assert marker["payload"]["zetta_gap_ignore_resets_reset_count"] == 2
 
 
+
+def test_zetta_ignore_resets_prefers_timeline_runtime_over_bogus_raw_reset_gap():
+    payload = _payload(
+        _toh_row(at="2026-10-04T08:00:00.0000000", uid="toh-08-runtime"),
+        _etm_row(seq=1, at="2026-10-04T08:00:00.0000000", uid="hard-runtime-0800", etm_type="Hard", gap=0),
+        _asset_row(
+            seq=2,
+            at="2026-10-04T08:00:00.0000000",
+            uid="song-runtime",
+            asset_id="asset-runtime",
+            title="Runtime segment",
+            runtime_ms=934_000,  # ends at 08:15:34 -> RESET local carry +34s
+        ),
+        _etm_row(seq=3, at="2026-10-04T08:15:00.0000000", uid="reset-runtime", etm_type="Reset", gap=600_000),
+        _etm_row(seq=4, at="2026-10-04T08:30:00.0000000", uid="hard-runtime-0830", etm_type="Hard", gap=20_000),
+    )
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
+    by_id = {r["external_id"]: r for r in rows}
+    reset = by_id["reset-runtime"]
+    hard = by_id["hard-runtime-0830"]
+    assert reset["payload"]["zetta_reset_local_gap_ms"] == 34_000
+    assert hard["payload"]["zetta_gap_ignore_resets_ms"] == 54_000
+    assert hard["payload"]["zetta_gap_ignore_resets_ms"] != 620_000
+
 def test_1213_ui_has_ignore_resets_switch_and_recalculates_before_hour_filter():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
     assert '"Ignoruj resety"' in app
     assert 'full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)' in app
-    assert 'HARD i SOFT są traktowane jako dokładne kotwice czasu' in app
+    assert 'AirTime + RuntimeMilliseconds' in app

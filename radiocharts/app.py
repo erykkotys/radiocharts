@@ -2363,63 +2363,128 @@ def _local_gap_ms_to_raw(value: object) -> str:
     return f"{sign}{minutes:02d}:{seconds:04.1f}".rstrip("0").rstrip(".")
 
 
+def _local_row_clock_seconds(row: dict) -> float | None:
+    raw = str(row.get("air_time_raw") or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d+):(\d{1,2}(?:\.\d+)?)", raw)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    second = float(m.group(3))
+    if second >= 60 or minute >= 180:
+        return None
+    return hour * 3600.0 + minute * 60.0 + second
+
+
 def _local_apply_ignore_reset_gaps(rows: list[dict]) -> list[dict]:
     """Return a display copy where RESET does not zero the ETM gap.
 
-    Native Zetta gap restarts at every RESET even though RESET does not force
-    playout to the nominal marker time.  Accumulate those RESET deltas until the
-    next Hard/Soft anchor.  Import-time precomputed values are preferred because
-    they can also include the previous day's 23:00 block for the 00:00 marker;
-    the in-memory calculation keeps the switch useful for snapshots imported by
-    older RadioCharts versions.
+    RESET carry is derived from the short timeline segment that ends at the
+    RESET (AirTime + effective RuntimeMilliseconds), not by blindly summing
+    Zetta's raw RESET ``Asset.gap`` values.  The latter can balloon on future
+    log snapshots even when the visible schedule is only seconds over/under.
+
+    Hard/Soft keep Zetta's own gap as the base value; the reconstructed RESET
+    carry is added on top.  This keeps the alternative view anchored in Zetta's
+    calculation while making RESET truly informational.
     """
     out: list[dict] = []
     carry_ms = 0.0
     last_reset_ms: float | None = None
     reset_count = 0
+    segment_start: float | None = None
+    segment_end: float | None = None
+    segment_has_playable = False
+
     for original in rows:
         row = dict(original)
         out.append(row)
-        if str(row.get("source_system") or "") != "zetta2go" or str(row.get("event_type") or "") != "etm":
+        if str(row.get("source_system") or "") != "zetta2go":
             continue
-        kind = _local_etm_kind(row)
-        gap = row.get("zetta_gap_ms")
-        try:
-            gap_ms = float(gap) if gap is not None else None
-        except (TypeError, ValueError):
-            gap_ms = None
 
+        clock = _local_row_clock_seconds(row)
+        if str(row.get("event_type") or "") != "etm":
+            if bool(row.get("zetta_skip")) or clock is None:
+                continue
+            try:
+                runtime = float(row.get("runtime_seconds") or 0.0)
+            except (TypeError, ValueError):
+                runtime = 0.0
+            if runtime <= 0:
+                continue
+            if segment_start is None:
+                segment_start = clock
+            end = clock + runtime
+            if segment_end is None or end > segment_end:
+                segment_end = end
+            segment_has_playable = True
+            continue
+
+        kind = _local_etm_kind(row)
         if kind == "Reset":
+            gap = row.get("zetta_reset_local_gap_ms")
+            try:
+                gap_ms = float(gap) if gap is not None else None
+            except (TypeError, ValueError):
+                gap_ms = None
+
+            if gap_ms is None and clock is not None and segment_has_playable:
+                baseline = segment_start if segment_start is not None else clock
+                effective_end = segment_end if segment_end is not None else baseline
+                gap_ms = (effective_end - clock) * 1000.0
+
+            if gap_ms is None:
+                # Legacy/fallback snapshots without enough timeline metadata.
+                gap = row.get("zetta_gap_ms")
+                try:
+                    gap_ms = float(gap) if gap is not None else None
+                except (TypeError, ValueError):
+                    gap_ms = None
+
             if gap_ms is not None:
                 carry_ms += gap_ms
                 last_reset_ms = gap_ms
                 reset_count += 1
-            continue
-        if kind not in {"Hard", "Soft"}:
+                row["zetta_reset_local_gap_ms"] = gap_ms
+            if clock is not None:
+                segment_start = clock
+                segment_end = clock
+            segment_has_playable = False
             continue
 
-        precomputed = row.get("zetta_gap_ignore_resets_ms")
+        if kind not in {"Hard", "Soft"}:
+            # HIT does not reset the alternative timeline.
+            continue
+
+        gap = row.get("zetta_gap_ms")
         try:
-            effective_ms = float(precomputed) if precomputed is not None else None
+            base_ms = float(gap) if gap is not None else None
         except (TypeError, ValueError):
-            effective_ms = None
-        if effective_ms is None and gap_ms is not None:
+            base_ms = None
+
+        if base_ms is not None:
             correction = carry_ms
+            # 1.2.12's HH:00 restoration can already contain the final RESET's
+            # local delta; avoid counting precisely that last RESET twice.
             if str(row.get("zetta_gap_source") or "") == "previous_hour_reset" and last_reset_ms is not None:
                 correction -= last_reset_ms
-            effective_ms = gap_ms + correction
+            effective_ms = base_ms + correction
+            row["zetta_gap_ignore_resets_ms"] = effective_ms
             row["zetta_gap_ignore_resets_carry_ms"] = correction
             row["zetta_gap_ignore_resets_reset_count"] = reset_count
-        if effective_ms is not None:
             row["etm_delta_raw"] = _local_gap_ms_to_raw(effective_ms)
             row["zetta_gap_display_mode"] = "ignore_resets"
 
-        # Both Hard and Soft are treated as exact anchors in this view.
+        # Both Hard and Soft are exact anchors in this view.
         carry_ms = 0.0
         last_reset_ms = None
         reset_count = 0
-    return out
+        if clock is not None:
+            segment_start = clock
+            segment_end = clock
+        segment_has_playable = False
 
+    return out
 
 def _local_filter_etm_rows(rows: list[dict], kinds: set[str]) -> list[dict]:
     if not kinds:
@@ -2491,8 +2556,9 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
             reset_markers = sum(int(row.get("zetta_gap_ignore_resets_reset_count") or 0) for row, _value in parsed)
             st.caption(
                 f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
-                f"Ignoruj resety: ON · doliczono {reset_markers} RESET-ów. RESET nie zeruje odchyłki — jego gap jest "
-                "przenoszony do następnego HARD/SOFT. HARD i SOFT są traktowane jako dokładne kotwice czasu."
+                f"Ignoruj resety: ON · doliczono {reset_markers} RESET-ów. Carry RESET-u jest odtwarzany z "
+                "AirTime + RuntimeMilliseconds segmentu, a nie przez sumowanie surowych gapów RESET. HARD i SOFT "
+                "są traktowane jako dokładne kotwice czasu."
             )
         else:
             carried_reset = sum(1 for row, _value in parsed if str(row.get("zetta_gap_source") or "") == "previous_hour_reset")
@@ -2501,7 +2567,7 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
                 f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
                 "Gapy śródgodzinne pochodzą bezpośrednio z Zetta2GO/GetLog. Przy pełnej godzinie Zetta2GO zeruje TOH, "
                 f"więc RadioCharts przenosi końcowy RESET poprzedniej godziny ({carried_reset}) albo, gdy go nie ma, "
-                f"wylicza ogon z AirTime + DurationMilliseconds po ostatnim Hard/Soft ({carried_tail})."
+                f"wylicza ogon z AirTime + RuntimeMilliseconds po ostatnim Hard/Soft ({carried_tail})."
             )
     else:
         st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
@@ -2730,8 +2796,8 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
                 value=False,
                 key=f"{key_prefix}_ignore_resets",
                 help=(
-                    "RESET nie wymusza startu o swojej godzinie. W tym trybie jego gap jest kumulowany do kolejnego "
-                    "HARD/SOFT; oba traktujemy jako dokładne kotwice czasu."
+                    "RESET nie wymusza startu o swojej godzinie. RadioCharts odtwarza jego rzeczywisty lokalny carry "
+                    "z AirTime + RuntimeMilliseconds i przenosi go do kolejnego HARD/SOFT."
                 ),
             )
 

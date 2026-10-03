@@ -635,12 +635,105 @@ def _zetta_etm_offset_seconds(row: dict[str, Any]) -> float | None:
     return minute * 60.0 + second
 
 
+def _zetta_event_clock_seconds(row: dict[str, Any]) -> float | None:
+    """Return unwrapped clock seconds for a parsed Zetta row.
+
+    Unlike ``air_seconds`` this deliberately keeps 60+ minute notation
+    unwrapped, so ``15:60:26`` sorts just after ``15:59:59`` and before
+    ``16:00`` without losing the scheduling-hour context.
+    """
+    raw = str(row.get("air_time_raw") or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d+):(\d{1,2}(?:\.\d+)?)", raw)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    second = float(m.group(3))
+    if second >= 60 or minute >= 180:
+        return None
+    return hour * 3600.0 + minute * 60.0 + second
+
+
+def _annotate_zetta_reset_local_gaps(events: list[dict[str, Any]]) -> None:
+    """Derive each RESET's *local* segment gap from Zetta airtimes.
+
+    The raw ``Asset.gap`` on RESET rows is not safe to sum across a whole day:
+    on real future logs it can represent a recalculation context wider than the
+    short segment that the RESET visually terminates.  Zetta's effective
+    ``RuntimeMilliseconds`` (cell[15], exposed here as ``runtime_seconds``)
+    follows the actual next-play timing.  Reconstructing the segment end from
+    AirTime + effective runtime therefore gives the delta that should be carried
+    when the UI asks to ignore RESETs.
+
+    Hard/Soft and RESET start a new local segment. HIT remains informational and
+    does not change this baseline.
+    """
+    segment_start: float | None = None
+    segment_end: float | None = None
+    segment_has_playable = False
+
+    for row in events:
+        if str(row.get("source_system") or "") != "zetta2go":
+            continue
+        clock = _zetta_event_clock_seconds(row)
+        if row.get("event_type") == "etm":
+            meta = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            etm_type = str(meta.get("etm_type") or "").strip().casefold()
+            if etm_type in {"hard", "soft"}:
+                if clock is not None:
+                    segment_start = clock
+                    segment_end = clock
+                segment_has_playable = False
+                continue
+            if etm_type != "reset":
+                continue
+
+            local_gap_ms: float | None = None
+            if clock is not None and segment_has_playable:
+                baseline = segment_start if segment_start is not None else clock
+                effective_end = segment_end if segment_end is not None else baseline
+                local_gap_ms = (effective_end - clock) * 1000.0
+            if local_gap_ms is None:
+                # Defensive fallback for malformed/legacy rows.  New Zetta2GO
+                # snapshots should normally take the timeline path above.
+                raw_gap = meta.get("zetta_gap_ms")
+                try:
+                    local_gap_ms = float(raw_gap) if raw_gap is not None else None
+                except (TypeError, ValueError):
+                    local_gap_ms = None
+            if local_gap_ms is not None:
+                meta["zetta_reset_local_gap_ms"] = local_gap_ms
+                row["payload"] = meta
+            if clock is not None:
+                segment_start = clock
+                segment_end = clock
+            segment_has_playable = False
+            continue
+
+        meta = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if bool(meta.get("skip")) or clock is None:
+            continue
+        try:
+            runtime = float(row.get("runtime_seconds") or 0.0)
+        except (TypeError, ValueError):
+            runtime = 0.0
+        if runtime <= 0:
+            continue
+        if segment_start is None:
+            segment_start = clock
+        end = clock + runtime
+        if segment_end is None or end > segment_end:
+            segment_end = end
+        segment_has_playable = True
+
+
 def _raw_zetta_previous_hour_carry(payload: dict[str, Any]) -> tuple[float | None, str]:
     """Return (gap_ms, source) for 00:00 from the previous day's 23h rows.
 
-    Priority is the native final RESET.  If there is no boundary RESET (common
-    in daytime HARD-clock hours), calculate the tail from the final control ETM
-    and the last playable item's effective duration.
+    Prefer a final RESET near 59:59, but derive that RESET's local delta from
+    AirTime + RuntimeMilliseconds rather than blindly trusting ``Asset.gap``.
+    If there is no boundary RESET, use the effective tail after the final
+    Hard/Soft control marker.
     """
     rows = payload.get("radiocharts_previous_hour_rows") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
@@ -649,6 +742,10 @@ def _raw_zetta_previous_hour_carry(payload: dict[str, Any]) -> tuple[float | Non
     best_reset: tuple[float, float] | None = None
     last_control = 0.0
     playable: list[tuple[float, float]] = []
+    segment_start: datetime | None = None
+    segment_end: datetime | None = None
+    segment_has_playable = False
+
     for source in rows:
         if not isinstance(source, dict):
             continue
@@ -662,33 +759,62 @@ def _raw_zetta_previous_hour_carry(payload: dict[str, Any]) -> tuple[float | Non
         actual = _parse_iso_datetime(cell[5])
         if actual is None:
             continue
+        actual = actual.replace(tzinfo=None)
         offset = actual.minute * 60.0 + actual.second + actual.microsecond / 1_000_000.0
+
         if entry_type == 15:
             asset = cell[7] if isinstance(cell[7], dict) else {}
             etm_type = str(asset.get("ETMType") or "").strip().casefold()
-            if etm_type in {"hard", "soft"} and offset < 3600.0:
-                last_control = max(last_control, offset)
-            if etm_type == "reset" and 3590.0 <= offset <= 3600.0 and asset.get("gap") is not None:
-                try:
-                    gap_ms = float(asset.get("gap"))
-                except (TypeError, ValueError):
-                    gap_ms = None
-                if gap_ms is not None and (best_reset is None or offset > best_reset[0]):
-                    best_reset = (offset, gap_ms)
-        elif entry_type == 106:
-            try:
-                skipped = bool(cell[11])
-            except Exception:
-                skipped = False
-            if skipped:
+            if etm_type in {"hard", "soft"}:
+                if offset < 3600.0:
+                    last_control = max(last_control, offset)
+                segment_start = actual
+                segment_end = actual
+                segment_has_playable = False
                 continue
-            duration_ms = cell[18] if cell[18] not in (None, "") else cell[15]
-            try:
-                duration = float(duration_ms) / 1000.0
-            except (TypeError, ValueError):
+            if etm_type == "reset":
+                local_gap_ms: float | None = None
+                if segment_has_playable:
+                    baseline = segment_start if segment_start is not None else actual
+                    effective_end = segment_end if segment_end is not None else baseline
+                    local_gap_ms = (effective_end - actual).total_seconds() * 1000.0
+                if local_gap_ms is None:
+                    try:
+                        local_gap_ms = float(asset.get("gap")) if asset.get("gap") is not None else None
+                    except (TypeError, ValueError):
+                        local_gap_ms = None
+                if local_gap_ms is not None and 3590.0 <= offset <= 3600.0 and (best_reset is None or offset > best_reset[0]):
+                    best_reset = (offset, local_gap_ms)
+                segment_start = actual
+                segment_end = actual
+                segment_has_playable = False
                 continue
-            if duration > 0:
-                playable.append((offset, duration))
+            continue
+
+        if entry_type != 106:
+            continue
+        try:
+            skipped = bool(cell[11])
+        except Exception:
+            skipped = False
+        if skipped:
+            continue
+        # cell[15] = RuntimeMilliseconds: effective scheduled length to NTP.
+        # cell[18] is the full duration and can be several seconds longer.
+        runtime_ms = cell[15] if cell[15] not in (None, "") else cell[18]
+        try:
+            duration = float(runtime_ms) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if duration <= 0:
+            continue
+        playable.append((offset, duration))
+        end_time = actual + timedelta(seconds=duration)
+        if segment_start is None:
+            segment_start = actual
+        if segment_end is None or end_time > segment_end:
+            segment_end = end_time
+        segment_has_playable = True
 
     if best_reset is not None:
         offset, gap_ms = best_reset
@@ -699,16 +825,20 @@ def _raw_zetta_previous_hour_carry(payload: dict[str, Any]) -> tuple[float | Non
         return None, ""
     return (max(ends) - 3600.0) * 1000.0, "previous_hour_tail"
 
-
 def _apply_zetta_hour_boundary_gap_carry(events: list[dict[str, Any]], payload: dict[str, Any]) -> None:
     """Restore the cross-hour gap that Zetta2GO's hourly grid zeroes at TOH.
 
     Preferred source: the final RESET around 59:59, adjusted to the exact 60:00
     boundary.  Daytime clocks often have no such RESET, so the fallback uses the
-    last playable tail after the final Hard/Soft control ETM and Zetta's own
-    effective ``DurationMilliseconds``.  That is intentionally better than raw
-    ``Runtime`` because it follows the scheduled duration exposed by GetLog.
+    last playable tail after the final Hard/Soft control ETM and Zetta's
+    effective ``RuntimeMilliseconds`` (next-play timing), falling back to full
+    DurationMilliseconds only for malformed/legacy rows.
     """
+    # First derive RESET deltas from the actual Zetta timeline.  Summing the
+    # raw RESET Asset.gap values can explode on future logs (tens of minutes)
+    # even when the visible tail is only seconds long.
+    _annotate_zetta_reset_local_gaps(events)
+
     resets_by_hour: dict[int, tuple[float, float]] = {}
     controls_by_hour: dict[int, float] = {}
     playable_by_hour: dict[int, list[tuple[float, float]]] = {}
@@ -726,7 +856,9 @@ def _apply_zetta_hour_boundary_gap_carry(events: list[dict[str, Any]], payload: 
             if etm_type in {"hard", "soft"} and offset < 3600.0:
                 controls_by_hour[hour] = max(controls_by_hour.get(hour, 0.0), offset)
             if etm_type == "reset" and 3590.0 <= offset <= 3600.0:
-                gap = meta.get("zetta_gap_ms")
+                gap = meta.get("zetta_reset_local_gap_ms")
+                if gap is None:
+                    gap = meta.get("zetta_gap_ms")
                 if gap is None:
                     continue
                 try:
@@ -749,11 +881,19 @@ def _apply_zetta_hour_boundary_gap_carry(events: list[dict[str, Any]], payload: 
             if not m:
                 continue
             offset = int(m.group(1)) * 60.0 + float(m.group(2))
-        duration_ms = meta.get("duration_ms")
+        # RuntimeMilliseconds / runtime_seconds is the effective scheduled
+        # length to the next-play point. DurationMilliseconds is the full asset
+        # duration and overstates tails when trims/segues are present.
         try:
-            duration = float(duration_ms) / 1000.0 if duration_ms not in (None, "") else float(row.get("runtime_seconds") or 0.0)
+            duration = float(row.get("runtime_seconds") or 0.0)
         except (TypeError, ValueError):
             duration = 0.0
+        if duration <= 0:
+            duration_ms = meta.get("duration_ms")
+            try:
+                duration = float(duration_ms) / 1000.0 if duration_ms not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                duration = 0.0
         if duration > 0:
             playable_by_hour.setdefault(hour, []).append((offset, duration))
 
@@ -820,44 +960,89 @@ def _apply_zetta_hour_boundary_gap_carry(events: list[dict[str, Any]], payload: 
 def _raw_zetta_reset_carry(rows: list[dict[str, Any]] | None) -> tuple[float, float | None, int]:
     """Return RESET carry since the last Hard/Soft in raw Zetta grid rows.
 
-    A RESET is informational in playout: it resets Zetta's *displayed* gap
-    baseline, but it does not force the sequencer to start at the marker's
-    nominal clock time.  For an operational "ignore resets" view we therefore
-    accumulate each RESET gap until the next Hard/Soft anchor.
+    RESET's carry is reconstructed from the short segment that ends at that
+    marker (AirTime + RuntimeMilliseconds).  This avoids summing raw RESET
+    ``Asset.gap`` values that can be misleading on future log snapshots.
     """
     carry_ms = 0.0
     last_reset_ms: float | None = None
     reset_count = 0
+    segment_start: datetime | None = None
+    segment_end: datetime | None = None
+    segment_has_playable = False
+
     for source in rows or []:
         if not isinstance(source, dict):
             continue
         cell = source.get("cell")
-        if not isinstance(cell, list) or len(cell) < 8:
+        if not isinstance(cell, list) or len(cell) < 16:
             continue
         try:
             entry_type = int(cell[0] or 0)
         except (TypeError, ValueError):
             entry_type = 0
-        if entry_type != 15:
+        actual = _parse_iso_datetime(cell[5])
+        if actual is not None:
+            actual = actual.replace(tzinfo=None)
+
+        if entry_type == 15:
+            asset = cell[7] if isinstance(cell[7], dict) else {}
+            etm_type = str(asset.get("ETMType") or "").strip().casefold()
+            if etm_type in {"hard", "soft"}:
+                carry_ms = 0.0
+                last_reset_ms = None
+                reset_count = 0
+                if actual is not None:
+                    segment_start = actual
+                    segment_end = actual
+                segment_has_playable = False
+                continue
+            if etm_type != "reset":
+                continue
+
+            gap_ms: float | None = None
+            if actual is not None and segment_has_playable:
+                baseline = segment_start if segment_start is not None else actual
+                effective_end = segment_end if segment_end is not None else baseline
+                gap_ms = (effective_end - actual).total_seconds() * 1000.0
+            if gap_ms is None:
+                try:
+                    gap_ms = float(asset.get("gap")) if asset.get("gap") is not None else None
+                except (TypeError, ValueError):
+                    gap_ms = None
+            if gap_ms is not None:
+                carry_ms += gap_ms
+                last_reset_ms = gap_ms
+                reset_count += 1
+            if actual is not None:
+                segment_start = actual
+                segment_end = actual
+            segment_has_playable = False
             continue
-        asset = cell[7] if isinstance(cell[7], dict) else {}
-        etm_type = str(asset.get("ETMType") or "").strip().casefold()
-        if etm_type in {"hard", "soft"}:
-            carry_ms = 0.0
-            last_reset_ms = None
-            reset_count = 0
-            continue
-        if etm_type != "reset" or asset.get("gap") is None:
+
+        if entry_type != 106 or actual is None:
             continue
         try:
-            gap_ms = float(asset.get("gap"))
-        except (TypeError, ValueError):
+            skipped = bool(cell[11])
+        except Exception:
+            skipped = False
+        if skipped:
             continue
-        carry_ms += gap_ms
-        last_reset_ms = gap_ms
-        reset_count += 1
-    return carry_ms, last_reset_ms, reset_count
+        runtime_ms = cell[15] if cell[15] not in (None, "") else (cell[18] if len(cell) > 18 else None)
+        try:
+            runtime = float(runtime_ms) / 1000.0 if runtime_ms not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            runtime = 0.0
+        if runtime <= 0:
+            continue
+        if segment_start is None:
+            segment_start = actual
+        end_time = actual + timedelta(seconds=runtime)
+        if segment_end is None or end_time > segment_end:
+            segment_end = end_time
+        segment_has_playable = True
 
+    return carry_ms, last_reset_ms, reset_count
 
 def _annotate_zetta_ignore_reset_gaps(events: list[dict[str, Any]], payload: dict[str, Any]) -> None:
     """Precompute Hard/Soft gaps for the UI's ``Ignoruj resety`` switch.
@@ -883,7 +1068,9 @@ def _annotate_zetta_ignore_reset_gaps(events: list[dict[str, Any]], payload: dic
         meta = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         etm_type = str(meta.get("etm_type") or "").strip().casefold()
         if etm_type == "reset":
-            gap = meta.get("zetta_gap_ms")
+            gap = meta.get("zetta_reset_local_gap_ms")
+            if gap is None:
+                gap = meta.get("zetta_gap_ms")
             try:
                 gap_ms = float(gap) if gap is not None else None
             except (TypeError, ValueError):
@@ -1427,6 +1614,7 @@ def events_for_day(
             item["zetta_gap_source"] = str(meta.get("zetta_gap_source") or "native")
             item["zetta_gap_ms"] = meta.get("zetta_gap_ms")
             item["zetta_gap_native_ms"] = meta.get("zetta_gap_native_ms")
+            item["zetta_reset_local_gap_ms"] = meta.get("zetta_reset_local_gap_ms")
             item["zetta_gap_ignore_resets_ms"] = meta.get("zetta_gap_ignore_resets_ms")
             item["zetta_gap_ignore_resets_carry_ms"] = meta.get("zetta_gap_ignore_resets_carry_ms")
             item["zetta_gap_ignore_resets_reset_count"] = int(meta.get("zetta_gap_ignore_resets_reset_count") or 0)
