@@ -2644,13 +2644,19 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
     # One cached SQLite read per selected day. Hour/type filters and summary are
     # computed in memory instead of reading/decoding the same day 2–3 times.
     full_day_rows = cached_local_day_events(revision, kind, selected_date)
+    hour_rows = [
+        row for row in full_day_rows
+        if selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour)
+    ]
     if kind == "schedule":
-        _render_local_etm_gap_summary(full_day_rows)
+        # ETM cards must follow the selected hour. Previously the hour selector
+        # filtered only the table while the ETM summary still showed the whole
+        # day, which made e.g. 01:00 look like it contained the 00:00 markers.
+        _render_local_etm_gap_summary(hour_rows)
 
     rows = [
-        row for row in full_day_rows
-        if (selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour))
-        and (not selected_types or str(row.get("event_type") or "") in selected_types)
+        row for row in hour_rows
+        if not selected_types or str(row.get("event_type") or "") in selected_types
     ]
     if "etm" in selected_types:
         rows = _local_filter_etm_rows(rows, etm_kinds)

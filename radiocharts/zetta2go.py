@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -298,10 +299,54 @@ class Zetta2GoClient:
         return data
 
     def get_log(self, service_date: date | str) -> dict[str, Any]:
+        """Fetch one complete broadcast day from Zetta2GO.
+
+        The Zetta2GO log grid itself requests one clock hour at a time.  A single
+        midnight-to-23:59 ``GetLog`` request looks valid but the server only
+        returns the first part of the day on this installation.  Fetching the 24
+        hourly windows mirrors the web UI and, importantly, gives the parser a
+        TOH row for every scheduling hour (needed for legitimate 60+ minute
+        overrun notation).
+        """
         d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
-        start = datetime.combine(d, dt_time.min)
-        end = datetime.combine(d, dt_time(23, 59, 59, 900000))
-        return self.get_log_range(start, end)
+        merged_rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        last_payload: dict[str, Any] = {}
+
+        for hour in range(24):
+            start = datetime.combine(d, dt_time(hour, 0, 0))
+            end = datetime.combine(d, dt_time(hour, 59, 59, 900000))
+            payload = self.get_log_range(start, end)
+            last_payload = payload
+            rows = payload.get("rows") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                continue
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    continue
+                row_id = str(row.get("id") or "").strip()
+                if row_id:
+                    key = "id:" + row_id
+                else:
+                    # Defensive fallback for helper rows without an id. Hour is
+                    # part of the key so identical-looking TOH/helper rows from
+                    # different hourly calls are not collapsed accidentally.
+                    key = f"hour:{hour}:row:{index}:" + json.dumps(
+                        row.get("cell"), ensure_ascii=False, sort_keys=True, default=str
+                    )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged_rows.append(row)
+
+        return {
+            "total": 1,
+            "page": 1,
+            "records": len(merged_rows),
+            "rows": merged_rows,
+            "userdata": last_payload.get("userdata") if isinstance(last_payload, dict) else None,
+            "radiocharts_hourly_fetch": True,
+        }
 
     def close(self) -> None:
         self.session.close()
