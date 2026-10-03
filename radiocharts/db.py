@@ -158,6 +158,55 @@ CREATE TABLE IF NOT EXISTS airplay_plays (
     UNIQUE(station_id, played_at, artist_key, title_key)
 );
 
+CREATE TABLE IF NOT EXISTS airplay_song_station_totals (
+    station_id INTEGER NOT NULL REFERENCES airplay_stations(station_id) ON DELETE CASCADE,
+    song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    spins INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(station_id, song_id)
+);
+CREATE INDEX IF NOT EXISTS idx_airplay_song_station_totals_song
+    ON airplay_song_station_totals(song_id, station_id);
+
+-- Keep a compact all-time rollup for Dashboard "Całość".  The raw play table
+-- can grow to millions of rows, while this table has at most one row per
+-- station/song pair.  INSERT/DELETE/identity relinks stay exact via triggers.
+CREATE TRIGGER IF NOT EXISTS trg_airplay_totals_insert
+AFTER INSERT ON airplay_plays
+WHEN NEW.song_id IS NOT NULL
+BEGIN
+    INSERT INTO airplay_song_station_totals(station_id,song_id,spins)
+    VALUES(NEW.station_id,NEW.song_id,1)
+    ON CONFLICT(station_id,song_id) DO UPDATE SET spins=spins+1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_airplay_totals_delete
+AFTER DELETE ON airplay_plays
+WHEN OLD.song_id IS NOT NULL
+BEGIN
+    UPDATE airplay_song_station_totals
+       SET spins=spins-1
+     WHERE station_id=OLD.station_id AND song_id=OLD.song_id;
+    DELETE FROM airplay_song_station_totals
+     WHERE station_id=OLD.station_id AND song_id=OLD.song_id AND spins<=0;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_airplay_totals_song_update
+AFTER UPDATE OF song_id,station_id ON airplay_plays
+WHEN OLD.song_id IS NOT NEW.song_id OR OLD.station_id IS NOT NEW.station_id
+BEGIN
+    UPDATE airplay_song_station_totals
+       SET spins=spins-1
+     WHERE OLD.song_id IS NOT NULL
+       AND station_id=OLD.station_id AND song_id=OLD.song_id;
+    DELETE FROM airplay_song_station_totals
+     WHERE OLD.song_id IS NOT NULL
+       AND station_id=OLD.station_id AND song_id=OLD.song_id AND spins<=0;
+    INSERT INTO airplay_song_station_totals(station_id,song_id,spins)
+    SELECT NEW.station_id,NEW.song_id,1
+     WHERE NEW.song_id IS NOT NULL
+    ON CONFLICT(station_id,song_id) DO UPDATE SET spins=spins+1;
+END;
+
 CREATE TABLE IF NOT EXISTS airplay_windows (
     station_id INTEGER NOT NULL REFERENCES airplay_stations(station_id) ON DELETE CASCADE,
     play_date TEXT NOT NULL,
@@ -213,6 +262,10 @@ CREATE TABLE IF NOT EXISTS local_station_events (
     runtime_seconds REAL,
     song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
     payload_json TEXT NOT NULL DEFAULT '[]',
+    source_system TEXT NOT NULL DEFAULT '',
+    play_status_code INTEGER,
+    edit_code_int INTEGER,
+    asset_id TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -576,6 +629,57 @@ def _ensure_airplay_schema(con: sqlite3.Connection) -> int:
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_windows_date ON airplay_windows(play_date, station_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_windows_station_date ON airplay_windows(station_id, play_date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_airplay_windows_success_fetched ON airplay_windows(success, fetched_at)")
+
+    # ``_rebuild_airplay_tables`` may replace airplay_plays after the main SCHEMA
+    # script has already created its triggers. Recreate the compact Dashboard
+    # rollup objects here as a defensive post-schema step as well.
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS airplay_song_station_totals (
+               station_id INTEGER NOT NULL REFERENCES airplay_stations(station_id) ON DELETE CASCADE,
+               song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+               spins INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY(station_id, song_id)
+           )"""
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_airplay_song_station_totals_song "
+        "ON airplay_song_station_totals(song_id, station_id)"
+    )
+    con.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_airplay_totals_insert
+        AFTER INSERT ON airplay_plays
+        WHEN NEW.song_id IS NOT NULL
+        BEGIN
+            INSERT INTO airplay_song_station_totals(station_id,song_id,spins)
+            VALUES(NEW.station_id,NEW.song_id,1)
+            ON CONFLICT(station_id,song_id) DO UPDATE SET spins=spins+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_airplay_totals_delete
+        AFTER DELETE ON airplay_plays
+        WHEN OLD.song_id IS NOT NULL
+        BEGIN
+            UPDATE airplay_song_station_totals SET spins=spins-1
+             WHERE station_id=OLD.station_id AND song_id=OLD.song_id;
+            DELETE FROM airplay_song_station_totals
+             WHERE station_id=OLD.station_id AND song_id=OLD.song_id AND spins<=0;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_airplay_totals_song_update
+        AFTER UPDATE OF song_id,station_id ON airplay_plays
+        WHEN OLD.song_id IS NOT NEW.song_id OR OLD.station_id IS NOT NEW.station_id
+        BEGIN
+            UPDATE airplay_song_station_totals SET spins=spins-1
+             WHERE OLD.song_id IS NOT NULL
+               AND station_id=OLD.station_id AND song_id=OLD.song_id;
+            DELETE FROM airplay_song_station_totals
+             WHERE OLD.song_id IS NOT NULL
+               AND station_id=OLD.station_id AND song_id=OLD.song_id AND spins<=0;
+            INSERT INTO airplay_song_station_totals(station_id,song_id,spins)
+            SELECT NEW.station_id,NEW.song_id,1 WHERE NEW.song_id IS NOT NULL
+            ON CONFLICT(station_id,song_id) DO UPDATE SET spins=spins+1;
+        END;
+        """
+    )
     return quarantined_daily
 
 
@@ -1562,6 +1666,46 @@ def connect():
         con.close()
 
 
+def get_app_settings(keys: Iterable[str] | None = None) -> dict[str, str]:
+    """Return persistent app settings stored in the shared RadioCharts DB.
+
+    ``app_meta`` is already shared by web/API/worker through RADIOCHARTS_DB, so
+    settings changed in the web UI are visible to the worker without copying
+    environment variables between containers.
+    """
+    init_db()
+    with connect() as con:
+        if keys is None:
+            rows = con.execute("SELECT key,value FROM app_meta").fetchall()
+        else:
+            wanted = [str(k) for k in keys]
+            if not wanted:
+                return {}
+            placeholders = ",".join("?" for _ in wanted)
+            rows = con.execute(
+                f"SELECT key,value FROM app_meta WHERE key IN ({placeholders})", wanted
+            ).fetchall()
+    return {str(row["key"]): str(row["value"]) for row in rows}
+
+
+def set_app_settings(values: dict[str, object]) -> None:
+    """Atomically persist app settings in ``app_meta``.
+
+    Empty strings are deliberately stored rather than deleted: for secrets this
+    lets the UI explicitly clear a value instead of unexpectedly falling back to
+    an old environment variable.
+    """
+    init_db()
+    cleaned = {str(k): "" if v is None else str(v) for k, v in values.items()}
+    if not cleaned:
+        return
+    with connect() as con:
+        con.executemany(
+            "INSERT OR REPLACE INTO app_meta(key,value) VALUES(?,?)",
+            list(cleaned.items()),
+        )
+
+
 def _purge_eska_jingles(con: sqlite3.Connection) -> dict:
     """Delete RDS/jingle rows where artist or title contains the standalone token ``eska``.
 
@@ -1668,7 +1812,9 @@ def init_db() -> None:
         "airplay_dead_station_cleanup_v1",
         "airplay_eska_jingle_cleanup_v1",
         "local_station_schema_v1",
+        "local_station_zetta_v1",
         "airplay_dashboard_indexes_v1",
+        "airplay_song_station_totals_v1",
     }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
         # Hot-path for a running web/worker process. Migrations are checked once
@@ -1747,6 +1893,14 @@ def init_db() -> None:
                             raise
                     con.executescript(SCHEMA)
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('local_station_schema_v1','done')")
+                    # 1.2.9: Zetta2GO snapshots share local_station_events with GSelector
+                    # but need explicit provenance/status fields so READY/NOT_PLAYED rows
+                    # can be stored for diagnostics without counting as actual plays.
+                    _ensure_column(con, 'local_station_events', 'source_system', "TEXT NOT NULL DEFAULT ''")
+                    _ensure_column(con, 'local_station_events', 'play_status_code', 'INTEGER')
+                    _ensure_column(con, 'local_station_events', 'edit_code_int', 'INTEGER')
+                    _ensure_column(con, 'local_station_events', 'asset_id', "TEXT NOT NULL DEFAULT ''")
+                    con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('local_station_zetta_v1','done')")
                     quarantined_daily = _ensure_airplay_schema(con)
 
                     # Lightweight migrations for existing MVP databases.
@@ -1985,6 +2139,26 @@ def init_db() -> None:
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v2','done')")
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_schema_v3','done')")
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_dashboard_indexes_v1','done')")
+
+                    totals_mig = con.execute(
+                        "SELECT value FROM app_meta WHERE key='airplay_song_station_totals_v1'"
+                    ).fetchone()
+                    if not totals_mig:
+                        # One-time backfill.  Afterwards triggers keep this tiny
+                        # station/song rollup exact as windows are refreshed and
+                        # song identities are merged/relinked.
+                        con.execute("DELETE FROM airplay_song_station_totals")
+                        con.execute(
+                            """INSERT INTO airplay_song_station_totals(station_id,song_id,spins)
+                               SELECT station_id,song_id,COUNT(*)
+                               FROM airplay_plays
+                               WHERE song_id IS NOT NULL
+                               GROUP BY station_id,song_id"""
+                        )
+                        con.execute(
+                            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_song_station_totals_v1','done')"
+                        )
+
                     con.execute(
                         "INSERT OR REPLACE INTO app_meta(key,value) VALUES('airplay_daily_legacy_v1',?)",
                         (str(quarantined_daily),),
@@ -3133,26 +3307,21 @@ def airplay_dashboard_spin_counts(
             "SELECT station_id FROM airplay_stations WHERE active=0 ORDER BY station_id"
         ).fetchall()]
         if start is None and end is None:
+            # Use the compact station/song rollup maintained by triggers.  This
+            # turns Dashboard "Całość" from an O(number of plays) scan into an
+            # O(number of station/song pairs) query and naturally respects the
+            # current active-station flags.
             rows = con.execute(
-                """SELECT song_id,COUNT(*) AS spins
-                   FROM airplay_plays INDEXED BY idx_airplay_plays_song
-                   WHERE song_id IS NOT NULL
-                   GROUP BY song_id"""
+                """SELECT t.song_id,SUM(t.spins) AS spins
+                   FROM airplay_song_station_totals t
+                   JOIN airplay_stations s ON s.station_id=t.station_id
+                   WHERE s.active=1 AND t.spins>0
+                   GROUP BY t.song_id"""
             ).fetchall()
-            totals = {int(r["song_id"]): int(r["spins"] or 0) for r in rows}
-            if disabled:
-                placeholders = ",".join("?" for _ in disabled)
-                disabled_rows = con.execute(
-                    f"""SELECT song_id,COUNT(*) AS spins
-                        FROM airplay_plays
-                        WHERE station_id IN ({placeholders}) AND song_id IS NOT NULL
-                        GROUP BY song_id""",
-                    tuple(disabled),
-                ).fetchall()
-                for r in disabled_rows:
-                    sid = int(r["song_id"])
-                    totals[sid] = max(0, totals.get(sid, 0) - int(r["spins"] or 0))
-            return [{"song_id": sid, "spins": spins} for sid, spins in totals.items() if spins > 0]
+            return [
+                {"song_id": int(r["song_id"]), "spins": int(r["spins"] or 0)}
+                for r in rows if int(r["spins"] or 0) > 0
+            ]
 
         clauses = ["song_id IS NOT NULL"]
         params: list[object] = []

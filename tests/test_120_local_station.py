@@ -271,10 +271,10 @@ def test_v126_shared_compare_scroll_lazy_subviews_and_status_contract():
     assert '_cached_local_station_song_links(catalog_revision())' in APP
     assert 'return "✓", "rc-status-ok", "Zgodne"' in APP
     assert 'return "✕", "rc-status-bad", "Nie zagrano / usunięte"' in APP
-    assert 'return "+", "rc-status-bad", "Dodane w Played"' in APP
+    assert 'return "+", "rc-status-bad", "Dodane po cutoff"' in APP
     assert 'return "↻", "rc-status-move", "Zmieniona kolejność"' in APP
     assert 'rc-log-ghost' in APP
-    assert 'with_dashboard_airplay(df, AIR_DATA_REV)' in APP
+    assert 'cached_dashboard_base_frame(REVISION, AIR_DATA_REV, 0)' in APP
 
 
 def test_v126_compare_display_pairs_keep_missing_as_played_ghost(tmp_path, monkeypatch):

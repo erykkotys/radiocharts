@@ -24,6 +24,8 @@ services:
       TZ: Europe/Warsaw
       RADIOCHARTS_DB: /app/data/radiocharts.db
       RADIOCHARTS_CONFIG: /app/config/config.yml
+      # Zetta2GO (EMAUS): login i hasło ustaw w webowej zakładce Ustawienia.
+      # ZETTA2GO_VERIFY_TLS: "false"  # awaryjny override, jeśli TrueNAS nie ufa wewnętrznemu CA
     volumes:
       - /mnt/POOL/apps/radiocharts/data:/app/data
       - /mnt/POOL/apps/radiocharts/config:/app/config

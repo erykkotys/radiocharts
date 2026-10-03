@@ -144,3 +144,42 @@ def test_recent_24h_is_twelve_two_hour_windows():
     assert len(rows) == 12
     assert rows[-1] == (date(2026, 8, 19), 14)
     assert rows[0] == (date(2026, 8, 18), 16)
+
+
+def test_dashboard_all_time_rollup_tracks_window_replacement_and_station_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "dashboard-rollup.db")
+    monkeypatch.setattr(db, "_INITIALIZED_DB_PATH", None)
+    db.init_db()
+    db.upsert_airplay_stations([
+        {"station_id": 2, "name": "RMF FM"},
+        {"station_id": 3, "name": "Eska"},
+    ])
+    db.store_airplay_window(2, "RMF FM", "2026-08-18", 18, [
+        {"played_at": "2026-08-18T18:05", "artist": "Dua Lipa", "title": "Houdini"},
+        {"played_at": "2026-08-18T18:55", "artist": "Dua Lipa", "title": "Houdini"},
+    ])
+    db.store_airplay_window(3, "Eska", "2026-08-18", 18, [
+        {"played_at": "2026-08-18T18:15", "artist": "Dua Lipa", "title": "Houdini"},
+    ])
+    counts = db.airplay_dashboard_spin_counts()
+    assert len(counts) == 1
+    assert counts[0]["spins"] == 3
+
+    # Refreshing the same 2h window first deletes its old rows.  The rollup must
+    # decrement and then reflect only the new snapshot, never double-count it.
+    db.store_airplay_window(2, "RMF FM", "2026-08-18", 18, [
+        {"played_at": "2026-08-18T18:25", "artist": "Dua Lipa", "title": "Houdini"},
+    ])
+    counts = db.airplay_dashboard_spin_counts()
+    assert counts[0]["spins"] == 2
+
+    # Dashboard totals respect current station enable/disable state without
+    # rebuilding the rollup table.
+    db.set_airplay_station_active([3], False)
+    counts = db.airplay_dashboard_spin_counts()
+    assert counts[0]["spins"] == 1
+
+    with db.connect() as con:
+        raw = con.execute("SELECT COUNT(*) FROM airplay_plays").fetchone()[0]
+        rolled = con.execute("SELECT SUM(spins) FROM airplay_song_station_totals").fetchone()[0]
+    assert raw == rolled == 2

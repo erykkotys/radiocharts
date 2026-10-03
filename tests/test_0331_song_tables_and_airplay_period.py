@@ -92,5 +92,5 @@ def test_127_dashboard_uses_single_recent_airplay_scan_contract():
     assert 'def cached_dashboard_airplay(' in APP
     assert 'airplay_dashboard_metrics(days=28, recent_days=7)' in APP
     assert 'AIR_DATA_REV = airplay_data_revision() if view_key == "dashboard" else ""' in APP
-    assert 'with_dashboard_airplay(df, AIR_DATA_REV)' in APP
+    assert 'cached_dashboard_base_frame(REVISION, AIR_DATA_REV, 0)' in APP
     assert 'cached_dashboard_period_spins(AIR_DATA_REV, "", "")' in APP

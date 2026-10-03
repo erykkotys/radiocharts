@@ -45,7 +45,11 @@ from radiocharts.local_station import (
     preview_import as preview_local_import,
     song_stats as local_song_stats,
     song_activity as local_song_activity,
+    sync_zetta2go_live as local_sync_zetta2go_live,
+    sync_zetta2go_schedule_horizon as local_sync_zetta2go_schedule_horizon,
+    test_zetta2go_connection as local_test_zetta2go_connection,
 )
+from radiocharts.zetta2go import settings as zetta2go_settings, save_settings as save_zetta2go_settings
 from radiocharts.metrics import compute_scores, song_history
 
 st.set_page_config(page_title="RadioCharts Research", page_icon="📻", layout="wide")
@@ -159,7 +163,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-VALID_VIEW_KEYS = {"dashboard", "song", "archive", "airplay", "library", "our_radio", "data", "methodology"}
+VALID_VIEW_KEYS = {"dashboard", "song", "archive", "airplay", "library", "our_radio", "data", "settings", "methodology"}
 BOOT_VIEW_KEY = str(st.query_params.get("view", "dashboard"))
 if BOOT_VIEW_KEY not in VALID_VIEW_KEYS:
     BOOT_VIEW_KEY = "dashboard"
@@ -567,6 +571,19 @@ def with_dashboard_airplay(frame: pd.DataFrame, air_data_rev: str) -> pd.DataFra
     return out
 
 
+@st.cache_resource(show_spinner=False, max_entries=24)
+def cached_dashboard_base_frame(chart_rev: str, air_rev: str, lookback_days: int = 0) -> pd.DataFrame:
+    """Chart + recent-airplay Dashboard base, cached across UI reruns.
+
+    Slider/search/status changes rerun the Streamlit script.  Before 1.2.8 each
+    rerun rebuilt the airplay DataFrame, percentile rank and pandas merge even
+    though neither chart nor airplay data had changed.  Keep that immutable base
+    cached and overlay only live notes/status afterwards.
+    """
+    scored = cached_scores(chart_rev, lookback_days=int(lookback_days or 0))
+    return with_dashboard_airplay(scored, air_rev)
+
+
 @st.cache_resource(show_spinner=False, max_entries=48)
 def cached_basic_song_metrics(chart_rev: str, air_rev: str, song_key: tuple[int, ...]) -> pd.DataFrame:
     """Standard table metrics for a bounded set of songs.
@@ -825,6 +842,7 @@ def render_nav_tabs(current: str) -> None:
         ("library", "Baza"),
         ("our_radio", "EMAUS"),
         ("data", "Dane"),
+        ("settings", "Ustawienia"),
         ("methodology", "Manual"),
     ]
     links = []
@@ -959,23 +977,42 @@ def release_month(exact_release: object = None, first_chart: object = None) -> s
 
 
 def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
-    """Overlay live user state without invalidating expensive score caches."""
+    """Overlay live user state without invalidating expensive score caches.
+
+    Use one vectorised join instead of four Python ``.at`` loops.  This matters
+    on Dashboard because every filter/search interaction reruns the script.
+    """
     out = frame.copy()
     if out.empty:
         return out
+    state_cols = ["heard", "status", "downloaded", "note"]
+    out = out.drop(columns=[c for c in state_cols if c in out.columns], errors="ignore")
     note_rows = load_notes()
     if note_rows:
-        notes_df = pd.DataFrame(note_rows).set_index("song_id")
-        ids = out["song_id"].astype(int)
-        out["heard"] = [bool(notes_df.at[i, "heard"]) if i in notes_df.index else False for i in ids]
-        out["status"] = [normalized_status(notes_df.at[i, "status"]) if i in notes_df.index else "Nie słuchałem" for i in ids]
-        out["downloaded"] = [bool(notes_df.at[i, "downloaded"]) if i in notes_df.index else False for i in ids]
-        out["note"] = [str(notes_df.at[i, "note"] or "") if i in notes_df.index else "" for i in ids]
-    else:
+        notes_df = pd.DataFrame(note_rows)
+        keep = [c for c in ["song_id", *state_cols] if c in notes_df.columns]
+        notes_df = notes_df[keep].drop_duplicates("song_id", keep="last")
+        notes_df["song_id"] = pd.to_numeric(notes_df["song_id"], errors="coerce")
+        notes_df = notes_df[notes_df["song_id"].notna()].copy()
+        notes_df["song_id"] = notes_df["song_id"].astype(int)
+        out["song_id"] = pd.to_numeric(out["song_id"], errors="raise").astype(int)
+        out = out.merge(notes_df, on="song_id", how="left", sort=False)
+    if "heard" not in out.columns:
         out["heard"] = False
-        out["status"] = "Nie słuchałem"
+    else:
+        out["heard"] = out["heard"].fillna(False).astype(bool)
+    if "downloaded" not in out.columns:
         out["downloaded"] = False
+    else:
+        out["downloaded"] = out["downloaded"].fillna(False).astype(bool)
+    if "status" not in out.columns:
+        out["status"] = "Nie słuchałem"
+    else:
+        out["status"] = out["status"].fillna("Nie słuchałem").map(normalized_status)
+    if "note" not in out.columns:
         out["note"] = ""
+    else:
+        out["note"] = out["note"].fillna("").astype(str)
     return out
 
 
@@ -2339,6 +2376,7 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
         return value if m.group(1) == "+" else -value
 
     parsed = [(row, gap_seconds(str(row.get("etm_delta_raw") or ""))) for row in markers]
+    direct_zetta = all(str(row.get("source_system") or "") == "zetta2go" for row in markers)
     nonzero = sum(1 for _row, value in parsed if value is not None and abs(value) >= .05)
     positives = [value for _row, value in parsed if value is not None and value > 0]
     negatives = [value for _row, value in parsed if value is not None and value < 0]
@@ -2377,12 +2415,19 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
 
     max_late = fmt_seconds(max(positives)) if positives else "—"
     max_early = fmt_seconds(min(negatives)) if negatives else "—"
-    st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
-    st.caption(
-        f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
-        "To są wartości +/- zapisane w eksporcie GSelectora, nie gap Zetty. Zetta może mieć inny wynik po załadowaniu "
-        "realnych bloków reklamowych; ⚠ oznacza segment z RESET-em lub blokiem traffic bez runtime."
-    )
+    if direct_zetta:
+        st.markdown("#### ETM Hard / Soft — gapy Zetta")
+        st.caption(
+            f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
+            "Wartości pochodzą bezpośrednio z Zetta2GO/GetLog."
+        )
+    else:
+        st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
+        st.caption(
+            f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
+            "To są wartości +/- zapisane w eksporcie GSelectora, nie gap Zetty. Zetta może mieć inny wynik po załadowaniu "
+            "realnych bloków reklamowych; ⚠ oznacza segment z RESET-em lub blokiem traffic bez runtime."
+        )
 
     cards = []
     for row, value in parsed:
@@ -2394,10 +2439,11 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
         css = "rc-etm-chip rc-etm-zero" if muted else "rc-etm-chip"
         resets, traffic = diagnostic_by_id.get(int(row.get("id") or id(row)), (0, 0))
         warnings = []
-        if resets:
-            warnings.append(f"RESET: {resets}")
-        if traffic:
-            warnings.append(f"traffic bez runtime: {traffic}")
+        if not direct_zetta:
+            if resets:
+                warnings.append(f"RESET: {resets}")
+            if traffic:
+                warnings.append(f"traffic bez runtime: {traffic}")
         warning = ""
         if warnings:
             warning = (
@@ -2636,11 +2682,17 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         selected_columns or LOCAL_TIMELINE_DEFAULT_COLUMNS,
         key=f"{key_prefix}_grid_{selected_date}_{selected_hour}_{element_preset}_{'-'.join(sorted(etm_kinds))}",
     )
-    st.caption(
-        "Gap przy ETM pokazuje wartość +/- z eksportu GSelectora (nie gap wyliczony przez Zettę); przy pozostałych "
-        "elementach pokazuje nadczas 60+ minutes/hour. Presety elementów i filtr ETM pozwalają szybko wybrać Hard, "
-        "Soft, Reset, Hit albo dowolną kombinację."
-    )
+    if rows and all(str(r.get("source_system") or "") == "zetta2go" for r in rows):
+        st.caption(
+            "Gap przy ETM pochodzi bezpośrednio z Zetta2GO. Played pokazuje tylko elementy zagrane / będące w trakcie; "
+            "pełny stan READY/NOT_PLAYED jest zachowany w tle do porównania z cutoff Scheduled."
+        )
+    else:
+        st.caption(
+            "Gap przy ETM pokazuje wartość +/- z eksportu GSelectora (nie gap wyliczony przez Zettę); przy pozostałych "
+            "elementach pokazuje nadczas 60+ minutes/hour. Presety elementów i filtr ETM pozwalają szybko wybrać Hard, "
+            "Soft, Reset, Hit albo dowolną kombinację."
+        )
 
 
 def _local_status_symbol(status: str) -> tuple[str, str, str]:
@@ -2648,11 +2700,17 @@ def _local_status_symbol(status: str) -> tuple[str, str, str]:
     if status == "Niezagrane":
         return "✕", "rc-status-bad", "Nie zagrano / usunięte"
     if status == "Dodane":
-        return "+", "rc-status-bad", "Dodane w Played"
+        return "+", "rc-status-bad", "Dodane po cutoff"
+    if "zmieniony" in lowered:
+        return "≠", "rc-status-bad", "Zmieniony po cutoff"
     if "kolejność" in lowered:
         return "↻", "rc-status-move", "Zmieniona kolejność"
     if "ścięty" in lowered:
         return "✂", "rc-status-cut", "Ścięty / fade"
+    if status == "W trakcie":
+        return "▶", "rc-status-move", "Aktualnie odtwarzany / stan przejściowy"
+    if status == "Oczekuje":
+        return "○", "rc-status-move", "Jeszcze nie odtworzono"
     return "✓", "rc-status-ok", "Zgodne"
 
 
@@ -2827,15 +2885,15 @@ def _render_local_comparison(revision: str) -> None:
         return
 
     render_compact_metrics([
-        ("Scheduled", comparison["scheduled"]),
-        ("Played", comparison["played"]),
+        ("Scheduled cutoff", comparison["scheduled"]),
+        ("Live log", comparison["played"]),
         ("Różnice", comparison["differences"]),
         ("Niezagrane / dodane", f"{comparison['missed']} / {comparison['added']}"),
     ])
     st.caption(
-        "✓ zgodne · ✕ niezagrane/usunięte · + dodane w Played · ↻ zmieniona kolejność. "
-        "Szary ghost po stronie Played pokazuje pozycję z planu, która nie została zagrana. "
-        "Sekundy startu nie decydują o zgodności; techniczne wpisy „Zetta Play Asset” są ukryte."
+        "✓ zgodne · ✕ niezagrane/usunięte · + dodane po cutoff · ↻ zmieniona kolejność · ≠ podmieniony asset · "
+        "○ oczekuje · ▶ w trakcie. Scheduled to ostatni snapshot przed emisją; prawa strona to aktualny log Zetty, "
+        "więc ingerencje po cutoff widać jeszcze zanim dany element miał zagrać."
     )
 
     st.markdown(
@@ -2880,11 +2938,12 @@ def _render_local_comparison(revision: str) -> None:
         if not hours.empty:
             hours["Godzina"] = hours["hour"].map(lambda h: f"{int(h):02d}:00")
             hours = hours.rename(columns={
-                "scheduled": "Scheduled", "played": "Played", "differences": "Różnice",
+                "scheduled": "Scheduled", "played": "Live log", "differences": "Różnice",
                 "missed": "Niezagrane", "added": "Dodane", "reordered": "Kolejność", "faded": "Ścięte",
+                "changed": "Zmienione", "waiting": "Oczekuje", "in_progress": "W trakcie",
             })
             st.dataframe(
-                hours[["Godzina", "Scheduled", "Played", "Różnice", "Niezagrane", "Dodane", "Kolejność", "Ścięte"]],
+                hours[[c for c in ["Godzina", "Scheduled", "Live log", "Różnice", "Niezagrane", "Dodane", "Zmienione", "Kolejność", "Ścięte", "Oczekuje", "W trakcie"] if c in hours.columns]],
                 hide_index=True, use_container_width=True, height=430,
             )
 
@@ -2993,7 +3052,62 @@ def _render_emaus_song_activity(song_id: int) -> None:
 
 
 def _render_local_import(revision: str) -> None:
-    st.markdown("#### Ręczny importer GSelector")
+    st.markdown("#### Zetta2GO — automatyczna synchronizacja")
+    zcfg = zetta2go_settings()
+    if zcfg.configured:
+        st.caption(
+            f"Skonfigurowano {zcfg.base_url} · horyzont Scheduled: {zcfg.schedule_horizon_days} dni. "
+            "Worker odświeża Played co minutę. Codziennie o 23:59 pobiera przyszłe logi; jutrzejszy log staje się cutoff "
+            "i nie jest już później nadpisywany jako Scheduled, więc zmiany po cutoff są widoczne jako ingerencje."
+        )
+        z1, z2, z3 = st.columns(3)
+        if z1.button("Test Zetta2GO", key="zetta_test_btn"):
+            try:
+                st.session_state["zetta_ui_result"] = {"kind": "test", "data": local_test_zetta2go_connection()}
+            except Exception as exc:
+                st.session_state["zetta_ui_result"] = {"kind": "error", "data": str(exc)}
+            st.rerun()
+        if z2.button("Odśwież Played teraz", key="zetta_live_btn"):
+            try:
+                st.session_state["zetta_ui_result"] = {"kind": "live", "data": local_sync_zetta2go_live()}
+            except Exception as exc:
+                st.session_state["zetta_ui_result"] = {"kind": "error", "data": str(exc)}
+            st.rerun()
+        if z3.button("Odśwież przyszłe Scheduled", key="zetta_schedule_btn"):
+            try:
+                st.session_state["zetta_ui_result"] = {
+                    "kind": "schedule",
+                    "data": local_sync_zetta2go_schedule_horizon(horizon_days=zcfg.schedule_horizon_days, mark_cutoff=False),
+                }
+            except Exception as exc:
+                st.session_state["zetta_ui_result"] = {"kind": "error", "data": str(exc)}
+            st.rerun()
+    else:
+        st.info(
+            "Zetta2GO nie jest jeszcze skonfigurowane. Ustaw login i hasło w zakładce Ustawienia. "
+            "Web i worker korzystają z tej samej zapisanej konfiguracji."
+        )
+        st.markdown('<a href="?view=settings" target="_self">→ Otwórz Ustawienia</a>', unsafe_allow_html=True)
+
+    zetta_result = st.session_state.pop("zetta_ui_result", None)
+    if zetta_result:
+        if zetta_result.get("kind") == "error":
+            st.error(f"Zetta2GO: {zetta_result.get('data')}")
+        else:
+            data = zetta_result.get("data") or {}
+            if zetta_result.get("kind") == "schedule":
+                st.success(
+                    f"Scheduled: odświeżono {len(data.get('days') or [])} dni · cutoff {data.get('cutoff_date') or '—'}."
+                )
+            elif zetta_result.get("kind") == "live":
+                st.success(
+                    f"Played live: {data.get('rows', 0)} elementów · zagrane/w trakcie {data.get('played_rows', 0)} · "
+                    f"niezagrane {data.get('nonplayed_rows', 0)} · oczekujące {data.get('upcoming_rows', 0)}."
+                )
+            else:
+                st.success(f"Zetta2GO działa · rekordów bieżącego dnia: {data.get('records', 0)}.")
+
+    st.markdown("#### Ręczny importer GSelector (fallback / archiwum)")
     st.caption(
         "Importer przyjmuje obecny eksport TSV/TXT. Wielodniowy plik jest dzielony po znacznikach UTF-8 BOM, "
         "a nowszy import tego samego dnia staje się bieżącym snapshotem; starsza wersja zostaje w historii."
@@ -3086,6 +3200,69 @@ def _render_local_import(revision: str) -> None:
                 st.rerun()
 
 
+def _render_settings() -> None:
+    st.subheader("⚙️ Ustawienia")
+    st.caption("Ustawienia aplikacji wspólne dla web i workera. Dane są przechowywane lokalnie w bazie RadioCharts i nie trafiają do repozytorium Git.")
+
+    st.markdown("### EMAUS / Zetta2GO")
+    zcfg = zetta2go_settings()
+    if isinstance(zcfg.verify_tls, str):
+        st.info(f"Weryfikacja TLS korzysta obecnie z CA bundle: {zcfg.verify_tls}. Pole poniżej zmieni zwykłe verify on/off dopiero po usunięciu ZETTA2GO_CA_BUNDLE z konfiguracji środowiska.")
+
+    with st.form("zetta2go_settings_form", clear_on_submit=False):
+        c1, c2 = st.columns(2)
+        username = c1.text_input("Login Zetta2GO", value=zcfg.username, autocomplete="username")
+        password = c2.text_input("Hasło Zetta2GO", value=zcfg.password, type="password", autocomplete="current-password")
+
+        a1, a2 = st.columns([1.35, 1])
+        base_url = a1.text_input("Adres Zetta2GO", value=zcfg.base_url)
+        station_id = a2.text_input("Station ID EMAUS", value=zcfg.station_id)
+
+        o1, o2, o3 = st.columns(3)
+        verify_tls = o1.checkbox("Weryfikuj certyfikat TLS", value=(zcfg.verify_tls is True))
+        live_enabled = o2.checkbox("Played live co minutę", value=zcfg.live_enabled)
+        schedule_enabled = o3.checkbox("Scheduled + cutoff", value=zcfg.schedule_enabled)
+        horizon = st.number_input(
+            "Ile dni Scheduled pobierać do przodu", min_value=1, max_value=31,
+            value=int(zcfg.schedule_horizon_days), step=1,
+        )
+        st.caption("Cutoff jutrzejszego logu: 23:59 dnia poprzedniego. Po zapisaniu ustawień worker zobaczy je automatycznie przy następnym cyklu — restart kontenera nie jest potrzebny.")
+
+        b1, b2, _ = st.columns([1, 1, 2.5])
+        save_only = b1.form_submit_button("Zapisz", type="primary", use_container_width=True)
+        save_test = b2.form_submit_button("Zapisz i testuj", use_container_width=True)
+
+    if save_only or save_test:
+        save_zetta2go_settings(
+            username=username, password=password, base_url=base_url, station_id=station_id,
+            verify_tls=verify_tls, schedule_horizon_days=int(horizon),
+            live_enabled=live_enabled, schedule_enabled=schedule_enabled,
+        )
+        if save_test:
+            try:
+                result = local_test_zetta2go_connection()
+                st.session_state["settings_zetta_message"] = ("success", f"Zetta2GO działa · rekordów bieżącego dnia: {result.get('records', 0)}.")
+            except Exception as exc:
+                st.session_state["settings_zetta_message"] = ("error", f"Zetta2GO: {exc}")
+        else:
+            st.session_state["settings_zetta_message"] = ("success", "Ustawienia Zetta2GO zapisane. Worker użyje ich przy następnym cyklu.")
+        st.rerun()
+
+    message = st.session_state.pop("settings_zetta_message", None)
+    if message:
+        kind, text = message
+        (st.success if kind == "success" else st.error)(text)
+
+    if st.button("Wyczyść login i hasło Zetta2GO", key="clear_zetta_credentials"):
+        save_zetta2go_settings(
+            username="", password="", base_url=zcfg.base_url, station_id=zcfg.station_id,
+            verify_tls=(zcfg.verify_tls is True), schedule_horizon_days=zcfg.schedule_horizon_days,
+            live_enabled=zcfg.live_enabled, schedule_enabled=zcfg.schedule_enabled,
+        )
+        st.session_state["settings_zetta_message"] = ("success", "Login i hasło Zetta2GO wyczyszczone; automatyczna synchronizacja będzie pomijana.")
+        st.rerun()
+
+
 view_key = BOOT_VIEW_KEY
 render_nav_tabs(view_key)
 install_client_helpers()
@@ -3101,9 +3278,12 @@ AIR_DATA_REV = airplay_data_revision() if view_key == "dashboard" else ""
 REVISION = CHART_REV
 
 if view_key in {"dashboard", "archive"}:
-    df = with_notes(cached_scores(REVISION))
     if view_key == "dashboard":
-        df = with_dashboard_airplay(df, AIR_DATA_REV)
+        # Cache the expensive immutable score+airplay merge.  Only live notes are
+        # overlaid on each Streamlit rerun.
+        df = with_notes(cached_dashboard_base_frame(REVISION, AIR_DATA_REV, 0))
+    else:
+        df = with_notes(cached_scores(REVISION))
 else:
     df = pd.DataFrame()
 
@@ -3145,8 +3325,8 @@ if view_key == "dashboard":
             help="Chart Score i Momentum są liczone ponownie tylko z obserwacji z wybranego okresu. Widok Całość najlepiej oddaje historię list; krótsze okresy służą do analizy świeżego zachowania.",
         )
         lookback = int(period_map[period_label])
-        period_df = df if lookback == 0 else with_dashboard_airplay(
-            with_notes(cached_scores(REVISION, lookback_days=lookback)), AIR_DATA_REV
+        period_df = df if lookback == 0 else with_notes(
+            cached_dashboard_base_frame(REVISION, AIR_DATA_REV, lookback)
         )
 
         # Dashboard: selected-period spin count.  Całość uses the song-ordered
@@ -4164,8 +4344,9 @@ elif view_key == "library":
 elif view_key == "our_radio":
     st.subheader("📻 EMAUS")
     st.caption(
-        "EMAUS jest trzymany osobno od monitoringu rynku. Scheduled = plan wyeksportowany z GSelectora, "
-        "Played = stan po reconciliation. Importy są wersjonowane, więc ponowny eksport dnia nie kasuje poprzedniego snapshotu."
+        "EMAUS jest trzymany osobno od monitoringu rynku. Przy skonfigurowanym Zetta2GO Scheduled = ostatni snapshot "
+        "logu przed emisją (cutoff 23:59 dnia poprzedniego), a Played = live log Zetty odświeżany co minutę. "
+        "Ręczny GSelector zostaje jako fallback i archiwum."
     )
     # st.tabs executes every tab body on every rerun. That made /EMAUS load the
     # timeline, comparison, song stats and import history before the user saw
@@ -4364,6 +4545,9 @@ elif view_key == "data":
         for item in latest_issues():
             st.caption(f"**{item['source']}** · {item['chart_date']} · {item['entries']} pozycji")
 
+
+elif view_key == "settings":
+    _render_settings()
 
 else:
     st.markdown("## 📘 Manual RadioCharts")

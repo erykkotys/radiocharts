@@ -45,3 +45,15 @@ thresholds:
   current_familiar: 70
   rising: 65
   fading: 40
+
+emaus:
+  zetta2go:
+    url: https://emaus-zetta-srv.swdm.local/Zetta2GO
+    station_id: 3658ac9a-335e-4839-ac18-2159ba1e4a16
+    username: ""
+    password: ""  # fallback; normalnie ustaw login/hasło w zakładce Ustawienia
+    verify_tls: true
+    timeout: 15
+    schedule_horizon_days: 14
+    schedule_enabled: true
+    live_enabled: true

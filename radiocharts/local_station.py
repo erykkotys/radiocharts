@@ -14,6 +14,15 @@ from typing import Any, Iterable
 from filelock import FileLock
 
 from radiocharts import db
+from radiocharts.zetta2go import (
+    EDIT_CODE_NAMES as ZETTA_EDIT_CODE_NAMES,
+    NONPLAYED_STATUS_CODES as ZETTA_NONPLAYED_STATUS_CODES,
+    PLAYED_STATUS_CODES as ZETTA_PLAYED_STATUS_CODES,
+    UPCOMING_STATUS_CODES as ZETTA_UPCOMING_STATUS_CODES,
+    STATUS_NAMES as ZETTA_STATUS_NAMES,
+    Zetta2GoClient,
+    settings as zetta2go_settings,
+)
 
 STATION_KEY = "EMAUS"
 LOCAL_KINDS = ("schedule", "played")
@@ -389,6 +398,485 @@ def _existing_song_id(con, artist: str, title: str) -> int | None:
     return int(row["canonical_song_id"]) if row else None
 
 
+
+
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    # .NET often emits seven fractional digits; Python datetime stores six.
+    value = re.sub(r"(\.\d{6})\d+(?=([+-]\d\d:\d\d)?$)", r"\1", value)
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _time_raw_from_group(actual: datetime | None, group_hour: int | None) -> str:
+    if actual is None:
+        return ""
+    if group_hour is None:
+        return f"{actual.hour:02d}:{actual.minute:02d}:{actual.second + actual.microsecond / 1_000_000:04.1f}"
+    start = actual.replace(hour=int(group_hour), minute=0, second=0, microsecond=0)
+    elapsed = (actual - start).total_seconds()
+    # 23:xx log entries can legitimately air after midnight while still
+    # belonging to the previous scheduling hour.
+    if elapsed < -3600:
+        elapsed += 86400
+    if elapsed < 0:
+        # Keep odd backtimed values readable instead of inventing negative minutes.
+        return f"{actual.hour:02d}:{actual.minute:02d}:{actual.second + actual.microsecond / 1_000_000:04.1f}"
+    minute = int(elapsed // 60)
+    second = elapsed - minute * 60
+    return f"{int(group_hour):02d}:{minute:02d}:{second:04.1f}"
+
+
+def _zetta_event_type(asset: dict[str, Any]) -> str:
+    asset_type = int(asset.get("AssetTypeID") or 0)
+    title = str(asset.get("Title") or "")
+    upper = title.upper()
+    if asset_type == 1:
+        return "song"
+    if asset_type == 2:
+        return "traffic"
+    if "JINGLE" in upper:
+        return "jingle"
+    if "INFORMACJE" in upper or "SERWIS" in upper:
+        return "info"
+    if "PODKŁAD" in upper or "PODKLAD" in upper:
+        return "bed"
+    if "AUDYCJ" in upper or "WYWIAD" in upper:
+        return "show"
+    return "other"
+
+
+def _zetta_category(event_type: str, asset: dict[str, Any]) -> str:
+    if event_type == "song":
+        return "Zetta / Song"
+    if event_type == "traffic":
+        sponsor = str(asset.get("Sponsor") or "").strip()
+        return f"Zetta / Reklama{(' / ' + sponsor) if sponsor else ''}"
+    return f"Zetta / {event_type.title()}"
+
+
+def parse_zetta2go_log(
+    payload: dict[str, Any],
+    service_date: date | str,
+    *,
+    kind: str = "played",
+) -> list[dict[str, Any]]:
+    """Normalize Zetta2GO GetLog JSON into local_station event dictionaries.
+
+    ``schedule`` snapshots intentionally retain READY/future events because the
+    last pre-emission snapshot is the immutable comparison baseline. ``played``
+    live snapshots also retain READY/WAITING rows in storage: the normal Played
+    timeline filters them out, while reconciliation can immediately detect a
+    post-cutoff insert/delete before its airtime arrives.
+    """
+    if kind not in LOCAL_KINDS:
+        raise ValueError(kind)
+    d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
+    source_rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(source_rows, list):
+        raise ValueError("Zetta2GO GetLog: brak tablicy rows.")
+
+    out: list[dict[str, Any]] = []
+    current_group_hour: int | None = None
+    for source_index, source in enumerate(source_rows, start=1):
+        if not isinstance(source, dict):
+            continue
+        cell = source.get("cell")
+        if not isinstance(cell, list) or len(cell) < 19:
+            continue
+        try:
+            entry_type = int(cell[0] or 0)
+        except (TypeError, ValueError):
+            entry_type = 0
+        try:
+            status_code = int(cell[9])
+        except (TypeError, ValueError):
+            status_code = 0
+        try:
+            edit_code = int(cell[2] or 0)
+        except (TypeError, ValueError):
+            edit_code = 0
+        actual = _parse_iso_datetime(cell[5])
+
+        # TOH rows define the scheduling hour. Using that hour instead of the
+        # wall-clock AirTime preserves 60+ minutes/hour semantics in comparisons.
+        if entry_type == 3:
+            if actual is not None:
+                current_group_hour = actual.hour
+            continue
+
+        raw_asset = cell[7]
+        asset = raw_asset if isinstance(raw_asset, dict) else {}
+        row_id = str(source.get("id") or "")
+        universal_id = str(asset.get("UniversalIdentifier") or "") if asset else ""
+        source_event_id = universal_id or row_id
+
+        if entry_type == 15:  # Exact Time Marker
+            etm_type = str(asset.get("ETMType") or "").strip() or "Other"
+            raw_time = _time_raw_from_group(actual, current_group_hour)
+            minute = actual.minute if actual is not None else 0
+            second = actual.second if actual is not None else 0
+            title = f"ETM_{minute:02d}:{second:02d}_{etm_type}"
+            gap_ms = asset.get("gap")
+            try:
+                gap_seconds = float(gap_ms) / 1000.0 if gap_ms is not None else None
+            except (TypeError, ValueError):
+                gap_seconds = None
+            event_type = "etm"
+            artist = ""
+            category = "ETM"
+            runtime_seconds = 0.0
+            runtime_raw = ""
+            asset_id = ""
+            sponsor = ""
+        elif entry_type == 106:  # playable asset, including nested traffic spots
+            if not asset:
+                continue
+            event_type = _zetta_event_type(asset)
+            artist = str(asset.get("Artist") or "").strip()
+            title = str(asset.get("Title") or "").strip()
+            category = _zetta_category(event_type, asset)
+            asset_id = str(asset.get("AssetID") or "").strip()
+            sponsor = str(asset.get("Sponsor") or "").strip()
+            raw_time = _time_raw_from_group(actual, current_group_hour)
+            runtime_raw = str(asset.get("Runtime") or "").strip()
+            try:
+                runtime_seconds = float(cell[15]) / 1000.0 if cell[15] not in (None, "") else _parse_duration(runtime_raw)
+            except (TypeError, ValueError):
+                runtime_seconds = _parse_duration(runtime_raw)
+            gap_seconds = None
+        else:
+            # Spot Block parents, TOH and helper rows are not audio files. Their
+            # playable children (entry type 106) are already returned separately.
+            continue
+
+        air_seconds, odd_time = _parse_time(raw_time)
+        try:
+            duration_ms = float(cell[18]) if cell[18] not in (None, "") else None
+        except (TypeError, ValueError):
+            duration_ms = None
+        calculated = cell[16] if isinstance(cell[16], dict) else {}
+        meta = {
+            "source_system": "zetta2go",
+            "snapshot_kind": kind,
+            "row_id": row_id,
+            "source_event_id": source_event_id,
+            "log_event_entry_type": entry_type,
+            "status_code": status_code,
+            "status_name": ZETTA_STATUS_NAMES.get(status_code, f"STATUS_{status_code}"),
+            "edit_code": edit_code,
+            "edit_code_name": ZETTA_EDIT_CODE_NAMES.get(edit_code, f"EditCode {edit_code}" if edit_code else ""),
+            "asset_id": asset_id,
+            "asset_type_id": int(asset.get("AssetTypeID") or 0) if asset else 0,
+            "universal_identifier": universal_id,
+            "sponsor": sponsor,
+            "play_rate_tooltip": str(asset.get("PlayRateToolTip") or "") if asset else "",
+            "duration_runtime": str(asset.get("DurationRuntime") or "") if asset else "",
+            "duration_ms": duration_ms,
+            "valid_for_playback": bool(cell[3]) if len(cell) > 3 else None,
+            "skip": bool(cell[11]) if len(cell) > 11 else False,
+            "fixed": bool(cell[12]) if len(cell) > 12 else False,
+            "stretch": cell[13] if len(cell) > 13 else None,
+            "calculated_times": calculated,
+            "zetta_gap_ms": asset.get("gap") if entry_type == 15 else None,
+            "zetta_original_gap_ms": asset.get("ogap") if entry_type == 15 else None,
+        }
+        out.append({
+            "line_no": source_index,
+            "sequence_no": len(out),
+            "air_time_raw": raw_time,
+            "air_seconds": air_seconds,
+            "sort_seconds": air_seconds,
+            "schedule_hour": current_group_hour if current_group_hour is not None else _schedule_hour(raw_time),
+            "gap_seconds": _gap_overrun_seconds(raw_time),
+            "gap_raw": _format_gap(_gap_overrun_seconds(raw_time)),
+            "etm_delta_raw": _format_gap(abs(gap_seconds)) if gap_seconds is not None and gap_seconds >= 0 else (
+                ("-" + _format_gap(abs(gap_seconds)).lstrip("+")) if gap_seconds is not None else ""
+            ),
+            "time_anomaly": bool(odd_time),
+            "event_type": event_type,
+            "category": category,
+            "artist": artist,
+            "title": title,
+            # For Zetta->Zetta reconciliation this is the stable log-event GUID,
+            # not the asset GUID. It survives airtime/status changes and gives us
+            # exact matching. Cross-system GSelector fallback still uses text.
+            "external_id": source_event_id,
+            "asset_id": asset_id,
+            "exact_time_raw": "",
+            "exact_seconds": None,
+            "runtime_raw": runtime_raw,
+            "runtime_seconds": runtime_seconds,
+            "source_system": "zetta2go",
+            "play_status_code": status_code,
+            "edit_code_int": edit_code,
+            "payload": meta,
+        })
+    return out
+
+
+def _zetta_snapshot_digest(events: list[dict[str, Any]]) -> str:
+    """Hash only fields that define the visible log state.
+
+    Volatile heartbeat/sync counters are deliberately absent, so minute polling
+    does not write SQLite when nothing user-visible changed.
+    """
+    digest_input = [
+        {
+            "id": e["external_id"], "air": e["air_time_raw"], "type": e["event_type"],
+            "artist": e["artist"], "title": e["title"], "asset": e["asset_id"],
+            "status": e["play_status_code"], "edit": e["edit_code_int"],
+            "runtime": e["runtime_seconds"],
+            "skip": bool((e.get("payload") or {}).get("skip")),
+            "gap": (e.get("payload") or {}).get("zetta_gap_ms"),
+        }
+        for e in events
+    ]
+    raw = json.dumps(digest_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def import_zetta2go_snapshot(
+    payload: dict[str, Any],
+    *,
+    service_date: date | str,
+    kind: str = "played",
+    station_key: str = STATION_KEY,
+    source_name: str | None = None,
+    source: str | None = None,
+    replace_live: bool = False,
+) -> dict[str, Any]:
+    """Persist one Zetta day.
+
+    Scheduled snapshots are versioned/archived. Live Played polling reuses one
+    per-day import row and replaces its event rows in-place, avoiding hundreds
+    of archived snapshots per day while still keeping the latest live state.
+    """
+    if kind not in LOCAL_KINDS:
+        raise ValueError(kind)
+    d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
+    events = parse_zetta2go_log(payload, d, kind=kind)
+    digest = _zetta_snapshot_digest(events)
+    imported_at = _utcnow()
+    source_name = source_name or (f"Zetta2GO Live {d.isoformat()}" if kind == "played" else f"Zetta2GO Scheduled {d.isoformat()}")
+    source = source or ("zetta2go-live" if replace_live else "zetta2go")
+    stable_live_hash = (
+        f"zetta2go-live:{station_key}:{d.isoformat()}"
+        if replace_live else f"zetta2go:{d.isoformat()}:{digest}"
+    )
+
+    db.init_db()
+    with db.connect() as con:
+        existing = con.execute(
+            """SELECT id,date_from,date_to,row_count,source_hash FROM local_station_imports
+               WHERE station_key=? AND kind=? AND source_hash=? LIMIT 1""",
+            (station_key, kind, stable_live_hash),
+        ).fetchone()
+
+        if existing and not replace_live:
+            # The schedule can legitimately return to a previous exact state.
+            # Reactivate it and stamp the latest fetch (important for cutoff).
+            import_id = int(existing["id"])
+            con.execute(
+                "UPDATE local_station_events SET active=0 WHERE station_key=? AND kind=? AND service_date=? AND active=1",
+                (station_key, kind, d.isoformat()),
+            )
+            con.execute("UPDATE local_station_events SET active=1 WHERE import_id=?", (import_id,))
+            con.execute(
+                """UPDATE local_station_imports SET source_name=?,source=?,imported_at=?,row_count=? WHERE id=?""",
+                (source_name, source, imported_at, len(events), import_id),
+            )
+            return {
+                "import_id": import_id, "duplicate": True, "reactivated": True, "kind": kind,
+                "date_from": d.isoformat(), "date_to": d.isoformat(), "days": 1, "rows": len(events),
+                "linked_songs": 0,
+            }
+
+        if existing and replace_live:
+            import_id = int(existing["id"])
+            old_digest_row = con.execute(
+                "SELECT warnings_json FROM local_station_imports WHERE id=?", (import_id,)
+            ).fetchone()
+            try:
+                old_meta = json.loads(str(old_digest_row["warnings_json"] or "{}")) if old_digest_row else {}
+            except Exception:
+                old_meta = {}
+            if isinstance(old_meta, dict) and old_meta.get("content_hash") == digest:
+                # No SQLite write at all when a minute poll is identical. This
+                # keeps local_station_revision stable and avoids pointless UI
+                # cache invalidations while the log has not changed.
+                return {
+                    "import_id": import_id, "duplicate": True, "unchanged": True, "kind": kind,
+                    "date_from": d.isoformat(), "date_to": d.isoformat(), "days": 1, "rows": int(existing["row_count"]),
+                    "linked_songs": 0,
+                }
+            con.execute(
+                "UPDATE local_station_events SET active=0 WHERE station_key=? AND kind=? AND service_date=? AND active=1 AND import_id<>?",
+                (station_key, kind, d.isoformat(), import_id),
+            )
+            con.execute("DELETE FROM local_station_events WHERE import_id=?", (import_id,))
+            con.execute(
+                """UPDATE local_station_imports
+                   SET source_name=?,date_from=?,date_to=?,day_count=1,row_count=?,warnings_json=?,source=?,imported_at=?
+                   WHERE id=?""",
+                (source_name, d.isoformat(), d.isoformat(), len(events), json.dumps({"content_hash": digest}), source, imported_at, import_id),
+            )
+        else:
+            con.execute(
+                "UPDATE local_station_events SET active=0 WHERE station_key=? AND kind=? AND service_date=? AND active=1",
+                (station_key, kind, d.isoformat()),
+            )
+            cur = con.execute(
+                """INSERT INTO local_station_imports(
+                       station_key,kind,source_name,source_hash,date_from,date_to,day_count,row_count,
+                       warnings_json,source,imported_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    station_key, kind, source_name, stable_live_hash, d.isoformat(), d.isoformat(), 1, len(events),
+                    json.dumps({"content_hash": digest}) if replace_live else "[]", source, imported_at,
+                ),
+            )
+            import_id = int(cur.lastrowid)
+
+        linked_songs = 0
+        for event in events:
+            song_id = None
+            if event["event_type"] == "song":
+                song_id = _existing_song_id(con, event["artist"], event["title"])
+                linked_songs += int(song_id is not None)
+            con.execute(
+                """INSERT INTO local_station_events(
+                       import_id,station_key,kind,service_date,sequence_no,line_no,
+                       air_time_raw,air_seconds,sort_seconds,time_anomaly,event_type,category,
+                       artist,title,external_id,exact_time_raw,exact_seconds,runtime_raw,runtime_seconds,
+                       song_id,payload_json,source_system,play_status_code,edit_code_int,asset_id,active,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    import_id, station_key, kind, d.isoformat(), int(event["sequence_no"]), int(event["line_no"]),
+                    event["air_time_raw"], event["air_seconds"], event["sort_seconds"], int(bool(event["time_anomaly"])),
+                    event["event_type"], event["category"], event["artist"], event["title"], event["external_id"],
+                    event["exact_time_raw"], event["exact_seconds"], event["runtime_raw"], event["runtime_seconds"], song_id,
+                    json.dumps(event["payload"], ensure_ascii=False), "zetta2go", event["play_status_code"],
+                    event["edit_code_int"], event["asset_id"], 1, imported_at,
+                ),
+            )
+
+    played_count = sum(1 for e in events if e["event_type"] == "etm" or e["play_status_code"] in ZETTA_PLAYED_STATUS_CODES)
+    nonplayed_count = sum(1 for e in events if e["play_status_code"] in ZETTA_NONPLAYED_STATUS_CODES)
+    upcoming_count = sum(1 for e in events if e["play_status_code"] in ZETTA_UPCOMING_STATUS_CODES)
+    return {
+        "import_id": import_id, "duplicate": False, "kind": kind, "date_from": d.isoformat(), "date_to": d.isoformat(),
+        "days": 1, "rows": len(events), "played_rows": played_count, "nonplayed_rows": nonplayed_count,
+        "upcoming_rows": upcoming_count, "linked_songs": linked_songs,
+    }
+
+
+def sync_zetta2go_day(
+    service_date: date | str,
+    *,
+    station_key: str = STATION_KEY,
+    kind: str = "played",
+    replace_live: bool | None = None,
+    source: str | None = None,
+    source_name: str | None = None,
+    client: Zetta2GoClient | None = None,
+) -> dict[str, Any]:
+    cfg = zetta2go_settings()
+    if not cfg.configured:
+        raise RuntimeError("Brak konfiguracji Zetta2GO. Ustaw ZETTA2GO_USERNAME i ZETTA2GO_PASSWORD.")
+    d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
+    own_client = client is None
+    zclient = client or Zetta2GoClient(cfg)
+    try:
+        if own_client:
+            login = zclient.login()
+        else:
+            login = {"ok": True, "reused_session": True}
+        payload = zclient.get_log(d)
+    finally:
+        if own_client:
+            zclient.close()
+    result = import_zetta2go_snapshot(
+        payload, service_date=d, kind=kind, station_key=station_key,
+        source_name=source_name, source=source,
+        replace_live=(kind == "played") if replace_live is None else bool(replace_live),
+    )
+    result["login"] = login
+    result["records"] = int(payload.get("records") or len(payload.get("rows") or []))
+    return result
+
+
+def sync_zetta2go_schedule_horizon(
+    base_date: date | None = None,
+    *,
+    station_key: str = STATION_KEY,
+    horizon_days: int | None = None,
+    mark_cutoff: bool = True,
+) -> dict[str, Any]:
+    """Refresh future Zetta schedules; tomorrow is always the cutoff snapshot.
+
+    The job never rewrites today's Scheduled baseline. Running it every day at
+    23:59 therefore makes the D+1 fetch the final pre-emission snapshot; any
+    later change is visible only in the live log and becomes an intervention.
+    """
+    cfg = zetta2go_settings()
+    if not cfg.configured:
+        raise RuntimeError("Brak konfiguracji Zetta2GO. Ustaw ZETTA2GO_USERNAME i ZETTA2GO_PASSWORD.")
+    if not cfg.schedule_enabled:
+        return {"ok": True, "disabled": True, "days": []}
+    base = base_date or date.today()
+    horizon = max(1, min(31, int(horizon_days or cfg.schedule_horizon_days)))
+    results: list[dict[str, Any]] = []
+    with Zetta2GoClient(cfg) as client:
+        client.login()
+        for offset in range(1, horizon + 1):
+            d = base + timedelta(days=offset)
+            cutoff = bool(mark_cutoff and offset == 1)
+            payload = client.get_log(d)
+            item = import_zetta2go_snapshot(
+                payload, service_date=d, kind="schedule", station_key=station_key,
+                source_name=f"Zetta2GO {'CUTOFF' if cutoff else 'forecast'} {d.isoformat()}",
+                source="zetta2go-cutoff" if cutoff else "zetta2go-forecast",
+                replace_live=False,
+            )
+            item["cutoff"] = cutoff
+            item["service_date"] = d.isoformat()
+            item["records"] = int(payload.get("records") or len(payload.get("rows") or []))
+            results.append(item)
+    return {
+        "ok": True, "base_date": base.isoformat(), "horizon_days": horizon,
+        "cutoff_date": (base + timedelta(days=1)).isoformat() if mark_cutoff else None, "days": results,
+    }
+
+
+def sync_zetta2go_live(service_date: date | None = None, *, station_key: str = STATION_KEY) -> dict[str, Any]:
+    cfg = zetta2go_settings()
+    if not cfg.live_enabled:
+        return {"ok": True, "disabled": True}
+    d = service_date or date.today()
+    return sync_zetta2go_day(
+        d, station_key=station_key, kind="played", replace_live=True,
+        source="zetta2go-live", source_name=f"Zetta2GO Live {d.isoformat()}",
+    )
+
+
+def test_zetta2go_connection() -> dict[str, Any]:
+    cfg = zetta2go_settings()
+    if not cfg.configured:
+        return {"ok": False, "configured": False, "message": "Brak loginu/hasła Zetta2GO."}
+    with Zetta2GoClient(cfg) as client:
+        login = client.login()
+        payload = client.get_log(date.today())
+    return {
+        "ok": True, "configured": True, "login": login,
+        "records": int(payload.get("records") or len(payload.get("rows") or [])),
+        "station_id": cfg.station_id, "base_url": cfg.base_url,
+    }
+
 def import_gselector_export(
     data: bytes | str,
     *,
@@ -573,6 +1061,7 @@ def events_for_day(
     hour: int | None = None,
     event_types: Iterable[str] | None = None,
     station_key: str = STATION_KEY,
+    include_nonplayed: bool = False,
 ) -> list[dict[str, Any]]:
     if kind not in LOCAL_KINDS:
         raise ValueError(kind)
@@ -588,7 +1077,8 @@ def events_for_day(
         rows = con.execute(
             f"""SELECT id,service_date,sequence_no,line_no,air_time_raw,air_seconds,sort_seconds,
                        time_anomaly,event_type,category,artist,title,external_id,exact_time_raw,
-                       runtime_raw,runtime_seconds,song_id,import_id,payload_json
+                       runtime_raw,runtime_seconds,song_id,import_id,payload_json,
+                       source_system,play_status_code,edit_code_int,asset_id
                 FROM local_station_events WHERE {' AND '.join(where)}
                 ORDER BY sequence_no""",
             params,
@@ -596,18 +1086,68 @@ def events_for_day(
     out: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
+        meta: dict[str, Any] = {}
         try:
-            raw_fields = json.loads(str(item.pop("payload_json") or "[]"))
-            if not isinstance(raw_fields, list):
+            payload = json.loads(str(item.pop("payload_json") or "[]"))
+            if isinstance(payload, list):
+                raw_fields = payload
+            elif isinstance(payload, dict):
+                raw_fields = payload.get("raw_fields") if isinstance(payload.get("raw_fields"), list) else []
+                meta = payload
+            else:
                 raw_fields = []
         except Exception:
             raw_fields = []
-        for key, _label, index in GSELECTOR_SONG_COLUMNS:
-            item[key] = str(raw_fields[index]) if item.get("event_type") == "song" and len(raw_fields) > index else ""
+        if str(item.get("source_system") or "") != "zetta2go":
+            for key, _label, index in GSELECTOR_SONG_COLUMNS:
+                item[key] = str(raw_fields[index]) if item.get("event_type") == "song" and len(raw_fields) > index else ""
+        else:
+            # Do not let empty GSelector projections overwrite native Zetta
+            # event GUID/runtime fields already stored in the row.
+            for key, _label, _index in GSELECTOR_SONG_COLUMNS:
+                item.setdefault(key, "")
         item["schedule_hour"] = _schedule_hour(str(item.get("air_time_raw") or ""))
         item["gap_seconds"] = _gap_overrun_seconds(str(item.get("air_time_raw") or ""))
         item["gap_raw"] = _format_gap(item["gap_seconds"])
-        item["etm_delta_raw"] = str(raw_fields[2]) if item.get("event_type") == "etm" and len(raw_fields) > 2 else ""
+        if str(item.get("source_system") or "") == "zetta2go":
+            status_code = int(item.get("play_status_code") or 0)
+            item["zetta_status_code"] = status_code
+            item["zetta_status"] = ZETTA_STATUS_NAMES.get(status_code, f"STATUS_{status_code}")
+            edit_int = int(item.get("edit_code_int") or 0)
+            item["zetta_edit_code"] = edit_int
+            item["zetta_edit_name"] = ZETTA_EDIT_CODE_NAMES.get(edit_int, f"EditCode {edit_int}" if edit_int else "")
+            item["edit_code"] = " · ".join(x for x in [str(edit_int) if edit_int else "", item["zetta_edit_name"]] if x)
+            item["zetta_asset_id"] = str(item.get("asset_id") or meta.get("asset_id") or "")
+            item["play_rate_tooltip"] = str(meta.get("play_rate_tooltip") or "")
+            item["duration_runtime"] = str(meta.get("duration_runtime") or "")
+            item["zetta_skip"] = bool(meta.get("skip"))
+            item["zetta_fixed"] = bool(meta.get("fixed"))
+            item["zetta_valid_for_playback"] = meta.get("valid_for_playback")
+            item["etm_delta_raw"] = ""
+            if item.get("event_type") == "etm":
+                gap_ms = meta.get("zetta_gap_ms")
+                try:
+                    if gap_ms is not None:
+                        gap_seconds = float(gap_ms) / 1000.0
+                        sign = "+" if gap_seconds >= 0 else "-"
+                        value = abs(gap_seconds)
+                        minutes = int(value // 60)
+                        seconds = value - minutes * 60
+                        item["etm_delta_raw"] = f"{sign}{minutes:02d}:{seconds:04.1f}".rstrip("0").rstrip(".")
+                except (TypeError, ValueError):
+                    pass
+            # Stored NOT_PLAYED/EVENT_ERROR rows are useful for reconciliation
+            # reasons, but the normal Played timeline/statistics must not count
+            # them as emissions.
+            if kind == "played" and not include_nonplayed and item.get("event_type") != "etm" and status_code not in ZETTA_PLAYED_STATUS_CODES:
+                continue
+        else:
+            item["zetta_status_code"] = None
+            item["zetta_status"] = ""
+            item["zetta_edit_code"] = None
+            item["zetta_edit_name"] = ""
+            item["zetta_asset_id"] = ""
+            item["etm_delta_raw"] = str(raw_fields[2]) if item.get("event_type") == "etm" and len(raw_fields) > 2 else ""
         out.append(item)
     # Older imports may predate complete traffic-block classification. Reapply
     # the same-time grouping on read so users do not have to re-import files.
@@ -646,10 +1186,11 @@ def song_stats(
     db.init_db()
     with db.connect() as con:
         rows = con.execute(
-            """SELECT service_date,sort_seconds,air_time_raw,artist,title,category,external_id,song_id
+            """SELECT service_date,sort_seconds,air_time_raw,artist,title,category,external_id,song_id,source_system
                FROM local_station_events
                WHERE station_key=? AND kind=? AND active=1 AND event_type='song'
                  AND service_date BETWEEN ? AND ?
+                 AND (source_system<>'zetta2go' OR play_status_code IN (-3,2,3,6,7,8,9))
                ORDER BY service_date,sort_seconds,sequence_no""",
             (station_key, kind, s, e),
         ).fetchall()
@@ -658,7 +1199,10 @@ def song_stats(
     for row in rows:
         external_id = str(row["external_id"] or "").strip()
         artist, title = str(row["artist"] or ""), str(row["title"] or "")
-        identity = ("id", db.normalize(external_id)) if external_id else ("text", db.normalize(artist), db.normalize(title))
+        if str(row["source_system"] or "") == "zetta2go":
+            identity = ("song", str(int(row["song_id"]))) if row["song_id"] is not None else ("text", db.normalize(artist), db.normalize(title))
+        else:
+            identity = ("id", db.normalize(external_id)) if external_id else ("text", db.normalize(artist), db.normalize(title))
         item = groups.setdefault(identity, {
             "artist": artist,
             "title": title,
@@ -714,17 +1258,35 @@ def song_stats(
 
 
 def _identity_key(row: dict[str, Any]) -> tuple[str, ...]:
-    """Stable identity used only inside one hourly reconciliation block."""
-    ext = db.normalize(str(row.get("external_id") or ""))
+    """Stable cross-system identity used inside one hourly reconciliation block.
+
+    GSelector numeric IDs and Zetta AssetID GUIDs are unrelated namespaces, so
+    text/canonical-song identity must be symmetric across the two sources.
+    """
     typ = str(row.get("event_type") or "other")
-    if ext:
-        return (typ, "id", ext)
+    # When both sides come from Zetta2GO, external_id is the log-event GUID
+    # (UniversalIdentifier / row id), so it is the strongest possible identity.
+    # GSelector IDs live in a different namespace and keep using text/song identity.
+    if str(row.get("source_system") or "") == "zetta2go":
+        ext = str(row.get("external_id") or "").strip()
+        if ext:
+            return (typ, "zetta-event", ext.casefold())
     if typ == "song":
         song_id = row.get("song_id")
         if song_id is not None:
             return (typ, "song", str(int(song_id)))
         return (typ, "text", db.normalize(str(row.get("artist") or "")), db.normalize(str(row.get("title") or "")))
-    return (typ, "text", db.normalize(str(row.get("category") or "")), db.normalize(str(row.get("title") or "")))
+    if typ == "etm":
+        title = db.normalize(str(row.get("title") or ""))
+        # Imported Zetta ETM titles are synthesized to the same MM:SS/type form
+        # as GSelector. External IDs intentionally do not participate.
+        return (typ, "text", title)
+    title = db.normalize(str(row.get("title") or ""))
+    if title:
+        return (typ, "text", title)
+    category = db.normalize(str(row.get("category") or ""))
+    ext = db.normalize(str(row.get("external_id") or ""))
+    return (typ, "fallback", category, ext)
 
 
 def _occurrence_tokens(rows: list[dict[str, Any]]) -> tuple[list[tuple[Any, ...]], dict[tuple[Any, ...], dict[str, Any]]]:
@@ -762,7 +1324,10 @@ def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool,
         str(played.get("extra_21") or ""),
     ]
     edit_text = " ".join(text_parts).casefold()
+    zetta_status = int(played.get("zetta_status_code") or 0)
+    zetta_edit = int(played.get("zetta_edit_code") or 0)
     textual_fade = any(term in edit_text for term in ("fade", "faded", "ścięt", "sciet"))
+    zetta_fade = zetta_status in {6, 7, 8} or zetta_edit == 217
 
     sr = scheduled.get("runtime_seconds")
     pr = played.get("runtime_seconds")
@@ -771,6 +1336,10 @@ def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool,
         diff = float(sr) - float(pr)
         if diff > 5.0:
             cut = diff
+    if zetta_fade:
+        label = ZETTA_STATUS_NAMES.get(zetta_status, "")
+        reason = played.get("zetta_edit_name") or label or "Zetta"
+        return True, cut, f"{reason}"
     if textual_fade:
         return True, cut, "Faded/ścięty wg danych playout"
     if cut is not None:
@@ -908,7 +1477,45 @@ def _compare_hour_rows(
             delta = float(played_row["sort_seconds"]) - float(sched["sort_seconds"])
         faded, cut_seconds, fade_note = _fade_info(sched, played_row)
         moved = token in reordered
-        if moved and faded:
+        zetta_status = played_row.get("zetta_status_code")
+        try:
+            zetta_status = int(zetta_status) if zetta_status is not None else None
+        except (TypeError, ValueError):
+            zetta_status = None
+
+        same_zetta_event = (
+            str(sched.get("source_system") or "") == "zetta2go"
+            and str(played_row.get("source_system") or "") == "zetta2go"
+            and str(sched.get("external_id") or "")
+            and str(sched.get("external_id") or "") == str(played_row.get("external_id") or "")
+        )
+        changed = False
+        if same_zetta_event:
+            sched_asset = str(sched.get("asset_id") or "")
+            play_asset = str(played_row.get("asset_id") or "")
+            changed = bool(sched_asset and play_asset and sched_asset != play_asset)
+            changed = changed or db.normalize(str(sched.get("artist") or "")) != db.normalize(str(played_row.get("artist") or ""))
+            changed = changed or db.normalize(str(sched.get("title") or "")) != db.normalize(str(played_row.get("title") or ""))
+
+        status_note = fade_note
+        if zetta_status in ZETTA_NONPLAYED_STATUS_CODES:
+            status = "Niezagrane"
+            reason = str(played_row.get("zetta_edit_name") or played_row.get("zetta_status") or "").strip()
+            status_note = reason or "Zetta oznaczyła element jako niezagrany."
+        elif changed:
+            status = "Zmieniony + kolejność" if moved else "Zmieniony"
+            reason = str(played_row.get("zetta_edit_name") or "").strip()
+            status_note = reason or "Ten sam wpis logu ma po cutoff inny asset/tytuł."
+        elif zetta_status in ZETTA_UPCOMING_STATUS_CODES:
+            status = "Kolejność" if moved else "Oczekuje"
+            status_note = str(played_row.get("zetta_status") or "")
+        elif zetta_status in {-3, 2, 9}:
+            if moved:
+                status = "Kolejność + w trakcie"
+            else:
+                status = "W trakcie"
+            status_note = str(played_row.get("zetta_status") or "")
+        elif moved and faded:
             status = "Kolejność + ścięty"
         elif moved:
             status = "Kolejność"
@@ -935,7 +1542,7 @@ def _compare_hour_rows(
             "scheduled_id": sid,
             "played_id": pid,
             "external_id": sched.get("external_id") or played_row.get("external_id") or "",
-            "note": fade_note,
+            "note": status_note,
         })
 
     for token in play_tokens:
@@ -966,9 +1573,10 @@ def _compare_hour_rows(
 
     counts = Counter(row["status"] for row in rows)
     matched = sum(1 for row in rows if row["status"] not in {"Niezagrane", "Dodane"})
-    reordered_count = sum(1 for row in rows if "Kolejność" in row["status"])
+    reordered_count = sum(1 for row in rows if "kolejność" in row["status"].casefold())
     faded_count = sum(1 for row in rows if "ścięty" in row["status"].casefold())
-    differences = [row for row in rows if row["status"] != "OK"]
+    changed_count = sum(1 for row in rows if "zmieniony" in row["status"].casefold())
+    differences = [row for row in rows if row["status"] not in {"OK", "Oczekuje", "W trakcie"}]
     display_pairs = _comparison_display_pairs(
         scheduled, played, sched_tokens, play_tokens, sched_lookup, play_lookup, common,
         schedule_status, played_status,
@@ -984,6 +1592,9 @@ def _compare_hour_rows(
         "added": counts.get("Dodane", 0),
         "reordered": reordered_count,
         "faded": faded_count,
+        "changed": changed_count,
+        "waiting": counts.get("Oczekuje", 0),
+        "in_progress": counts.get("W trakcie", 0),
         "ok": counts.get("OK", 0),
         "differences": len(differences),
         "rows": rows,
@@ -1013,7 +1624,7 @@ def compare_hour(
         raise ValueError("hour must be 0..23")
 
     scheduled = events_for_day("schedule", service_date, hour=hour, station_key=station_key)
-    played = events_for_day("played", service_date, hour=hour, station_key=station_key)
+    played = events_for_day("played", service_date, hour=hour, station_key=station_key, include_nonplayed=True)
     return _compare_hour_rows(
         service_date,
         hour,
@@ -1035,7 +1646,7 @@ def compare_day(
     times (2 sides × 24 hours), which made the comparison tab needlessly slow.
     """
     scheduled_rows = events_for_day("schedule", service_date, station_key=station_key)
-    played_rows = events_for_day("played", service_date, station_key=station_key)
+    played_rows = events_for_day("played", service_date, station_key=station_key, include_nonplayed=True)
 
     scheduled_by_hour: dict[int, list[dict[str, Any]]] = defaultdict(list)
     played_by_hour: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -1067,6 +1678,9 @@ def compare_day(
         "added": sum(int(item["added"]) for item in hourly),
         "reordered": sum(int(item["reordered"]) for item in hourly),
         "faded": sum(int(item["faded"]) for item in hourly),
+        "changed": sum(int(item.get("changed") or 0) for item in hourly),
+        "waiting": sum(int(item.get("waiting") or 0) for item in hourly),
+        "in_progress": sum(int(item.get("in_progress") or 0) for item in hourly),
         "on_time": sum(int(item["ok"]) for item in hourly),
         "avg_abs_delta_seconds": None,
         "rows": rows,
@@ -1080,6 +1694,9 @@ def compare_day(
                 "added": int(item["added"]),
                 "reordered": int(item["reordered"]),
                 "faded": int(item["faded"]),
+                "changed": int(item.get("changed") or 0),
+                "waiting": int(item.get("waiting") or 0),
+                "in_progress": int(item.get("in_progress") or 0),
             }
             for item in hourly
         ],
@@ -1186,7 +1803,8 @@ def song_activity(
         bounds = con.execute(
             """SELECT MIN(service_date) AS dmin, MAX(service_date) AS dmax
                FROM local_station_events
-               WHERE station_key=? AND active=1 AND event_type='song' AND song_id=?""",
+               WHERE station_key=? AND active=1 AND event_type='song' AND song_id=?
+                 AND (kind<>'played' OR source_system<>'zetta2go' OR play_status_code IN (-3,2,3,6,7,8,9))""",
             (station_key, sid),
         ).fetchone()
         if not bounds or not bounds["dmin"]:
@@ -1200,6 +1818,7 @@ def song_activity(
                FROM local_station_events
                WHERE station_key=? AND active=1 AND event_type='song' AND song_id=?
                  AND service_date BETWEEN ? AND ?
+                 AND (kind<>'played' OR source_system<>'zetta2go' OR play_status_code IN (-3,2,3,6,7,8,9))
                ORDER BY service_date,sequence_no""",
             (station_key, sid, s, e),
         ).fetchall()
