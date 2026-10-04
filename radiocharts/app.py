@@ -2376,6 +2376,129 @@ def _local_row_clock_seconds(row: dict) -> float | None:
     return hour * 3600.0 + minute * 60.0 + second
 
 
+
+def _local_apply_hour_boundary_gaps(rows: list[dict]) -> list[dict]:
+    """Rebuild full-hour Hard/Soft gap without counting queued 60+ rows.
+
+    Zetta2GO loads one log hour at a time and commonly reports 00:00/HH:00 ETMs
+    as zero.  For the UI we restore the carry from the previous scheduling hour.
+
+    Crucially, only an element that *started before* the boundary may define the
+    tail crossing that boundary. Rows whose start is already 60+ minutes are
+    queued overrun rows; counting them is what produced false +17/+30/+50 min
+    values in 1.2.12-1.2.15.
+    """
+    out = [dict(row) for row in rows]
+    by_hour: dict[int, list[dict]] = {}
+    for row in out:
+        try:
+            hour = int(row.get("schedule_hour"))
+        except (TypeError, ValueError):
+            continue
+        by_hour.setdefault(hour, []).append(row)
+
+    def offset_in_hour(row: dict, hour: int) -> float | None:
+        clock = _local_row_clock_seconds(row)
+        if clock is None:
+            return None
+        return clock - hour * 3600.0
+
+    def first_playable_after(group: list[dict], index: int, reset_clock: float) -> float | None:
+        for candidate in group[index + 1:]:
+            if str(candidate.get("event_type") or "") == "etm":
+                kind = _local_etm_kind(candidate)
+                if kind in {"Hard", "Soft", "Reset"}:
+                    return None
+                continue
+            if bool(candidate.get("zetta_skip")):
+                continue
+            clock = _local_row_clock_seconds(candidate)
+            if clock is None:
+                continue
+            return (clock - reset_clock) * 1000.0
+        return None
+
+    for hour in range(1, 24):
+        current = by_hour.get(hour, [])
+        marker = next(
+            (
+                row for row in current
+                if str(row.get("source_system") or "") == "zetta2go"
+                and str(row.get("event_type") or "") == "etm"
+                and _local_etm_kind(row) in {"Hard", "Soft"}
+                and (lambda off: off is not None and abs(off) <= 0.05)(offset_in_hour(row, hour))
+            ),
+            None,
+        )
+        if marker is None:
+            continue
+
+        prev_hour = hour - 1
+        previous = by_hour.get(prev_hour, [])
+        if not previous:
+            continue
+
+        last_control = 0.0
+        boundary_reset: tuple[int, dict, float] | None = None
+        for idx, row in enumerate(previous):
+            if str(row.get("event_type") or "") != "etm":
+                continue
+            kind = _local_etm_kind(row)
+            off = offset_in_hour(row, prev_hour)
+            if off is None:
+                continue
+            if kind in {"Hard", "Soft"} and 0 <= off < 3600.0:
+                last_control = max(last_control, off)
+            if kind == "Reset" and 3590.0 <= off <= 3600.0:
+                boundary_reset = (idx, row, off)
+
+        derived_ms: float | None = None
+        source = ""
+        if boundary_reset is not None:
+            idx, reset_row, reset_off = boundary_reset
+            reset_clock = _local_row_clock_seconds(reset_row)
+            local_ms = first_playable_after(previous, idx, reset_clock) if reset_clock is not None else None
+            if local_ms is None:
+                value = reset_row.get("zetta_reset_local_gap_ms")
+                if value is None:
+                    value = reset_row.get("zetta_gap_native_ms")
+                if value is None:
+                    value = reset_row.get("zetta_gap_ms")
+                try:
+                    local_ms = float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    local_ms = None
+            if local_ms is not None:
+                derived_ms = local_ms - (3600.0 - reset_off) * 1000.0
+                source = "previous_hour_reset"
+        else:
+            ends: list[float] = []
+            for candidate in previous:
+                if str(candidate.get("event_type") or "") == "etm" or bool(candidate.get("zetta_skip")):
+                    continue
+                off = offset_in_hour(candidate, prev_hour)
+                if off is None or not (last_control <= off < 3600.0):
+                    continue
+                try:
+                    runtime = float(candidate.get("runtime_seconds") or 0.0)
+                except (TypeError, ValueError):
+                    runtime = 0.0
+                if runtime > 0:
+                    ends.append(off + runtime)
+            if ends:
+                derived_ms = (max(ends) - 3600.0) * 1000.0
+                source = "previous_hour_tail"
+
+        if derived_ms is None:
+            continue
+        marker["zetta_gap_ms"] = derived_ms
+        marker["zetta_gap_source"] = source
+        marker["etm_delta_raw"] = _local_gap_ms_to_raw(derived_ms)
+
+    return out
+
+
+
 def _local_apply_ignore_reset_gaps(rows: list[dict]) -> list[dict]:
     """Return a display copy where RESET does not zero the ETM gap.
 
@@ -2524,7 +2647,8 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
                 f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
                 "Gapy śródgodzinne pochodzą bezpośrednio z Zetta2GO/GetLog. Przy pełnej godzinie Zetta2GO zeruje TOH, "
                 f"więc RadioCharts przenosi końcowy RESET poprzedniej godziny ({carried_reset}) albo, gdy go nie ma, "
-                f"wylicza ogon z AirTime + RuntimeMilliseconds po ostatnim Hard/Soft ({carried_tail})."
+                f"liczy tylko element rozpoczęty przed 60:00 po ostatnim Hard/Soft ({carried_tail}); pozycje startujące "
+                "już jako 60+ nie zawyżają gapu."
             )
     else:
         st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
@@ -2753,14 +2877,19 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
                 value=False,
                 key=f"{key_prefix}_ignore_resets",
                 help=(
-                    "RESET nie wymusza startu o swojej godzinie. RadioCharts odtwarza jego rzeczywisty lokalny carry "
-                    "z AirTime + RuntimeMilliseconds i przenosi go do kolejnego HARD/SOFT."
+                    "RESET nie wymusza startu o swojej godzinie. RadioCharts bierze przesunięcie pierwszego "
+                    "elementu po RESET względem czasu RESET i przenosi je do kolejnego HARD/SOFT."
                 ),
             )
 
     # One cached SQLite read per selected day. Hour/type filters and summary are
     # computed in memory instead of reading/decoding the same day 2–3 times.
     full_day_rows = cached_local_day_events(revision, kind, selected_date)
+    if kind == "schedule":
+        # Rebuild HH:00 Hard/Soft carry from the preceding scheduling hour in
+        # memory as well. This fixes already-stored snapshots from 1.2.12-1.2.15
+        # without rewriting the cutoff in SQLite.
+        full_day_rows = _local_apply_hour_boundary_gaps(full_day_rows)
     if kind == "schedule" and ignore_resets:
         # Recalculate on the complete day before applying the hour filter so
         # RESET carry can cross hourly GetLog windows.

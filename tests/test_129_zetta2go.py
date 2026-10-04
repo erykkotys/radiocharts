@@ -323,28 +323,57 @@ def test_zetta_ignore_resets_carries_previous_day_resets_into_midnight():
 
 
 
-def test_zetta_ignore_resets_uses_native_reset_gap_as_authoritative_delta():
+def test_zetta_ignore_resets_uses_native_reset_gap_not_next_playable_distance():
     payload = _payload(
         _toh_row(at="2026-10-04T08:00:00.0000000", uid="toh-08-runtime"),
         _etm_row(seq=1, at="2026-10-04T08:00:00.0000000", uid="hard-runtime-0800", etm_type="Hard", gap=0),
+        _etm_row(seq=2, at="2026-10-04T08:15:00.0000000", uid="reset-runtime", etm_type="Reset", gap=34_000),
         _asset_row(
-            seq=2,
-            at="2026-10-04T08:00:00.0000000",
+            seq=3,
+            at="2026-10-04T08:25:34.0000000",
             uid="song-runtime",
             asset_id="asset-runtime",
-            title="Runtime segment",
-            runtime_ms=934_000,
+            title="Long item after reset",
+            runtime_ms=60_000,
         ),
-        # The visible timeline would suggest +34 s, but Zetta itself reports
-        # +10 min on RESET. Ignore-reset mode must trust the Zetta marker gap,
-        # not invent a replacement from AirTime/runtime.
-        _etm_row(seq=3, at="2026-10-04T08:15:00.0000000", uid="reset-runtime", etm_type="Reset", gap=600_000),
         _etm_row(seq=4, at="2026-10-04T08:30:00.0000000", uid="hard-runtime-0830", etm_type="Hard", gap=20_000),
     )
     rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     by_id = {r["external_id"]: r for r in rows}
     hard = by_id["hard-runtime-0830"]
-    assert hard["payload"]["zetta_gap_ignore_resets_ms"] == 620_000
+    # The 10:34 distance to the next playable is not a RESET gap.  Use only
+    # Zetta's +34 s RESET gap, then add the native +20 s at the HARD anchor.
+    assert hard["payload"]["zetta_gap_ignore_resets_ms"] == 54_000
+
+def test_zetta_hour_boundary_ignores_rows_that_start_after_sixty_minutes():
+    payload = _payload(
+        _toh_row(at="2026-10-04T15:00:00.0000000", uid="toh-15"),
+        _etm_row(seq=1, at="2026-10-04T15:30:00.0000000", uid="hard-1530", etm_type="Hard", gap=0),
+        _asset_row(
+            seq=2,
+            at="2026-10-04T15:59:56.0000000",
+            uid="crossing",
+            asset_id="asset-crossing",
+            title="Crossing item",
+            runtime_ms=20_000,
+        ),
+        _asset_row(
+            seq=3,
+            at="2026-10-04T16:00:24.0000000",
+            uid="queued-after-boundary",
+            asset_id="asset-queued",
+            title="Queued after boundary",
+            runtime_ms=1_000_000,
+        ),
+        _toh_row(at="2026-10-04T16:00:00.0000000", uid="toh-16"),
+        _etm_row(seq=4, at="2026-10-04T16:00:00.0000000", uid="hard-1600", etm_type="Hard", gap=0),
+    )
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
+    by_id = {r["external_id"]: r for r in rows}
+    hard = by_id["hard-1600"]
+    assert hard["payload"]["zetta_gap_ms"] == 16_000
+    assert hard["payload"]["zetta_gap_source"] == "previous_hour_tail"
+
 
 
 def test_cross_system_gselector_cutoff_matches_zetta_played_by_text(tmp_path, monkeypatch):
@@ -386,4 +415,4 @@ def test_1213_ui_has_ignore_resets_switch_and_recalculates_before_hour_filter():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
     assert '"Ignoruj resety"' in app
     assert 'full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)' in app
-    assert 'RESET bez gapu nie jest zgadywany' in app
+    assert 'gap RESET zwrócony przez Zetta2GO' in app

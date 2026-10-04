@@ -4,7 +4,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any
 from urllib.parse import urljoin
 
@@ -313,6 +313,17 @@ class Zetta2GoClient:
         seen: set[str] = set()
         last_payload: dict[str, Any] = {}
 
+        # One extra predecessor window lets RadioCharts restore the real 00:00
+        # carry from the previous day's final RESET. Those rows are metadata
+        # only and are never merged into the requested service day.
+        prev_day = d - timedelta(days=1)
+        prev_start = datetime.combine(prev_day, dt_time(23, 0, 0))
+        prev_end = datetime.combine(prev_day, dt_time(23, 59, 59, 900000))
+        prev_payload = self.get_log_range(prev_start, prev_end)
+        previous_hour_rows = prev_payload.get("rows") if isinstance(prev_payload, dict) else []
+        if not isinstance(previous_hour_rows, list):
+            previous_hour_rows = []
+
         for hour in range(24):
             start = datetime.combine(d, dt_time(hour, 0, 0))
             end = datetime.combine(d, dt_time(hour, 59, 59, 900000))
@@ -346,6 +357,7 @@ class Zetta2GoClient:
             "rows": merged_rows,
             "userdata": last_payload.get("userdata") if isinstance(last_payload, dict) else None,
             "radiocharts_hourly_fetch": True,
+            "radiocharts_previous_hour_rows": previous_hour_rows,
         }
 
     def close(self) -> None:
