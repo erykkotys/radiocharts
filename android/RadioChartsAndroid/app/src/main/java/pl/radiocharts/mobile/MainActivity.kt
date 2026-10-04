@@ -49,6 +49,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneOffset
 
 class MainActivity : ComponentActivity() {
@@ -329,8 +330,14 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
         bottomBar = {
             if (!chartOpen) {
                 NavigationBar {
-                    listOf("dashboard" to "Dashboard", "airplay" to "Emisje", "library" to "Baza", "settings" to "Ustawienia").forEach { (route,label) ->
-                        NavigationBarItem(selected=false, onClick={nav.navigate(route){launchSingleTop=true}}, icon={Text(when(route){"dashboard"->"▦";"airplay"->"◉";"library"->"★";else->"⚙"})}, label={Text(label)})
+                    val currentRoute = currentBackStackEntry?.destination?.route.orEmpty()
+                    listOf("dashboard" to "Dashboard", "airplay" to "Emisje", "library" to "Baza", "emaus" to "EMAUS", "settings" to "Ustawienia").forEach { (route,label) ->
+                        NavigationBarItem(
+                            selected=currentRoute == route,
+                            onClick={nav.navigate(route){launchSingleTop=true}},
+                            icon={Text(when(route){"dashboard"->"▦";"airplay"->"◉";"library"->"★";"emaus"->"E";else->"⚙"})},
+                            label={Text(label,maxLines=1)}
+                        )
                     }
                 }
             }
@@ -340,6 +347,7 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
             composable("dashboard") { SongListScreen("dashboard", "Dashboard", nav::navigate, previewVm = previewVm) }
             composable("airplay") { SongListScreen("airplay", "Emisje", nav::navigate, withPeriod=true, previewVm = previewVm) }
             composable("library") { SongListScreen("library", "Baza", nav::navigate, withPeriod=true, previewVm = previewVm) }
+            composable("emaus") { LocalRadioScreen(store) }
             composable("settings") { SettingsScreen(updateStatus = updateStatus, onCheckUpdates = { checkUpdates(true) }) }
             composable("song/{id}", arguments=listOf(navArgument("id"){type=NavType.IntType})) { back ->
                 SongScreen(back.arguments?.getInt("id") ?: 0, previewVm, nav::navigate)
@@ -1114,6 +1122,251 @@ private fun chartOffset(
             playing -> "⏸ 30s"
             else -> "▶ 30s"
         })
+    }
+}
+
+
+@Composable fun LocalRadioScreen(store: SettingsStore) {
+    var tab by remember { mutableStateOf(0) }
+    val tabs = listOf("Scheduled", "Played", "Porównanie", "Utwory", "Import")
+    Column(Modifier.fillMaxSize()) {
+        ScrollableTabRow(selectedTabIndex = tab, edgePadding = 8.dp) {
+            tabs.forEachIndexed { index, label ->
+                Tab(selected = tab == index, onClick = { tab = index }, text = { Text(label, maxLines = 1) })
+            }
+        }
+        when (tab) {
+            0 -> LocalRadioTimeline(store, "schedule")
+            1 -> LocalRadioTimeline(store, "played")
+            2 -> LocalRadioCompare(store)
+            3 -> LocalRadioSongs(store)
+            else -> LocalRadioImport(store)
+        }
+    }
+}
+
+@Composable private fun LocalRadioDateHourControls(
+    dates: List<String>,
+    selectedDate: String,
+    selectedHour: Int,
+    onDate: (String) -> Unit,
+    onHour: (Int) -> Unit,
+) {
+    var dateOpen by remember { mutableStateOf(false) }
+    var hourOpen by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(onClick = { dateOpen = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(selectedDate.ifBlank { "Dzień" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            DropdownMenu(expanded = dateOpen, onDismissRequest = { dateOpen = false }) {
+                dates.reversed().take(45).forEach { d ->
+                    DropdownMenuItem(text = { Text(d) }, onClick = { dateOpen = false; onDate(d) })
+                }
+            }
+        }
+        Box(Modifier.width(138.dp)) {
+            OutlinedButton(onClick = { hourOpen = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("%02d:00–%02d:59+".format(selectedHour, selectedHour))
+            }
+            DropdownMenu(expanded = hourOpen, onDismissRequest = { hourOpen = false }) {
+                (0..23).forEach { h ->
+                    DropdownMenuItem(text = { Text("%02d:00–%02d:59+".format(h, h)) }, onClick = { hourOpen = false; onHour(h) })
+                }
+            }
+        }
+    }
+}
+
+private fun localRadioDefaultDate(kind: String, dates: List<String>): String {
+    if (dates.isEmpty()) return ""
+    val today = LocalDate.now().toString()
+    return if (kind == "schedule") {
+        dates.firstOrNull { it >= today } ?: dates.last()
+    } else {
+        dates.lastOrNull { it <= today } ?: dates.last()
+    }
+}
+
+@Composable private fun LocalRadioTimeline(store: SettingsStore, kind: String) {
+    val scope = rememberCoroutineScope()
+    var dates by remember(kind) { mutableStateOf<List<String>>(emptyList()) }
+    var day by remember(kind) { mutableStateOf("") }
+    var hour by remember(kind) { mutableStateOf(LocalTime.now().hour) }
+    var rows by remember(kind) { mutableStateOf<List<LocalRadioEvent>>(emptyList()) }
+    var loading by remember(kind) { mutableStateOf(true) }
+    var error by remember(kind) { mutableStateOf("") }
+
+    suspend fun loadDates() {
+        try {
+            val result = ApiProvider.api(store).localRadioDates(kind)
+            dates = result
+            if (day.isBlank() || day !in result) day = localRadioDefaultDate(kind, result)
+        } catch (e: Exception) { error = e.message ?: e.javaClass.simpleName }
+    }
+    suspend fun loadRows() {
+        if (day.isBlank()) return
+        loading = true; error = ""
+        try { rows = ApiProvider.api(store).localRadioEvents(kind, day, hour) }
+        catch (e: Exception) { error = e.message ?: e.javaClass.simpleName }
+        finally { loading = false }
+    }
+    LaunchedEffect(kind) { loadDates() }
+    LaunchedEffect(day, hour, kind) { if (day.isNotBlank()) loadRows() }
+
+    Column(Modifier.fillMaxSize()) {
+        LocalRadioDateHourControls(dates, day, hour, { day = it }, { hour = it })
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(if (kind == "schedule") "Scheduled" else "Played", fontWeight = FontWeight.Bold)
+            Text("${rows.size} elementów", style = MaterialTheme.typography.bodySmall)
+        }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (error.isNotBlank()) Text("Błąd: $error", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
+        if (!loading && rows.isEmpty() && error.isBlank()) Text("Brak elementów dla tej godziny.", modifier = Modifier.padding(16.dp))
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            items(rows, key = { "${kind}_${it.id}" }) { row -> LocalRadioEventCard(row, kind) }
+        }
+    }
+}
+
+@Composable private fun LocalRadioEventCard(row: LocalRadioEvent, kind: String) {
+    val main = listOf(row.artist, row.title).filter { it.isNotBlank() }.joinToString(" — ").ifBlank { row.category.ifBlank { row.event_type } }
+    val extra = buildList {
+        if (row.event_type == "etm" && row.etm_delta_raw.isNotBlank()) add("gap ${row.etm_delta_raw}")
+        if (kind == "played" && row.zetta_status.isNotBlank()) add(row.zetta_status)
+        if (row.runtime_raw.isNotBlank()) add(row.runtime_raw)
+    }.joinToString(" · ")
+    Card(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.Top) {
+            Text(row.air_time_raw, style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(78.dp))
+            Column(Modifier.weight(1f)) {
+                Text(main, fontWeight = if (row.event_type == "etm") FontWeight.Bold else FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("${row.event_type}${if (row.category.isNotBlank()) " · ${row.category}" else ""}", style = MaterialTheme.typography.labelSmall)
+                if (extra.isNotBlank()) Text(extra, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+@Composable private fun LocalRadioCompare(store: SettingsStore) {
+    var dates by remember { mutableStateOf<List<String>>(emptyList()) }
+    var day by remember { mutableStateOf("") }
+    var hour by remember { mutableStateOf(LocalTime.now().hour) }
+    var result by remember { mutableStateOf<LocalRadioCompareResponse?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        try {
+            val a = ApiProvider.api(store).localRadioDates("schedule")
+            val b = ApiProvider.api(store).localRadioDates("played")
+            dates = (a + b).distinct().sorted()
+            day = localRadioDefaultDate("played", dates)
+        } catch (e: Exception) { error = e.message ?: e.javaClass.simpleName; loading = false }
+    }
+    LaunchedEffect(day, hour) {
+        if (day.isBlank()) return@LaunchedEffect
+        loading = true; error = ""
+        try { result = ApiProvider.api(store).localRadioCompare(day, hour) }
+        catch (e: Exception) { error = e.message ?: e.javaClass.simpleName }
+        finally { loading = false }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        LocalRadioDateHourControls(dates, day, hour, { day = it }, { hour = it })
+        val r = result
+        if (r != null) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                MetricTiny("Cutoff", r.scheduled.toString())
+                MetricTiny("Zagrane", r.played_actual.toString())
+                MetricTiny("Oczekuje", r.waiting.toString())
+                MetricTiny("Różnice", r.differences.toString())
+            }
+        }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (error.isNotBlank()) Text("Błąd: $error", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(result?.rows ?: emptyList()) { row ->
+                val waiting = row.status == "Oczekuje"
+                val color = when {
+                    waiting -> MaterialTheme.colorScheme.onSurfaceVariant
+                    row.status == "OK" -> MaterialTheme.colorScheme.onSurface
+                    else -> MaterialTheme.colorScheme.error
+                }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(row.status, color = color, fontWeight = FontWeight.Bold)
+                            Text(listOf(row.scheduled_time, row.played_time).filter { it.isNotBlank() }.joinToString(" → "), style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text(listOf(row.artist, row.title).filter { it.isNotBlank() }.joinToString(" — ").ifBlank { row.category }, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        val details = listOf(row.start_delta.takeIf { it.isNotBlank() }?.let { "Δ $it" }, row.runtime_cut.takeIf { it.isNotBlank() }?.let { "runtime $it" }, row.note.takeIf { it.isNotBlank() }).filterNotNull().joinToString(" · ")
+                        if (details.isNotBlank()) Text(details, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun LocalRadioSongs(store: SettingsStore) {
+    var kind by remember { mutableStateOf("played") }
+    var rows by remember { mutableStateOf<List<LocalRadioSongStat>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf("") }
+    LaunchedEffect(kind) {
+        loading = true; error = ""
+        try { rows = ApiProvider.api(store).localRadioSongStats(kind) }
+        catch (e: Exception) { error = e.message ?: e.javaClass.simpleName }
+        finally { loading = false }
+    }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = kind == "played", onClick = { kind = "played" }, label = { Text("Played") })
+            FilterChip(selected = kind == "schedule", onClick = { kind = "schedule" }, label = { Text("Scheduled") })
+            Spacer(Modifier.weight(1f)); Text("${rows.size} utworów", style = MaterialTheme.typography.bodySmall, modifier = Modifier.align(Alignment.CenterVertically))
+        }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (error.isNotBlank()) Text("Błąd: $error", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            items(rows.take(500)) { row ->
+                Card(Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column(Modifier.weight(1f)) {
+                            Text("${row.artist} — ${row.title}", fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text("${row.category} · dni ${row.days_with_play} · średnio ${row.per_calendar_day}/dzień", style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text(row.plays.toString(), fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 10.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun LocalRadioImport(store: SettingsStore) {
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf("") }
+    fun run(label: String, block: suspend () -> Map<String, Any?>) {
+        if (busy) return
+        scope.launch {
+            busy = true; result = "$label…"
+            result = try { "$label: ${block().entries.joinToString(" · ") { "${it.key}=${it.value}" }}" }
+            catch (e: Exception) { "Błąd: ${e.message ?: e.javaClass.simpleName}" }
+            finally { busy = false }
+        }
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Zetta2GO", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("Te przyciski uruchamiają synchronizację na serwerze RadioCharts. Login i hasło pozostają zapisane po stronie serwera.", style = MaterialTheme.typography.bodySmall)
+        Button(onClick = { run("Test Zetta2GO") { ApiProvider.api(store).zettaTest() } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Test Zetta2GO") }
+        OutlinedButton(onClick = { run("Played live") { ApiProvider.api(store).zettaLive() } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Odśwież Played teraz") }
+        OutlinedButton(onClick = { run("Scheduled") { ApiProvider.api(store).zettaSchedule() } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Odśwież przyszłe Scheduled") }
+        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (result.isNotBlank()) Text(result, style = MaterialTheme.typography.bodySmall)
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        Text("Ręczny import plików GSelector zostaje w wersji webowej — Android obsługuje bieżący Zetta2GO i podgląd danych.", style = MaterialTheme.typography.bodySmall)
     }
 }
 

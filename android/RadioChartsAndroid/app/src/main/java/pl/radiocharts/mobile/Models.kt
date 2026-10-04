@@ -101,3 +101,65 @@ data class AirplayDetail(
 
 data class ItunesResponse(val results: List<ItunesTrack> = emptyList())
 data class ItunesTrack(val artistName: String = "", val trackName: String = "", val previewUrl: String? = null)
+
+data class LocalRadioEvent(
+    val id: Int = 0,
+    val service_date: String = "",
+    val sequence_no: Int = 0,
+    val air_time_raw: String = "",
+    val event_type: String = "",
+    val category: String = "",
+    val artist: String = "",
+    val title: String = "",
+    val runtime_raw: String = "",
+    val runtime_seconds: Double? = null,
+    val schedule_hour: Int? = null,
+    val gap_raw: String = "",
+    val etm_delta_raw: String = "",
+    val zetta_status: String = "",
+    val zetta_status_code: Int? = null,
+    val zetta_edit_name: String = "",
+)
+
+data class LocalRadioCompareRow(
+    val status: String = "",
+    val event_type: String = "",
+    val category: String = "",
+    val artist: String = "",
+    val title: String = "",
+    val scheduled_time: String = "",
+    val played_time: String = "",
+    val start_delta: String = "",
+    val runtime_cut: String = "",
+    val note: String = "",
+)
+
+data class LocalRadioCompareResponse(
+    val service_date: String = "",
+    val hour: Int? = null,
+    val scheduled: Int = 0,
+    val played: Int = 0,
+    val played_actual: Int = 0,
+    val matched: Int = 0,
+    val missed: Int = 0,
+    val added: Int = 0,
+    val reordered: Int = 0,
+    val faded: Int = 0,
+    val changed: Int = 0,
+    val waiting: Int = 0,
+    val in_progress: Int = 0,
+    val differences: Int = 0,
+    val rows: List<LocalRadioCompareRow> = emptyList(),
+)
+
+data class LocalRadioSongStat(
+    val artist: String = "",
+    val title: String = "",
+    val category: String = "",
+    val plays: Int = 0,
+    val days_with_play: Int = 0,
+    val per_calendar_day: Double = 0.0,
+    val avg_active_day: Double = 0.0,
+    val max_day: Int = 0,
+    val peak_hour: Int? = null,
+)

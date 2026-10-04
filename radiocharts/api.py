@@ -37,11 +37,15 @@ from radiocharts.db import (
 from radiocharts.local_station import (
     available_dates as local_available_dates,
     compare_day as local_compare_day,
+    compare_hour as local_compare_hour,
     ensure_seed_data as ensure_local_station_seed_data,
     ensure_song_links_current as ensure_local_station_song_links,
     events_for_day as local_events_for_day,
     song_stats as local_song_stats,
     song_activity as local_song_activity,
+    sync_zetta2go_live as local_sync_zetta2go_live,
+    sync_zetta2go_schedule_horizon as local_sync_zetta2go_schedule_horizon,
+    test_zetta2go_connection as local_test_zetta2go_connection,
 )
 from radiocharts.metrics import compute_scores, song_history
 
@@ -505,12 +509,30 @@ def local_radio_events(
 
 
 @app.get("/api/v1/local-radio/compare/{service_date}")
-def local_radio_compare(service_date: date) -> dict[str, Any]:
-    result = local_compare_day(service_date)
+def local_radio_compare(
+    service_date: date,
+    hour: int | None = Query(default=None, ge=0, le=23),
+) -> dict[str, Any]:
+    result = local_compare_hour(service_date, hour) if hour is not None else local_compare_day(service_date)
     return {
         k: ([{kk: _clean(vv) for kk, vv in row.items()} for row in v] if k == "rows" else _clean(v))
         for k, v in result.items()
     }
+
+
+@app.post("/api/v1/local-radio/zetta/test")
+def local_radio_zetta_test() -> dict[str, Any]:
+    return {k: _clean(v) for k, v in local_test_zetta2go_connection().items()}
+
+
+@app.post("/api/v1/local-radio/zetta/live")
+def local_radio_zetta_live() -> dict[str, Any]:
+    return {k: _clean(v) for k, v in local_sync_zetta2go_live().items()}
+
+
+@app.post("/api/v1/local-radio/zetta/schedule")
+def local_radio_zetta_schedule() -> dict[str, Any]:
+    return {k: _clean(v) if not isinstance(v, list) else [_clean(x) for x in v] for k, v in local_sync_zetta2go_schedule_horizon(mark_cutoff=False).items()}
 
 
 @app.get("/api/v1/local-radio/song/{song_id}")

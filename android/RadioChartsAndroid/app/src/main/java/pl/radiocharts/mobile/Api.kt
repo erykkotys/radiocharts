@@ -36,6 +36,28 @@ interface RadioChartsApi {
     @GET("api/v1/songs/{id}") suspend fun song(@Path("id") id: Int): SongRow
     @PATCH("api/v1/songs/{id}") suspend fun patchSong(@Path("id") id: Int, @Body body: NotePatch): PatchResponse
     @GET("api/v1/songs/{id}/charts") suspend fun charts(@Path("id") id: Int): List<ChartPoint>
+    @GET("api/v1/local-radio/dates") suspend fun localRadioDates(@Query("kind") kind: String): List<String>
+    @GET("api/v1/local-radio/events/{kind}/{serviceDate}")
+    suspend fun localRadioEvents(
+        @Path("kind") kind: String,
+        @Path("serviceDate") serviceDate: String,
+        @Query("hour") hour: Int? = null,
+    ): List<LocalRadioEvent>
+    @GET("api/v1/local-radio/compare/{serviceDate}")
+    suspend fun localRadioCompare(
+        @Path("serviceDate") serviceDate: String,
+        @Query("hour") hour: Int? = null,
+    ): LocalRadioCompareResponse
+    @GET("api/v1/local-radio/song-stats")
+    suspend fun localRadioSongStats(
+        @Query("kind") kind: String = "played",
+        @Query("start") start: String? = null,
+        @Query("end") end: String? = null,
+    ): List<LocalRadioSongStat>
+    @POST("api/v1/local-radio/zetta/test") suspend fun zettaTest(): Map<String, Any?>
+    @POST("api/v1/local-radio/zetta/live") suspend fun zettaLive(): Map<String, Any?>
+    @POST("api/v1/local-radio/zetta/schedule") suspend fun zettaSchedule(): Map<String, Any?>
+
     @GET("api/v1/songs/{id}/airplay")
     suspend fun airplay(
         @Path("id") id: Int,
