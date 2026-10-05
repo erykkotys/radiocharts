@@ -114,18 +114,39 @@ st.markdown(
       .rc-metric-value { color:#f7f8fa; font-size:1.28rem; font-weight:700; line-height:1.1; margin-top:.05rem; }
       .rc-song-title { font-size:1.18rem; font-weight:720; line-height:1.2; margin:.05rem 0 .08rem; }
       .rc-song-meta { color:#9fa8b5; font-size:.78rem; }
-      .rc-etm-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.28rem; margin:.18rem 0 .48rem; }
-      .rc-etm-chip { display:grid; grid-template-columns:auto 1fr auto auto; gap:.32rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:5px; padding:.24rem .38rem; min-width:0; font-size:.75rem; }
+      .rc-etm-grid { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(150px,190px); justify-content:start; gap:.20rem .34rem; margin:.16rem 0 .48rem; overflow-x:auto; }
+      .rc-etm-chip { display:grid; grid-template-columns:43px 1fr 62px auto; gap:.25rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:5px; padding:.19rem .30rem; min-width:0; font-size:.70rem; }
       .rc-etm-zero { opacity:.48; }
       .rc-etm-time { color:#b9c2cf; font-variant-numeric:tabular-nums; }
       .rc-etm-kind { color:#f4cf57; font-weight:650; overflow:hidden; text-overflow:ellipsis; }
-      .rc-etm-gap { color:#f4f4f5; font-weight:700; font-variant-numeric:tabular-nums; }
+      .rc-etm-gap { color:#f4f4f5; font-weight:700; font-variant-numeric:tabular-nums; text-align:right; }
       .rc-etm-risk { color:#f4b942; font-weight:800; cursor:help; }
-      @media (max-width: 1100px) { .rc-etm-grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
+      .rc-local-scroll { max-height:690px; overflow:auto; border:1px solid #313844; border-radius:7px; background:#090d12; }
+      .rc-local-head, .rc-local-row { display:grid; grid-template-columns:26px 105px 72px minmax(300px,1fr) 64px 70px; gap:.42rem; min-width:850px; align-items:start; }
+      .rc-local-head { position:sticky; top:0; z-index:5; padding:.44rem .48rem; background:#11161d; border-bottom:1px solid #313844; color:#cfd5df; font-size:.69rem; font-weight:750; text-transform:uppercase; letter-spacing:.02em; }
+      .rc-local-row { padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.79rem; }
+      .rc-local-row:hover { background:#0f151d; }
+      .rc-local-row.rc-now { background:#10231a; box-shadow:inset 3px 0 #45c878; }
+      .rc-local-row.rc-toh { grid-template-columns:26px 105px minmax(0,1fr); color:#ff79c6; background:#1b1020; border-top:1px solid #6d3159; border-bottom:1px solid #6d3159; font-weight:800; }
+      .rc-local-icon { text-align:center; font-weight:850; line-height:1.25rem; }
+      .rc-local-time { font-variant-numeric:tabular-nums; white-space:nowrap; font-weight:650; }
+      .rc-local-category { font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .rc-local-main { min-width:0; }
+      .rc-local-title { font-weight:650; white-space:normal; overflow-wrap:anywhere; }
+      .rc-local-meta { margin-top:.08rem; color:#9fa8b5; font-size:.67rem; white-space:normal; overflow-wrap:anywhere; }
+      .rc-local-runtime { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+      .rc-local-played { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; color:#9fe0b2; }
+      .rc-local-song-link { color:inherit; text-decoration:none; cursor:pointer; }
+      .rc-local-song-link:hover { text-decoration:underline; text-decoration-style:dotted; }
+      .rc-now-card { border:1px solid #2f7d4a; background:#10231a; border-radius:7px; padding:.42rem .60rem; margin:.18rem 0 .42rem; }
+      .rc-now-title { font-weight:750; color:#e8f7ed; }
+      .rc-now-meta { font-size:.70rem; color:#a9cbb4; margin-top:.08rem; }
+      .rc-now-track { height:5px; background:#26342b; border-radius:999px; overflow:hidden; margin-top:.35rem; }
+      .rc-now-fill { height:100%; background:#45c878; border-radius:999px; }
       @media (max-width: 640px) {
-        .rc-etm-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
         .rc-build-badge { display:none; }
         .rc-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+        .rc-local-head, .rc-local-row { min-width:760px; grid-template-columns:24px 92px 60px minmax(280px,1fr) 58px 62px; }
       }
     </style>
     """,
@@ -2307,6 +2328,7 @@ LOCAL_EVENT_LABELS = {
     "bed": "Podkład",
     "info": "Informacje",
     "etm": "ETM",
+    "toh": "Top of the hour",
     "traffic": "Reklama",
     "command": "Komenda Zetta",
     "other": "Inne",
@@ -2578,6 +2600,11 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
         row for row in rows
         if str(row.get("event_type") or "") == "etm" and _local_etm_kind(row) in {"Hard", "Soft"}
     ]
+    markers.sort(key=lambda row: (
+        int(row.get("schedule_hour") or 0),
+        float(row.get("sort_seconds") or row.get("air_seconds") or 0.0),
+        int(row.get("sequence_no") or 0),
+    ))
     if not markers:
         return
 
@@ -2683,8 +2710,13 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
             f'<span class="rc-etm-kind">{html.escape(kind)}</span>'
             f'<span class="rc-etm-gap">{html.escape(gap)}</span>{warning}</div>'
         )
+    # Column-major layout: 00 under 01 under 02... and only then the next
+    # column.  Up to three compact columns keeps a full day readable.
+    column_count = min(3, max(1, math.ceil(len(cards) / 12)))
+    rows_per_column = max(1, math.ceil(len(cards) / column_count))
     st.markdown(
-        '<div class="rc-etm-grid">' + "".join(cards) + "</div>",
+        f'<div class="rc-etm-grid" style="grid-template-rows:repeat({rows_per_column},auto)">'
+        + "".join(cards) + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -2711,10 +2743,14 @@ def _local_timeline_frame(rows: list[dict]) -> pd.DataFrame:
     if "etm_delta_raw" in frame.columns:
         etm_mask = frame["event_type"].fillna("").eq("etm")
         frame.loc[etm_mask, "Gap"] = frame.loc[etm_mask, "etm_delta_raw"].fillna("").map(_local_normalize_gap)
-    frame["Kategoria"] = frame["category"].fillna("")
+    if "category_code" in frame.columns:
+        frame["Kategoria"] = frame["category_code"].fillna("")
+    else:
+        frame["Kategoria"] = frame["category"].fillna("").map(lambda v: str(v).split("/", 1)[0].strip())
     frame["Wykonawca"] = frame["artist"].fillna("")
     frame["Element / tytuł"] = frame["title"].fillna("")
     frame["Runtime"] = frame["runtime_raw"].fillna("")
+    frame["Zagrano"] = frame["played_raw"].fillna("") if "played_raw" in frame.columns else ""
     frame["ID"] = frame["external_id"].fillna("")
     frame["⚠"] = frame["time_anomaly"].fillna(0).astype(bool)
     raw_labels = {key: label for key, label, _idx in LOCAL_GSELECTOR_SONG_COLUMNS}
@@ -2734,7 +2770,8 @@ def _local_timeline_frame(rows: list[dict]) -> pd.DataFrame:
 
 
 LOCAL_TIMELINE_DEFAULT_COLUMNS = [
-    "Czas", "Gap", "Typ", "Kategoria", "Wykonawca", "Element / tytuł", "Runtime"
+    "Czas", "Gap", "Kategoria", "Wykonawca", "Element / tytuł",
+    "Mood", "Opener", "Texture Open", "Texture Close", "Runtime", "Zagrano"
 ]
 LOCAL_TIMELINE_EXTRA_COLUMNS = [
     "Mood", "Opener", "Timing", "Content", "Energy", "Texture Close", "Texture Open",
@@ -2795,6 +2832,222 @@ def _render_local_timeline_grid(frame: pd.DataFrame, columns: list[str], *, key:
     )
 
 
+
+def _local_play_status_icon(row: dict, kind: str) -> tuple[str, str, str]:
+    event_type = str(row.get("event_type") or "")
+    if event_type == "toh":
+        return "◆", "#ff79c6", "Top of the hour"
+    if event_type == "etm":
+        return "◇", "#f4cf57", _local_etm_kind(row) or "ETM"
+    if kind != "played":
+        return "•", ("#ff5d5d" if event_type == "traffic" else "#f4cf57" if event_type != "song" else "#d9dde3"), "Scheduled"
+    try:
+        status = int(row.get("zetta_status_code") or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status in {-3, 2, 9}:
+        return "▶", "#45c878", str(row.get("zetta_status") or "W trakcie")
+    if status in {4, 5}:
+        return "✕", "#ff5d5d", str(row.get("zetta_status") or "Niezagrane")
+    if status in {3, 6, 7, 8}:
+        return "✓", "#45c878", str(row.get("zetta_status") or "Zagrane")
+    if status in {1, 10}:
+        return "○", "#f4b942", str(row.get("zetta_status") or "Oczekuje")
+    return "•", "#9fa8b5", str(row.get("zetta_status") or "")
+
+
+def _local_timeline_row_html(row: dict, kind: str) -> str:
+    event_type = str(row.get("event_type") or "other")
+    icon, icon_color, icon_title = _local_play_status_icon(row, kind)
+    raw_time = str(row.get("air_time_raw") or "")
+    category = str(row.get("category_code") or "").strip()
+    if not category:
+        if event_type == "etm":
+            category = _local_etm_kind(row).upper() or "ETM"
+        else:
+            category = str(row.get("category") or "").split("/", 1)[0].strip() or LOCAL_EVENT_LABELS.get(event_type, event_type)
+
+    if event_type == "toh":
+        label = f"Top of the hour · {raw_time[:5] or ''}"
+        return (
+            '<div class="rc-local-row rc-toh">'
+            f'<div class="rc-local-icon" style="color:{icon_color}" title="{html.escape(icon_title)}">{html.escape(icon)}</div>'
+            f'<div class="rc-local-time">{html.escape(raw_time)}</div>'
+            f'<div>{html.escape(label)}</div></div>'
+        )
+
+    artist = str(row.get("artist") or "").strip()
+    title = str(row.get("title") or "").strip()
+    main = f"{artist} — {title}" if artist and title else (title or artist or str(row.get("category") or ""))
+    meta_bits: list[str] = []
+    if event_type == "etm":
+        gap = _local_normalize_gap(str(row.get("etm_delta_raw") or ""))
+        if gap:
+            meta_bits.append(f"gap {gap}")
+    for label, key in (("Mood", "mood"), ("Opener", "opener"), ("T.Open", "texture_open"), ("T.Close", "texture_close")):
+        value = str(row.get(key) or "").strip()
+        if value:
+            meta_bits.append(f"{label} {value}")
+    if kind == "played":
+        status_name = str(row.get("zetta_status") or "").strip()
+        if status_name:
+            meta_bits.append(status_name)
+        edit_name = str(row.get("zetta_edit_name") or "").strip()
+        if edit_name and int(row.get("zetta_edit_code") or 0) not in {0, 217}:
+            meta_bits.append(edit_name)
+    meta = " · ".join(meta_bits)
+
+    runtime = str(row.get("runtime_raw") or "")
+    played_raw = str(row.get("played_raw") or "") if kind == "played" else ""
+    try:
+        status_code = int(row.get("zetta_status_code") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    now_class = " rc-now" if kind == "played" and status_code in {-3, 2, 9} else ""
+
+    title_html = html.escape(main)
+    song_id = row.get("song_id")
+    if event_type == "song" and song_id is not None:
+        try:
+            sid = int(song_id)
+            href = f"?view=song&song={sid}"
+            title_html = (
+                f'<a class="rc-local-song-link" href="{html.escape(href)}" '
+                'onclick="return false" '
+                'ondblclick="window.location.href=this.href; return false" '
+                'title="Dwuklik: otwórz kartę utworu">'
+                f'{html.escape(main)}</a>'
+            )
+        except (TypeError, ValueError):
+            pass
+
+    return (
+        f'<div class="rc-local-row{now_class}">'
+        f'<div class="rc-local-icon" style="color:{icon_color}" title="{html.escape(icon_title)}">{html.escape(icon)}</div>'
+        f'<div class="rc-local-time">{html.escape(raw_time)}</div>'
+        f'<div class="rc-local-category">{html.escape(category)}</div>'
+        f'<div class="rc-local-main"><div class="rc-local-title">{title_html}</div>'
+        f'<div class="rc-local-meta">{html.escape(meta)}</div></div>'
+        f'<div class="rc-local-runtime">{html.escape(runtime)}</div>'
+        f'<div class="rc-local-played">{html.escape(played_raw)}</div>'
+        '</div>'
+    )
+
+
+
+def _local_with_toh_separators(rows: list[dict]) -> list[dict]:
+    """Ensure whole-day Zetta lists have one visible TOH separator per hour.
+
+    New 1.2.19 imports keep native TOH rows. Older immutable cutoff snapshots do
+    not, so synthesize display-only separators without touching SQLite/history.
+    """
+    if not rows:
+        return rows
+    has_native = any(str(row.get("event_type") or "") == "toh" for row in rows)
+    if has_native:
+        return rows
+    if not any(str(row.get("source_system") or "") == "zetta2go" for row in rows):
+        return rows
+    out: list[dict] = []
+    seen_hours: set[int] = set()
+    for row in rows:
+        hour = row.get("schedule_hour")
+        if isinstance(hour, int) and hour not in seen_hours:
+            seen_hours.add(hour)
+            out.append({
+                "id": -(1000 + hour),
+                "service_date": row.get("service_date"),
+                "sequence_no": int(row.get("sequence_no") or 0),
+                "air_time_raw": f"{hour:02d}:00:00.0",
+                "schedule_hour": hour,
+                "event_type": "toh",
+                "category": "TOH",
+                "category_code": "TOH",
+                "artist": "",
+                "title": "Top of the hour",
+                "runtime_raw": "",
+                "source_system": "zetta2go",
+            })
+        out.append(row)
+    return out
+
+
+def _render_local_timeline_cards(rows: list[dict], kind: str) -> None:
+    if not rows:
+        st.info("Brak elementów dla wybranych filtrów.")
+        return
+    right_header = "Zagrano" if kind == "played" else ""
+    body = "".join(_local_timeline_row_html(row, kind) for row in rows)
+    st.markdown(
+        '<div class="rc-local-scroll">'
+        '<div class="rc-local-head"><div></div><div>Czas</div><div>Kategoria</div><div>Element / metadane</div>'
+        f'<div>Runtime</div><div>{html.escape(right_header)}</div></div>'
+        + body + '</div>',
+        unsafe_allow_html=True,
+    )
+    if any(str(row.get("event_type") or "") == "song" and row.get("song_id") is not None for row in rows):
+        st.caption("Dwuklik w nazwę utworu otwiera jego kartę RadioCharts.")
+
+
+@st.fragment(run_every=5.0)
+def _render_local_now_playing_fragment(service_date: str) -> None:
+    """Small live strip; refreshes without rerunning the whole EMAUS page."""
+    revision = local_station_revision()
+    rows = cached_local_day_events(revision, "played", service_date)
+    current = next(
+        (
+            row for row in rows
+            if str(row.get("source_system") or "") == "zetta2go"
+            and str(row.get("event_type") or "") not in {"etm", "toh", "command"}
+            and int(row.get("zetta_status_code") or 0) in {-3, 2, 9}
+        ),
+        None,
+    )
+    if not current:
+        return
+    artist = str(current.get("artist") or "").strip()
+    title = str(current.get("title") or "").strip()
+    label = f"{artist} — {title}" if artist else title
+    runtime = current.get("runtime_seconds")
+    try:
+        runtime_f = max(0.0, float(runtime)) if runtime is not None else 0.0
+    except (TypeError, ValueError):
+        runtime_f = 0.0
+    # Compute elapsed live on every fragment tick. cached_local_day_events is
+    # keyed by DB revision, so relying on its precomputed played_seconds would
+    # only advance once per worker sync.
+    played_f = 0.0
+    try:
+        start = float(current.get("sort_seconds"))
+        now = datetime.now().astimezone()
+        wall = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1_000_000
+        elapsed = wall - start
+        if elapsed < -12 * 3600:
+            elapsed += 86400
+        if elapsed >= 0:
+            played_f = min(elapsed, runtime_f) if runtime_f > 0 else elapsed
+    except (TypeError, ValueError):
+        try:
+            played_f = max(0.0, float(current.get("played_seconds") or 0.0))
+        except (TypeError, ValueError):
+            played_f = 0.0
+    pct = min(100.0, 100.0 * played_f / runtime_f) if runtime_f > 0 else 0.0
+    meta = " · ".join(x for x in [
+        str(current.get("category_code") or ""),
+        str(current.get("zetta_status") or ""),
+        f"{int(played_f // 60):02d}:{int(played_f % 60):02d} / {current.get('runtime_raw') or '—'}",
+    ] if x)
+    st.markdown(
+        '<div class="rc-now-card">'
+        f'<div class="rc-now-title">▶ TERAZ: {html.escape(label)}</div>'
+        f'<div class="rc-now-meta">{html.escape(meta)}</div>'
+        '<div class="rc-now-track">'
+        f'<div class="rc-now-fill" style="width:{pct:.1f}%"></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
     dates = cached_local_dates(revision, kind)
     if not dates:
@@ -2803,7 +3056,7 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         return
 
     default_date = _local_default_date(dates, kind) or date.fromisoformat(dates[-1])
-    dcol, hcol, pcol, ccol = st.columns([.82, .82, 1.35, .72], vertical_alignment="bottom")
+    dcol, hcol, pcol = st.columns([.82, .82, 1.55], vertical_alignment="bottom")
     selected_date = dcol.selectbox(
         "Dzień",
         dates,
@@ -2825,19 +3078,6 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         index=0,
         key=f"{key_prefix}_element_preset",
     )
-    with ccol:
-        with st.popover("Kolumny", use_container_width=True):
-            all_columns = LOCAL_TIMELINE_DEFAULT_COLUMNS + LOCAL_TIMELINE_EXTRA_COLUMNS
-            selected_columns = st.multiselect(
-                "Widoczne kolumny",
-                all_columns,
-                default=LOCAL_TIMELINE_DEFAULT_COLUMNS,
-                key=f"{key_prefix}_columns",
-                help="ID i pola techniczne są dostępne, ale domyślnie ukryte.",
-            )
-            if not selected_columns:
-                st.caption("Gdy nic nie zaznaczysz, tabela wróci do zestawu domyślnego.")
-
     if element_preset == "Własny":
         selected_types = st.multiselect(
             "Typy elementów",
@@ -2850,7 +3090,7 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         selected_types = list(LOCAL_ELEMENT_FILTER_PRESETS[element_preset])
 
     etm_kinds = set(LOCAL_ETM_KINDS)
-    ignore_resets = False
+    ignore_resets = kind == "schedule"
     if "etm" in selected_types:
         ecol, xcol, rcol = st.columns([1.25, 2.15, 1.05], vertical_alignment="bottom")
         etm_preset_options = [*LOCAL_ETM_PRESETS, "Własna kombinacja"]
@@ -2874,11 +3114,11 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         if kind == "schedule":
             ignore_resets = rcol.toggle(
                 "Ignoruj resety",
-                value=False,
+                value=True,
                 key=f"{key_prefix}_ignore_resets",
                 help=(
-                    "RESET nie wymusza startu o swojej godzinie. RadioCharts bierze przesunięcie pierwszego "
-                    "elementu po RESET względem czasu RESET i przenosi je do kolejnego HARD/SOFT."
+                    "RESET nie jest kotwicą czasu. W tym widoku jego gap jest przenoszony do kolejnego "
+                    "HARD/SOFT; HARD i SOFT traktujemy jako dokładne kotwice."
                 ),
             )
 
@@ -2894,20 +3134,26 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         # Recalculate on the complete day before applying the hour filter so
         # RESET carry can cross hourly GetLog windows.
         full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)
+    # ETM overview is deliberately always a full-day view. Changing the
+    # playlist hour must not make the timing map jump around or hide anchors.
+    _render_local_etm_gap_summary(
+        full_day_rows,
+        ignore_resets=(ignore_resets if kind == "schedule" else False),
+    )
+
     hour_rows = [
         row for row in full_day_rows
         if selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour)
     ]
-    if kind == "schedule":
-        # ETM cards must follow the selected hour. Previously the hour selector
-        # filtered only the table while the ETM summary still showed the whole
-        # day, which made e.g. 01:00 look like it contained the 00:00 markers.
-        _render_local_etm_gap_summary(hour_rows, ignore_resets=ignore_resets)
-
+    if selected_hour == "Cały dzień":
+        hour_rows = _local_with_toh_separators(hour_rows)
     rows = [
         row for row in hour_rows
-        if not selected_types or str(row.get("event_type") or "") in selected_types
+        if (not selected_types or str(row.get("event_type") or "") in selected_types)
+        or (selected_hour == "Cały dzień" and str(row.get("event_type") or "") == "toh")
     ]
+    if selected_hour != "Cały dzień":
+        rows = [row for row in rows if str(row.get("event_type") or "") != "toh"]
     if "etm" in selected_types:
         rows = _local_filter_etm_rows(rows, etm_kinds)
 
@@ -2916,13 +3162,12 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         typ = str(row.get("event_type") or "other")
         counts[typ] = counts.get(typ, 0) + 1
     render_compact_metrics([
-        ("Elementy", len(full_day_rows)),
+        ("Elementy", sum(1 for row in full_day_rows if str(row.get("event_type") or "") != "toh")),
         ("Song", counts.get("song", 0)),
         ("Jingle", counts.get("jingle", 0)),
         ("Audycje", counts.get("show", 0)),
     ])
-    frame = _local_timeline_frame(rows)
-    if frame.empty:
+    if not rows:
         st.info("Brak elementów dla wybranych filtrów.")
         return
 
@@ -2933,11 +3178,9 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
             mins, secs = divmod(peak, 60)
             st.caption(f"Godzina {int(selected_hour):02d}: największy zapisany nadczas 60+ = +{int(mins):02d}:{secs:04.1f}.")
 
-    _render_local_timeline_grid(
-        frame,
-        selected_columns or LOCAL_TIMELINE_DEFAULT_COLUMNS,
-        key=f"{key_prefix}_grid_{selected_date}_{selected_hour}_{element_preset}_{'-'.join(sorted(etm_kinds))}_{int(ignore_resets)}",
-    )
+    if kind == "played" and selected_date == date.today().isoformat():
+        _render_local_now_playing_fragment(selected_date)
+    _render_local_timeline_cards(rows, kind)
     if rows and all(str(r.get("source_system") or "") == "zetta2go" for r in rows):
         st.caption(
             "Gap przy ETM pochodzi bezpośrednio z Zetta2GO. Played pokazuje tylko elementy zagrane / będące w trakcie; "

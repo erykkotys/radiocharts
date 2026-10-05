@@ -1,3 +1,15 @@
+## 1.2.19 — czytelniejszy EMAUS, metadane i live playout
+
+- Scheduled i Played korzystają z zwartego widoku logu podobnego do Porównania; Porównanie pozostaje nastawione głównie na ingerencje względem cutoffu.
+- Mapa ETM Hard/Soft jest zawsze całodniowa, niezależna od wybranej godziny playlisty, układana chronologicznie pionowo w maksymalnie trzech wąskich kolumnach.
+- „Ignoruj resety” jest domyślnie włączone.
+- Pełnodniowy log pokazuje różowe separatory „Top of the hour”.
+- Scheduled/Played pokazują Mood, Opener, Texture Open/Close i właściwy kod kategorii (np. G1/R2/AUD/typ ETM), gdy dane są dostępne; Zetta może być uzupełniana ostatnim znanym kodowaniem z importów GSelectora.
+- Played ma obok Runtime pole „Zagrano”; zwykłe segue/crossfade nie są liczone jako skrócenie, a duże Fade/Stopped są szacowane po rzeczywistym następnym starcie.
+- Utwory w logu są powiązane z bazą RadioCharts; dwuklik otwiera kartę utworu.
+- Aktualnie grany element jest wyróżniony, a web ma odświeżany co 5 s pasek postępu; Android odświeża Played co 15 s i ma analogiczne wyróżnienie/dwuklik.
+- Android 1.2.19 / `versionCode = 42`.
+
 ## 1.2.7 — szybszy Dashboard
 
 - Dashboard liczy 7-dniowy sygnał radiowy i 28-dniowy wolumen w jednym przebiegu SQL zamiast dwóch dużych agregacji.

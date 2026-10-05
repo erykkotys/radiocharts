@@ -26,7 +26,7 @@ from radiocharts.zetta2go import (
 
 STATION_KEY = "EMAUS"
 LOCAL_KINDS = ("schedule", "played")
-EVENT_TYPES = ("song", "jingle", "show", "bed", "info", "etm", "traffic", "command", "other")
+EVENT_TYPES = ("song", "jingle", "show", "bed", "info", "etm", "toh", "traffic", "command", "other")
 
 # Current EMAUS/GSelector Song sub-format.  The first 17 positions are stable
 # in the export used by RadioCharts; four trailing technical fields are kept
@@ -450,12 +450,60 @@ def _zetta_event_type(asset: dict[str, Any]) -> str:
     return "other"
 
 
+def _asset_text(asset: dict[str, Any], *names: str) -> str:
+    """Best-effort case-insensitive lookup in Zetta asset metadata.
+
+    Different Zetta builds expose scheduler metadata under slightly different
+    field names.  GetLog on EMAUS currently returns only a compact asset object,
+    but keeping these aliases here means richer fields are picked up
+    automatically when the server includes them.
+    """
+    if not isinstance(asset, dict):
+        return ""
+    wanted = {str(name).casefold().replace("_", "").replace(" ", "") for name in names}
+
+    def scan(obj: dict[str, Any], depth: int = 0) -> str:
+        for key, value in obj.items():
+            norm = str(key).casefold().replace("_", "").replace(" ", "")
+            if norm in wanted and value not in (None, ""):
+                if isinstance(value, dict):
+                    for subkey in ("Name", "Code", "Value", "Description", "Title"):
+                        if value.get(subkey) not in (None, ""):
+                            return str(value.get(subkey)).strip()
+                elif not isinstance(value, (list, tuple, set)):
+                    return str(value).strip()
+        if depth < 2:
+            for value in obj.values():
+                if isinstance(value, dict):
+                    found = scan(value, depth + 1)
+                    if found:
+                        return found
+        return ""
+
+    return scan(asset)
+
+
+def _zetta_asset_metadata(asset: dict[str, Any]) -> dict[str, str]:
+    return {
+        "category_code": _asset_text(asset, "CategoryCode", "Category", "GSelectorCategoryCode", "GSelectorCategory", "SchedulerCategory", "SongCategory", "LinkCategory"),
+        "mood": _asset_text(asset, "Mood", "MoodName", "GSelectorMood"),
+        "opener": _asset_text(asset, "Opener", "OpenerCode", "GSelectorOpener"),
+        "texture_open": _asset_text(asset, "TextureOpen", "OpenTexture", "Texture Open", "GSelectorTextureOpen"),
+        "texture_close": _asset_text(asset, "TextureClose", "CloseTexture", "Texture Close", "GSelectorTextureClose"),
+    }
+
+
 def _zetta_category(event_type: str, asset: dict[str, Any]) -> str:
+    exact = _zetta_asset_metadata(asset).get("category_code", "").strip()
+    if exact:
+        return exact
     if event_type == "song":
         return "Zetta / Song"
     if event_type == "traffic":
         sponsor = str(asset.get("Sponsor") or "").strip()
         return f"Zetta / Reklama{(' / ' + sponsor) if sponsor else ''}"
+    if event_type == "show":
+        return "AUD"
     return f"Zetta / {event_type.title()}"
 
 
@@ -504,10 +552,10 @@ def parse_zetta2go_log(
 
         # TOH rows define the scheduling hour. Using that hour instead of the
         # wall-clock AirTime preserves 60+ minutes/hour semantics in comparisons.
-        if entry_type == 3:
-            if actual is not None:
-                current_group_hour = actual.hour
-            continue
+        # Keep the marker as a first-class row as well; the whole-day playlist
+        # uses it as a strong visual separator just like Zetta2GO.
+        if entry_type == 3 and actual is not None:
+            current_group_hour = actual.hour
 
         raw_asset = cell[7]
         asset = raw_asset if isinstance(raw_asset, dict) else {}
@@ -515,7 +563,19 @@ def parse_zetta2go_log(
         universal_id = str(asset.get("UniversalIdentifier") or "") if asset else ""
         source_event_id = universal_id or row_id
 
-        if entry_type == 15:  # Exact Time Marker
+        if entry_type == 3:  # Top of Hour helper row
+            etm_type = ""
+            raw_time = _time_raw_from_group(actual, current_group_hour)
+            title = "Top of the hour"
+            gap_seconds = None
+            event_type = "toh"
+            artist = ""
+            category = "TOH"
+            runtime_seconds = 0.0
+            runtime_raw = ""
+            asset_id = ""
+            sponsor = ""
+        elif entry_type == 15:  # Exact Time Marker
             etm_type = str(asset.get("ETMType") or "").strip() or "Other"
             raw_time = _time_raw_from_group(actual, current_group_hour)
             minute = actual.minute if actual is not None else 0
@@ -585,6 +645,7 @@ def parse_zetta2go_log(
             "calculated_times": calculated,
             "zetta_gap_ms": asset.get("gap") if entry_type == 15 else None,
             "zetta_original_gap_ms": asset.get("ogap") if entry_type == 15 else None,
+            **(_zetta_asset_metadata(asset) if entry_type == 106 else {}),
         }
         out.append({
             "line_no": source_index,
@@ -1525,6 +1586,203 @@ def import_history(station_key: str = STATION_KEY, limit: int = 50) -> list[dict
     return [dict(row) for row in rows]
 
 
+
+def _raw_fields_from_payload(payload_json: Any) -> list[Any]:
+    try:
+        payload = json.loads(str(payload_json or "[]"))
+    except Exception:
+        return []
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("raw_fields"), list):
+        return payload["raw_fields"]
+    return []
+
+
+def _gselector_fallback_maps(rows: Iterable[Any]) -> tuple[dict[tuple[str, str], dict[str, str]], dict[tuple[str, str, str], dict[str, str]], dict[tuple[str, str], dict[str, str]]]:
+    """Build latest-known GSelector coding maps for Zetta rows.
+
+    Song metadata prefers canonical ``song_id`` when available, then falls back
+    to normalized artist/title. Non-song links/jingles use event type + title.
+    Rows are supplied newest-first, so ``setdefault`` preserves the latest code.
+    """
+    by_song_id: dict[tuple[str, str], dict[str, str]] = {}
+    by_song_text: dict[tuple[str, str, str], dict[str, str]] = {}
+    by_event_title: dict[tuple[str, str], dict[str, str]] = {}
+    for row in rows:
+        item = dict(row)
+        event_type = str(item.get("event_type") or "")
+        artist = str(item.get("artist") or "")
+        title = str(item.get("title") or "")
+        raw = _raw_fields_from_payload(item.get("payload_json"))
+        meta: dict[str, str] = {
+            "category": str(item.get("category") or ""),
+            "category_code": str(item.get("category") or "").split("/", 1)[0].strip(),
+        }
+        if event_type == "song":
+            for key, _label, index in GSELECTOR_SONG_COLUMNS:
+                if len(raw) > index and raw[index] not in (None, ""):
+                    meta[key] = str(raw[index]).strip()
+            sid = item.get("song_id")
+            if sid is not None:
+                by_song_id.setdefault(("song_id", str(int(sid))), meta)
+            by_song_text.setdefault(("song", db.normalize(artist), db.normalize(title)), meta)
+        elif title:
+            by_event_title.setdefault((event_type, db.normalize(title)), meta)
+    return by_song_id, by_song_text, by_event_title
+
+
+def _apply_zetta_metadata_fallback(out: list[dict[str, Any]], fallback_rows: Iterable[Any]) -> None:
+    by_song_id, by_song_text, by_event_title = _gselector_fallback_maps(fallback_rows)
+    for item in out:
+        if str(item.get("source_system") or "") != "zetta2go":
+            continue
+        event_type = str(item.get("event_type") or "")
+        if event_type in {"etm", "toh"}:
+            item["category_code"] = _local_category_code(item)
+            continue
+        fallback: dict[str, str] = {}
+        if event_type == "song" and item.get("song_id") is not None:
+            fallback = by_song_id.get(("song_id", str(int(item["song_id"])))) or {}
+        if not fallback and event_type == "song":
+            fallback = by_song_text.get(("song", db.normalize(str(item.get("artist") or "")), db.normalize(str(item.get("title") or "")))) or {}
+        if not fallback and item.get("title"):
+            fallback = by_event_title.get((event_type, db.normalize(str(item.get("title") or "")))) or {}
+
+        for key in ("mood", "opener", "texture_open", "texture_close"):
+            if not str(item.get(key) or "").strip():
+                item[key] = str(fallback.get(key) or "")
+        current_category = str(item.get("category") or "")
+        if (not current_category or current_category.startswith("Zetta /")) and fallback.get("category"):
+            item["category"] = str(fallback["category"])
+        native_code = str(item.get("category_code") or "").strip()
+        item["category_code"] = native_code or str(fallback.get("category_code") or "") or _local_category_code(item)
+
+
+def _local_category_code(item: dict[str, Any]) -> str:
+    event_type = str(item.get("event_type") or "")
+    if event_type == "etm":
+        meta = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        return str(meta.get("etm_type") or "ETM").upper()
+    if event_type == "toh":
+        return "TOH"
+    category = str(item.get("category") or "").strip()
+    if category and not category.startswith("Zetta /"):
+        return category.split("/", 1)[0].strip()
+    return {
+        "song": "SONG",
+        "jingle": "JINGLE",
+        "show": "AUD",
+        "bed": "POD",
+        "info": "INFO",
+        "traffic": "REKL",
+        "command": "CMD",
+    }.get(event_type, category.split("/", 1)[-1].strip().upper() if category else event_type.upper())
+
+
+def _format_played_seconds(value: float | None) -> str:
+    if value is None:
+        return ""
+    try:
+        total = max(0.0, float(value))
+    except (TypeError, ValueError):
+        return ""
+    minutes = int(total // 60)
+    seconds = total - minutes * 60
+    if abs(seconds - round(seconds)) < .05:
+        return f"{minutes:02d}:{int(round(seconds)):02d}"
+    return f"{minutes:02d}:{seconds:04.1f}".rstrip("0").rstrip(".")
+
+
+def _annotate_played_lengths(rows: list[dict[str, Any]], service_date: str, kind: str) -> None:
+    """Add a practical playout-duration estimate to Zetta Played rows.
+
+    GetLog exposes the scheduled/effective runtime, but this build does not
+    expose a separate AirStopTime column.  For finished/current playout rows we
+    therefore use Zetta's effective runtime for ordinary completed plays. For
+    explicit fade/stopped statuses, the next actually-aired event start can be
+    used as a shorter estimate, but only when it implies a material cut (>=10 s
+    and >=10%). This avoids calling ordinary crossfades a shortened play. Current
+    rows use wall-clock elapsed time and are refreshed by the Streamlit fragment.
+    """
+    if kind != "played":
+        return
+    def unwrapped_start(row: dict[str, Any]) -> float | None:
+        raw = str(row.get("air_time_raw") or "").strip()
+        match = re.fullmatch(r"(\d{1,2}):(\d+):(\d{1,2}(?:\.\d+)?)", raw)
+        if match:
+            return int(match.group(1)) * 3600.0 + int(match.group(2)) * 60.0 + float(match.group(3))
+        try:
+            return float(row.get("sort_seconds")) if row.get("sort_seconds") is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    candidates = [
+        row for row in rows
+        if str(row.get("source_system") or "") == "zetta2go"
+        and str(row.get("event_type") or "") not in {"etm", "toh", "command"}
+        and int(row.get("zetta_status_code") or 0) in ZETTA_PLAYED_STATUS_CODES
+        and unwrapped_start(row) is not None
+    ]
+    candidates.sort(key=lambda row: int(row.get("sequence_no") or 0))
+    now = datetime.now().astimezone()
+    is_today = str(service_date) == now.date().isoformat()
+
+    for index, row in enumerate(candidates):
+        start = float(unwrapped_start(row) or 0.0)
+        next_start: float | None = None
+        for nxt in candidates[index + 1:]:
+            probe_raw = unwrapped_start(nxt)
+            if probe_raw is None:
+                continue
+            probe = float(probe_raw)
+            if probe < start - 12 * 3600:
+                probe += 86400
+            if probe > start + 0.05:
+                next_start = probe
+                break
+        delta = (next_start - start) if next_start is not None else None
+        status = int(row.get("zetta_status_code") or 0)
+        if is_today and status in {-3, 2, 9}:
+            elapsed_now = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1_000_000 - start
+            if elapsed_now < -12 * 3600:
+                elapsed_now += 86400
+            if elapsed_now >= 0:
+                delta = elapsed_now
+
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        max_duration = None
+        for candidate in (
+            row.get("runtime_seconds"),
+            (float(payload.get("duration_ms")) / 1000.0 if payload.get("duration_ms") not in (None, "") else None),
+        ):
+            try:
+                val = float(candidate) if candidate is not None else None
+            except (TypeError, ValueError):
+                val = None
+            if val is not None and val > 0:
+                max_duration = val
+                break
+        # For an ordinary completed play, the effective Zetta runtime is the
+        # best value we have. The next event may begin a few seconds earlier
+        # because of a normal segue/crossfade, which does *not* mean the first
+        # asset stopped at that instant. Only cut-like Zetta statuses (fade /
+        # stopped) may use the next actual start as a shorter playout estimate,
+        # and even then only for a material cut (>=10 s and >=10%).
+        if is_today and status in {-3, 2, 9} and delta is not None and delta >= 0:
+            actual = min(delta, max_duration) if max_duration is not None else delta
+        elif status in {6, 7, 8} and delta is not None and delta >= 0 and max_duration is not None:
+            cut_seconds = max_duration - delta
+            cut_ratio = cut_seconds / max_duration if max_duration > 0 else 0.0
+            actual = max(0.0, delta) if cut_seconds >= 10.0 and cut_ratio >= 0.10 else max_duration
+        elif status in {3, 6, 7, 8} and max_duration is not None:
+            actual = max_duration
+        else:
+            actual = None
+        row["played_seconds"] = actual
+        row["played_raw"] = _format_played_seconds(actual)
+
+
 def events_for_day(
     kind: str,
     service_date: date | str,
@@ -1554,6 +1812,20 @@ def events_for_day(
                 ORDER BY sequence_no""",
             params,
         ).fetchall()
+        fallback_rows = []
+        if any(str(row["source_system"] or "") == "zetta2go" for row in rows):
+            # Zetta GetLog is intentionally compact and some installations do
+            # not include GSelector coding fields (category/mood/opener/texture)
+            # in the Asset object. Keep the latest imported GSelector coding as
+            # a local fallback, matched by canonical song/text identity.
+            fallback_rows = con.execute(
+                """SELECT service_date,sequence_no,event_type,category,artist,title,song_id,payload_json
+                   FROM local_station_events
+                   WHERE station_key=? AND source_system<>'zetta2go'
+                   ORDER BY service_date DESC, sequence_no DESC
+                   LIMIT 30000""",
+                (station_key,),
+            ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -1601,6 +1873,12 @@ def events_for_day(
             item["zetta_gap_ignore_resets_ms"] = meta.get("zetta_gap_ignore_resets_ms")
             item["zetta_gap_ignore_resets_carry_ms"] = meta.get("zetta_gap_ignore_resets_carry_ms")
             item["zetta_gap_ignore_resets_reset_count"] = int(meta.get("zetta_gap_ignore_resets_reset_count") or 0)
+            item["payload"] = meta
+            item["mood"] = str(meta.get("mood") or "")
+            item["opener"] = str(meta.get("opener") or "")
+            item["texture_open"] = str(meta.get("texture_open") or "")
+            item["texture_close"] = str(meta.get("texture_close") or "")
+            item["category_code"] = str(meta.get("category_code") or "")
             item["etm_delta_raw"] = ""
             if item.get("event_type") == "etm":
                 gap_ms = meta.get("zetta_gap_ms")
@@ -1627,6 +1905,13 @@ def events_for_day(
             item["zetta_asset_id"] = ""
             item["etm_delta_raw"] = str(raw_fields[2]) if item.get("event_type") == "etm" and len(raw_fields) > 2 else ""
         out.append(item)
+    if fallback_rows:
+        _apply_zetta_metadata_fallback(out, fallback_rows)
+    for item in out:
+        if not str(item.get("category_code") or "").strip():
+            item["category_code"] = _local_category_code(item)
+    _annotate_played_lengths(out, d, kind)
+
     # Older imports may predate complete traffic-block classification. Reapply
     # the same-time grouping on read so users do not have to re-import files.
     _mark_traffic_groups(out)
@@ -1829,7 +2114,12 @@ def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool,
     zetta_fade = zetta_status in {6, 7, 8} or zetta_edit == 217
 
     sr = scheduled.get("runtime_seconds")
-    pr = played.get("runtime_seconds")
+    # Prefer the derived actual playout span (next aired start / live elapsed)
+    # over Zetta's nominal RuntimeMilliseconds. This is what lets comparison
+    # catch a song cut by 1/3 or 1/2 while ignoring normal few-second segues.
+    pr = played.get("played_seconds")
+    if pr is None:
+        pr = played.get("runtime_seconds")
     cut: float | None = None
     significant = False
     try:
@@ -1932,7 +2222,8 @@ def _compare_hour_rows(
     hour = int(hour)
 
     def relevant(row: dict[str, Any]) -> bool:
-        return include_technical or str(row.get("event_type") or "") != "command"
+        event_type = str(row.get("event_type") or "")
+        return include_technical or event_type not in {"command", "toh"}
 
     scheduled = [row for row in scheduled_all if relevant(row)]
     played = [row for row in played_all if relevant(row)]

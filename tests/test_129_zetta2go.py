@@ -264,7 +264,9 @@ def test_zetta_client_get_log_fetches_24_hour_windows(monkeypatch):
     assert payload["records"] == 48
     assert len(payload["radiocharts_previous_hour_rows"]) == 2
     parsed = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
-    assert len(parsed) == 24
+    assert len(parsed) == 48
+    assert sum(1 for r in parsed if r["event_type"] == "toh") == 24
+    assert sum(1 for r in parsed if r["event_type"] == "song") == 24
     assert {r["schedule_hour"] for r in parsed} == set(range(24))
     assert next(r for r in parsed if r["title"] == "Hour 01")["air_time_raw"] == "01:05:00.0"
 

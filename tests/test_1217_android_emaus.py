@@ -7,7 +7,8 @@ def test_android_has_native_emaus_navigation_and_tabs():
     api = (root / "android/RadioChartsAndroid/app/src/main/java/pl/radiocharts/mobile/Api.kt").read_text(encoding="utf-8")
     assert '"emaus" to "EMAUS"' in main
     assert 'listOf("Scheduled", "Played", "Porównanie", "Utwory", "Import")' in main
-    assert 'composable("emaus") { LocalRadioScreen(store) }' in main
+    assert 'composable("emaus")' in main
+    assert 'LocalRadioScreen(store)' in main
     assert 'localRadioDates' in api
     assert 'localRadioEvents' in api
     assert 'localRadioCompare' in api
