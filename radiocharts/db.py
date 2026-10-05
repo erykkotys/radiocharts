@@ -2594,6 +2594,32 @@ def list_songs() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def monitoring_song_catalog() -> list[dict]:
+    """Songs that belong to either charts or stored radio airplay.
+
+    This is the common universe used by the Watched screen: anything that can
+    appear on Dashboard (chart-backed) or in Emisje (airplay-backed), with live
+    user state attached.  Keeping the union in SQLite avoids building it from
+    two large Python frames on every Streamlit rerun.
+    """
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+                      COALESCE(n.heard,0) AS heard,
+                      COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.downloaded,0) AS downloaded,
+                      COALESCE(n.note,'') AS note,
+                      n.updated_at
+               FROM songs s
+               LEFT JOIN song_notes n ON n.song_id=s.id
+               WHERE EXISTS (SELECT 1 FROM chart_entries e WHERE e.song_id=s.id)
+                  OR EXISTS (SELECT 1 FROM airplay_plays p WHERE p.song_id=s.id)
+               ORDER BY s.artist COLLATE NOCASE,s.title COLLATE NOCASE,s.id"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_song(song_id: int) -> dict | None:
     """Fetch one shared song row with live user state."""
     init_db()

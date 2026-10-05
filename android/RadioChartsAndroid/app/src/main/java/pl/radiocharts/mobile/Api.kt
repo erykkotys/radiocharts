@@ -42,6 +42,8 @@ interface RadioChartsApi {
         @Path("kind") kind: String,
         @Path("serviceDate") serviceDate: String,
         @Query("hour") hour: Int? = null,
+        @Query("continuity") continuity: Boolean = true,
+        @Query("ignore_resets") ignoreResets: Boolean = false,
     ): List<LocalRadioEvent>
     @GET("api/v1/local-radio/compare/{serviceDate}")
     suspend fun localRadioCompare(

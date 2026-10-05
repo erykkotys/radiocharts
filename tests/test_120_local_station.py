@@ -100,8 +100,8 @@ def test_song_stats_and_our_radio_ui_contract(tmp_path, monkeypatch):
     rows = song_stats("played", "2026-09-30", "2026-09-30")
     assert rows[0]["plays"] == 2
     assert rows[0]["per_calendar_day"] == 2.0
-    assert '("our_radio", "EMAUS")' in APP
-    assert '["Scheduled", "Played", "Porównanie", "Utwory", "Import"]' in APP
+    assert '("our_radio", "Schedule")' in APP
+    assert '["Scheduled", "ETM", "Played", "Porównanie", "Utwory", "Import"]' in APP
     assert 'st.file_uploader("Plik GSelector"' in APP
 
 
@@ -274,7 +274,7 @@ def test_v126_shared_compare_scroll_lazy_subviews_and_status_contract():
     assert 'class="rc-compare-scroll"' in APP
     assert 'Scheduled i Played mają jeden wspólny pionowy scroll' in APP
     assert 'st.segmented_control(' in APP
-    assert '["Scheduled", "Played", "Porównanie", "Utwory", "Import"]' in APP
+    assert '["Scheduled", "ETM", "Played", "Porównanie", "Utwory", "Import"]' in APP
     assert 'tab_schedule, tab_played, tab_compare, tab_songs, tab_import = st.tabs' not in APP
     assert '_bootstrap_local_station_seed_once()' in APP
     assert '_cached_local_station_song_links(catalog_revision())' in APP

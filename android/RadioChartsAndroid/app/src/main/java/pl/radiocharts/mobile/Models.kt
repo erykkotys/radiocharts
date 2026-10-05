@@ -127,6 +127,7 @@ data class LocalRadioEvent(
     val zetta_status: String = "",
     val zetta_status_code: Int? = null,
     val zetta_edit_name: String = "",
+    val display_phase: String = "",
 )
 
 data class LocalRadioCompareRow(
@@ -135,6 +136,7 @@ data class LocalRadioCompareRow(
     val category: String = "",
     val artist: String = "",
     val title: String = "",
+    val song_id: Int? = null,
     val scheduled_time: String = "",
     val played_time: String = "",
     val start_delta: String = "",

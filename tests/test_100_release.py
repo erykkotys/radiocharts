@@ -73,6 +73,6 @@ def test_v1_android_charts_follow_device_and_can_force_landscape():
 
 def test_v101_versions():
     gradle = (ROOT / "android/RadioChartsAndroid/app/build.gradle.kts").read_text(encoding="utf-8")
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.19"
-    assert 'versionCode = 42' in gradle
-    assert 'versionName = "1.2.19"' in gradle
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.21"
+    assert 'versionCode = 44' in gradle
+    assert 'versionName = "1.2.21"' in gradle

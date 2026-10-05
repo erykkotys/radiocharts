@@ -1,3 +1,26 @@
+## 1.2.21 — Watched i porządek głównej nawigacji
+
+- Główne zakładki web są ułożone: **Dashboard, Notowania, Emisje, Watched, Utwór, Baza, Schedule, Ustawienia, Manual**. Techniczna strona **Dane** nadal działa pod bezpośrednim adresem `?view=data`, ale nie zajmuje miejsca w głównym pasku.
+- Dotychczasowa zakładka **EMAUS** w głównym pasku nazywa się teraz **Schedule**; wewnątrz nadal pracuje na danych EMAUS/Zetta2GO.
+- Nowa zakładka **Watched** łączy wspólny katalog utworów z Dashboardu i Emisji.
+- Pierwsza tabela Watched pokazuje najpierw wszystkie statusy `* Candidate`, a potem `Watch`, z tymi samymi edytowalnymi statusami i metrykami co pozostałe główne tabele.
+- Pod nią jest **Top 50 Popularity** spośród utworów ze statusem **Nie słuchałem**, również z połączonego świata Dashboard + Emisje.
+- Członkostwo obu tabel jest zamrażane na czas bieżącej strony: po zmianie statusu np. na `Baza G1` utwór pozostaje na ekranie i znika/przenosi się dopiero po odświeżeniu strony.
+- Android ma zsynchronizowany numer wydania 1.2.21 / `versionCode = 44`; etykieta EMAUS w dolnej nawigacji została zmieniona na **Schedule**.
+
+## 1.2.20 — spójny EMAUS, ETM i live continuity
+
+- Scheduled, Played i Porównanie mają wspólną kolorystykę: piosenki białe, linki/jingle/audycje żółte, ETM niebieskie, Top of the hour różowe, reklama/autopromocja czerwone.
+- Kolejne reklamy i autopromocje są zwijane w jeden czerwony blok **REKLAMA/AUTOPROMOCJA** we wszystkich trzech widokach.
+- ETM Hard/Soft z gapami mają osobną zakładkę **ETM**; mapa zawsze obejmuje cały dzień, jest chronologiczna, pionowa i ma maksymalnie trzy kolumny. „Ignoruj resety” jest domyślnie włączone.
+- Własny zestaw typów elementów można zapisać jako nazwany preset i używać ponownie.
+- Naprawione zostało 00:00: queued 60+ z requestu 23:00 nie może już sztucznie tworzyć kilkudziesięciominutowego carry; stare snapshoty mają dodatkową ochronę przy odczycie.
+- Played po elemencie aktualnie granym pokazuje dalszy Scheduled dla ciągłości; historia Played jest lekko wyszarzona i kursywą, a bieżący element ma progress bar także w samej playliście.
+- Nad playlistami są szybkie przyciski 00–23; Porównanie ma ten sam szybki wybór godziny.
+- Dwuklik piosenki w Scheduled, Played i Porównaniu otwiera kartę **Utwór**.
+- Android dostał odpowiadający układ EMAUS, osobną zakładkę ETM, live continuity, kolory, zwijane bloki reklamowe i nawigację 00–23.
+- Android 1.2.20 / `versionCode = 43`.
+
 ## 1.2.19 — czytelniejszy EMAUS, metadane i live playout
 
 - Scheduled i Played korzystają z zwartego widoku logu podobnego do Porównania; Porównanie pozostaje nastawione głównie na ingerencje względem cutoffu.

@@ -837,6 +837,13 @@ def _raw_zetta_previous_hour_carry(payload: dict[str, Any]) -> tuple[float | Non
         if actual is None:
             continue
         actual = actual.replace(tzinfo=None)
+        # This helper receives the explicit previous-day 23:00–23:59 request.
+        # Zetta may nevertheless return queued 60+ rows timestamped after
+        # midnight. Those rows belong to the next clock context; treating e.g.
+        # 00:00 as offset 0 in the 23h block is what produced false +50 minute
+        # carries at 00:00.
+        if actual.hour != 23:
+            continue
         offset = actual.minute * 60.0 + actual.second + actual.microsecond / 1_000_000.0
 
         if entry_type == 15:
@@ -1873,6 +1880,27 @@ def events_for_day(
             item["zetta_gap_ignore_resets_ms"] = meta.get("zetta_gap_ignore_resets_ms")
             item["zetta_gap_ignore_resets_carry_ms"] = meta.get("zetta_gap_ignore_resets_carry_ms")
             item["zetta_gap_ignore_resets_reset_count"] = int(meta.get("zetta_gap_ignore_resets_reset_count") or 0)
+            # Guard legacy midnight snapshots created before the hourly-tail fix.
+            # A queued row after midnight could previously be interpreted as a
+            # +50m/+60m carry from 23:00. Prefer the native Zetta value for an
+            # obviously impossible inherited 00:00 gap.
+            if item.get("event_type") == "etm" and item.get("schedule_hour") == 0:
+                try:
+                    inherited = float(item.get("zetta_gap_ms"))
+                except (TypeError, ValueError):
+                    inherited = None
+                native = item.get("zetta_gap_native_ms")
+                if (
+                    inherited is not None
+                    and abs(inherited) >= 10 * 60 * 1000
+                    and str(item.get("zetta_gap_source") or "") in {"previous_hour_tail", "previous_hour_reset"}
+                    and native is not None
+                ):
+                    try:
+                        item["zetta_gap_ms"] = float(native)
+                        item["zetta_gap_source"] = "native_midnight_guard"
+                    except (TypeError, ValueError):
+                        pass
             item["payload"] = meta
             item["mood"] = str(meta.get("mood") or "")
             item["opener"] = str(meta.get("opener") or "")
@@ -1881,7 +1909,7 @@ def events_for_day(
             item["category_code"] = str(meta.get("category_code") or "")
             item["etm_delta_raw"] = ""
             if item.get("event_type") == "etm":
-                gap_ms = meta.get("zetta_gap_ms")
+                gap_ms = item.get("zetta_gap_ms")
                 try:
                     if gap_ms is not None:
                         gap_seconds = float(gap_ms) / 1000.0
@@ -2263,6 +2291,7 @@ def _compare_hour_rows(
                 "category": sched["category"],
                 "artist": sched["artist"],
                 "title": sched["title"],
+                "song_id": sched.get("song_id"),
                 "scheduled_time": sched["air_time_raw"],
                 "played_time": "",
                 "start_delta_seconds": None,
@@ -2339,6 +2368,7 @@ def _compare_hour_rows(
             "category": sched["category"],
             "artist": sched["artist"],
             "title": sched["title"],
+            "song_id": sched.get("song_id") or played_row.get("song_id"),
             "scheduled_time": sched["air_time_raw"],
             "played_time": played_row["air_time_raw"],
             "start_delta_seconds": round(delta, 1) if delta is not None else None,
@@ -2365,6 +2395,7 @@ def _compare_hour_rows(
             "category": row["category"],
             "artist": row["artist"],
             "title": row["title"],
+            "song_id": row.get("song_id"),
             "scheduled_time": "",
             "played_time": row["air_time_raw"],
             "start_delta_seconds": None,

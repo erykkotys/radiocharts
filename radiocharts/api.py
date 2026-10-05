@@ -499,13 +499,114 @@ def local_radio_dates(kind: Literal["schedule", "played"] = "schedule") -> list[
     return local_available_dates(kind)
 
 
+
+def _mobile_local_event_match(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    a_ext = str(a.get("external_id") or "").strip()
+    b_ext = str(b.get("external_id") or "").strip()
+    if a_ext and b_ext and a_ext == b_ext:
+        return True
+    if str(a.get("event_type") or "") != str(b.get("event_type") or ""):
+        return False
+    if a.get("song_id") is not None and b.get("song_id") is not None:
+        try:
+            if int(a.get("song_id")) == int(b.get("song_id")):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return (
+        normalize(str(a.get("artist") or "")) == normalize(str(b.get("artist") or ""))
+        and normalize(str(a.get("title") or "")) == normalize(str(b.get("title") or ""))
+        and bool(str(a.get("title") or "").strip())
+    )
+
+
+def _mobile_played_continuity(service_date: date, hour: int | None) -> list[dict[str, Any]]:
+    played = [dict(row) for row in local_events_for_day("played", service_date)]
+    for row in played:
+        try:
+            status = int(row.get("zetta_status_code") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        row["display_phase"] = "current" if status in {-3, 2, 9} else "played_past"
+    if service_date == date.today():
+        scheduled = [dict(row) for row in local_events_for_day("schedule", service_date)]
+        current = next((r for r in played if r.get("display_phase") == "current" and str(r.get("event_type") or "") not in {"etm", "toh", "command"}), None)
+        actual = [r for r in played if str(r.get("event_type") or "") not in {"etm", "toh", "command"}]
+        pivot = current or (actual[-1] if actual else None)
+        if pivot is not None and scheduled:
+            pivot_index = next((i for i, row in enumerate(scheduled) if _mobile_local_event_match(pivot, row)), None)
+            if pivot_index is None:
+                try:
+                    pivot_sort = float(pivot.get("sort_seconds"))
+                except (TypeError, ValueError):
+                    pivot_sort = None
+                if pivot_sort is not None:
+                    pivot_index = next((i for i, row in enumerate(scheduled) if row.get("sort_seconds") is not None and float(row.get("sort_seconds")) >= pivot_sort), None)
+            if pivot_index is not None:
+                # GetLog may already expose future technical markers (TOH/ETM)
+                # in the live Played response. Drop those after the current
+                # playout pivot before appending the Scheduled tail, otherwise
+                # mobile would show duplicate future anchors.
+                try:
+                    pivot_sort = float(pivot.get("sort_seconds"))
+                except (TypeError, ValueError):
+                    pivot_sort = None
+                if pivot_sort is not None:
+                    kept: list[dict[str, Any]] = []
+                    for row in played:
+                        try:
+                            row_sort = float(row.get("sort_seconds"))
+                        except (TypeError, ValueError):
+                            row_sort = None
+                        if (
+                            str(row.get("event_type") or "") in {"etm", "toh", "command"}
+                            and row_sort is not None
+                            and row_sort > pivot_sort
+                        ):
+                            continue
+                        kept.append(row)
+                    played = kept
+                for row in scheduled[pivot_index + 1:]:
+                    row["display_phase"] = "future_schedule"
+                    played.append(row)
+    if hour is not None:
+        played = [row for row in played if row.get("schedule_hour") == int(hour)]
+    return played
+
+
+def _apply_mobile_ignore_resets(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        if str(row.get("event_type") or "") != "etm":
+            continue
+        value = row.get("zetta_gap_ignore_resets_ms")
+        if value is None:
+            continue
+        try:
+            seconds = float(value) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        sign = "+" if seconds >= 0 else "-"
+        seconds = abs(seconds)
+        minutes = int(seconds // 60)
+        remainder = seconds - minutes * 60
+        row["etm_delta_raw"] = f"{sign}{minutes:02d}:{remainder:04.1f}".rstrip("0").rstrip(".")
+
+
 @app.get("/api/v1/local-radio/events/{kind}/{service_date}")
 def local_radio_events(
     kind: Literal["schedule", "played"],
     service_date: date,
     hour: int | None = Query(default=None, ge=0, le=23),
+    continuity: bool = Query(default=True),
+    ignore_resets: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
-    return [{k: _clean(v) for k, v in row.items()} for row in local_events_for_day(kind, service_date, hour=hour)]
+    if kind == "played" and continuity:
+        rows = _mobile_played_continuity(service_date, hour)
+    else:
+        rows = [dict(row) for row in local_events_for_day(kind, service_date, hour=hour)]
+    if ignore_resets:
+        _apply_mobile_ignore_resets(rows)
+    return [{k: _clean(v) for k, v in row.items()} for row in rows]
 
 
 @app.get("/api/v1/local-radio/compare/{service_date}")

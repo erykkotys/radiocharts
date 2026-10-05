@@ -23,9 +23,9 @@ from radiocharts.db import (
     airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
     airplay_spin_counts, airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
-    source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision, catalog_revision,
+    source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision, catalog_revision, monitoring_song_catalog,
     parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
-    merge_song_group,
+    merge_song_group, get_app_settings, set_app_settings,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.local_station import (
@@ -114,20 +114,34 @@ st.markdown(
       .rc-metric-value { color:#f7f8fa; font-size:1.28rem; font-weight:700; line-height:1.1; margin-top:.05rem; }
       .rc-song-title { font-size:1.18rem; font-weight:720; line-height:1.2; margin:.05rem 0 .08rem; }
       .rc-song-meta { color:#9fa8b5; font-size:.78rem; }
-      .rc-etm-grid { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(150px,190px); justify-content:start; gap:.20rem .34rem; margin:.16rem 0 .48rem; overflow-x:auto; }
-      .rc-etm-chip { display:grid; grid-template-columns:43px 1fr 62px auto; gap:.25rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:5px; padding:.19rem .30rem; min-width:0; font-size:.70rem; }
-      .rc-etm-zero { opacity:.48; }
-      .rc-etm-time { color:#b9c2cf; font-variant-numeric:tabular-nums; }
-      .rc-etm-kind { color:#f4cf57; font-weight:650; overflow:hidden; text-overflow:ellipsis; }
-      .rc-etm-gap { color:#f4f4f5; font-weight:700; font-variant-numeric:tabular-nums; text-align:right; }
+      :root { --rc-song:#f4f4f5; --rc-link:#f4cf57; --rc-etm:#69d6ff; --rc-toh:#ff79c6; --rc-traffic:#ff5d5d; }
+      .rc-etm-grid { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(230px,300px); justify-content:start; gap:.34rem .52rem; margin:.28rem 0 .62rem; overflow-x:auto; }
+      .rc-etm-chip { display:grid; grid-template-columns:54px 1fr 78px auto; gap:.38rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:7px; padding:.42rem .52rem; min-width:0; font-size:.82rem; }
+      .rc-etm-zero { opacity:.50; }
+      .rc-etm-time { color:#c6cfdb; font-variant-numeric:tabular-nums; font-weight:650; }
+      .rc-etm-kind { color:var(--rc-etm); font-weight:800; overflow:hidden; text-overflow:ellipsis; }
+      .rc-etm-gap { color:#f4f4f5; font-weight:780; font-variant-numeric:tabular-nums; text-align:right; }
       .rc-etm-risk { color:#f4b942; font-weight:800; cursor:help; }
-      .rc-local-scroll { max-height:690px; overflow:auto; border:1px solid #313844; border-radius:7px; background:#090d12; }
+      .rc-hour-nav { display:flex; flex-wrap:wrap; gap:.22rem; margin:.22rem 0 .38rem; }
+      .rc-hour-nav a { min-width:30px; text-align:center; color:#cfd5df; background:#151b23; border:1px solid #3a4350; border-radius:5px; padding:.16rem .30rem; font-size:.68rem; font-weight:760; text-decoration:none; }
+      .rc-hour-nav a:hover { color:#fff; border-color:#687485; background:#202834; }
+      .rc-local-scroll { max-height:690px; overflow:auto; border:1px solid #313844; border-radius:7px; background:#090d12; scroll-behavior:smooth; }
       .rc-local-head, .rc-local-row { display:grid; grid-template-columns:26px 105px 72px minmax(300px,1fr) 64px 70px; gap:.42rem; min-width:850px; align-items:start; }
       .rc-local-head { position:sticky; top:0; z-index:5; padding:.44rem .48rem; background:#11161d; border-bottom:1px solid #313844; color:#cfd5df; font-size:.69rem; font-weight:750; text-transform:uppercase; letter-spacing:.02em; }
-      .rc-local-row { padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.79rem; }
+      .rc-local-row { position:relative; padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.79rem; }
       .rc-local-row:hover { background:#0f151d; }
       .rc-local-row.rc-now { background:#10231a; box-shadow:inset 3px 0 #45c878; }
-      .rc-local-row.rc-toh { grid-template-columns:26px 105px minmax(0,1fr); color:#ff79c6; background:#1b1020; border-top:1px solid #6d3159; border-bottom:1px solid #6d3159; font-weight:800; }
+      .rc-local-row.rc-played-past { opacity:.64; font-style:italic; }
+      .rc-local-row.rc-future-schedule { background:#0b1016; }
+      .rc-local-row.rc-toh { grid-template-columns:26px 105px minmax(0,1fr); color:var(--rc-toh); background:#1b1020; border-top:1px solid #6d3159; border-bottom:1px solid #6d3159; font-weight:800; scroll-margin-top:48px; }
+      .rc-local-row.rc-tone-song { color:var(--rc-song); }
+      .rc-local-row.rc-tone-link { color:var(--rc-link); }
+      .rc-local-row.rc-tone-etm { color:var(--rc-etm); }
+      .rc-local-row.rc-tone-traffic { color:var(--rc-traffic); }
+      .rc-log-row.rc-tone-song { color:var(--rc-song); }
+      .rc-log-row.rc-tone-link { color:var(--rc-link); }
+      .rc-log-row.rc-tone-etm { color:var(--rc-etm); }
+      .rc-log-row.rc-tone-traffic { color:var(--rc-traffic); }
       .rc-local-icon { text-align:center; font-weight:850; line-height:1.25rem; }
       .rc-local-time { font-variant-numeric:tabular-nums; white-space:nowrap; font-weight:650; }
       .rc-local-category { font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -138,6 +152,16 @@ st.markdown(
       .rc-local-played { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; color:#9fe0b2; }
       .rc-local-song-link { color:inherit; text-decoration:none; cursor:pointer; }
       .rc-local-song-link:hover { text-decoration:underline; text-decoration-style:dotted; }
+      .rc-row-progress { grid-column:4 / 7; height:4px; background:#26342b; border-radius:999px; overflow:hidden; margin:.16rem 0 .04rem; }
+      .rc-row-progress > span { display:block; height:100%; background:#45c878; border-radius:999px; width:var(--rc-start); animation:rc-live-grow var(--rc-duration) linear forwards; }
+      @keyframes rc-live-grow { from { width:var(--rc-start); } to { width:100%; } }
+      details.rc-traffic-block { border-bottom:1px solid #331d20; background:#120b0d; }
+      details.rc-traffic-block > summary { list-style:none; cursor:pointer; color:var(--rc-traffic); background:#1b0f12; padding:.34rem .55rem; font-size:.76rem; font-weight:820; border-top:1px solid #4b252b; border-bottom:1px solid #4b252b; }
+      details.rc-traffic-block > summary::-webkit-details-marker { display:none; }
+      details.rc-traffic-block > summary::before { content:'+'; display:inline-block; width:1.1rem; font-size:1rem; font-weight:900; }
+      details.rc-traffic-block[open] > summary::before { content:'−'; }
+      .rc-traffic-count { opacity:.72; font-weight:600; margin-left:.35rem; }
+      .rc-compare-traffic > summary { display:block; min-width:1080px; }
       .rc-now-card { border:1px solid #2f7d4a; background:#10231a; border-radius:7px; padding:.42rem .60rem; margin:.18rem 0 .42rem; }
       .rc-now-title { font-weight:750; color:#e8f7ed; }
       .rc-now-meta { font-size:.70rem; color:#a9cbb4; margin-top:.08rem; }
@@ -147,6 +171,7 @@ st.markdown(
         .rc-build-badge { display:none; }
         .rc-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
         .rc-local-head, .rc-local-row { min-width:760px; grid-template-columns:24px 92px 60px minmax(280px,1fr) 58px 62px; }
+        .rc-etm-grid { grid-auto-columns:minmax(210px,260px); }
       }
     </style>
     """,
@@ -184,7 +209,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-VALID_VIEW_KEYS = {"dashboard", "song", "archive", "airplay", "library", "our_radio", "data", "settings", "methodology"}
+VALID_VIEW_KEYS = {"dashboard", "song", "archive", "airplay", "watched", "library", "our_radio", "data", "settings", "methodology"}
 BOOT_VIEW_KEY = str(st.query_params.get("view", "dashboard"))
 if BOOT_VIEW_KEY not in VALID_VIEW_KEYS:
     BOOT_VIEW_KEY = "dashboard"
@@ -605,6 +630,89 @@ def cached_dashboard_base_frame(chart_rev: str, air_rev: str, lookback_days: int
     return with_dashboard_airplay(scored, air_rev)
 
 
+@st.cache_resource(show_spinner=False, max_entries=12)
+def cached_watched_base_frame(
+    chart_rev: str,
+    air_rev: str,
+    catalog_rev: str,
+    notes_rev: str,
+) -> pd.DataFrame:
+    """Common Dashboard + Emisje universe used by the Watched page.
+
+    The frame intentionally contains live status state as part of the cache key;
+    membership is snapshotted separately in ``st.session_state`` so a status
+    change does not make a row disappear until the browser page is reloaded.
+    """
+    base = cached_monitoring_song_catalog(catalog_rev, notes_rev, air_rev).copy()
+    if base.empty:
+        return base
+
+    base["song_id"] = pd.to_numeric(base["song_id"], errors="coerce")
+    base = base[base["song_id"].notna()].copy()
+    base["song_id"] = base["song_id"].astype(int)
+    base["status"] = base.get("status", "Nie słuchałem").fillna("Nie słuchałem").map(normalized_status)
+    base["heard"] = base.get("heard", False).fillna(False).astype(bool)
+    base["downloaded"] = base.get("downloaded", False).fillna(False).astype(bool)
+    base["note"] = base.get("note", "").fillna("").astype(str)
+
+    scored = cached_scores(chart_rev)
+    score_cols = [
+        "song_id", "first_chart_date", "familiarity", "momentum",
+        "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks",
+        "ESKA_pos", "ESKA_weeks", "OLIA_pos", "OLIA_weeks", "OLIS_pos", "OLIS_weeks",
+    ]
+    if not scored.empty:
+        score_keep = scored[[c for c in score_cols if c in scored.columns]].drop_duplicates("song_id")
+        base = base.merge(score_keep, on="song_id", how="left")
+
+    air_pop = cached_airplay_popularity(air_rev, 28)
+    if not air_pop.empty:
+        base = base.merge(air_pop, on="song_id", how="left")
+    if "airplay_volume_index" not in base.columns:
+        base["airplay_volume_index"] = 0.0
+    base["airplay_volume_index"] = pd.to_numeric(base["airplay_volume_index"], errors="coerce").fillna(0.0)
+    base["chart_popularity_bonus"] = _chart_popularity_bonus(base)
+    base["popularity"] = (
+        0.80 * base["airplay_volume_index"] + 0.20 * base["chart_popularity_bonus"]
+    ).clip(lower=0.0, upper=100.0).round(1)
+
+    presence = pd.DataFrame(cached_airplay_presence(air_rev, 7).get("rows") or [])
+    if not presence.empty and "song_id" in presence.columns:
+        keep = [c for c in ["song_id", "radio_reach", "spins"] if c in presence.columns]
+        presence = presence[keep].drop_duplicates("song_id").rename(columns={"spins": "airplay_spins_7d"})
+        base = base.merge(presence, on="song_id", how="left")
+    if "radio_reach" not in base.columns:
+        base["radio_reach"] = 0.0
+    else:
+        base["radio_reach"] = pd.to_numeric(base["radio_reach"], errors="coerce").fillna(0.0)
+    if "airplay_spins_7d" not in base.columns:
+        base["airplay_spins_7d"] = 0
+    else:
+        base["airplay_spins_7d"] = pd.to_numeric(base["airplay_spins_7d"], errors="coerce").fillna(0).astype(int)
+    for col in ["familiarity", "momentum"]:
+        if col not in base.columns:
+            base[col] = 0.0
+        else:
+            base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0.0)
+
+    pos_cols = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in base.columns]
+    base["avg_position"] = base[pos_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if pos_cols else float("nan")
+    for src in ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]:
+        pos_col = f"{src}_pos"
+        base[src] = base[pos_col].map(position_sort_value).astype(int) if pos_col in base.columns else 999
+    base["release_month"] = [
+        release_month(rel, first)
+        for rel, first in zip(
+            base["release_date"] if "release_date" in base.columns else [""] * len(base),
+            base["first_chart_date"] if "first_chart_date" in base.columns else [""] * len(base),
+        )
+    ]
+    base["preview"] = "▶"
+    base["spotify"] = [spotify_search_url(a, t) for a, t in zip(base["artist"], base["title"])]
+    base["spotify_copy"] = base["spotify"]
+    return base
+
+
 @st.cache_resource(show_spinner=False, max_entries=48)
 def cached_basic_song_metrics(chart_rev: str, air_rev: str, song_key: tuple[int, ...]) -> pd.DataFrame:
     """Standard table metrics for a bounded set of songs.
@@ -645,6 +753,16 @@ def cached_song_history(revision: str, song_id: int) -> pd.DataFrame:
 @st.cache_resource(show_spinner=False, max_entries=4)
 def cached_song_catalog(revision: str) -> pd.DataFrame:
     return pd.DataFrame(song_catalog())
+
+
+@st.cache_resource(show_spinner=False, max_entries=8)
+def cached_monitoring_song_catalog(catalog_rev: str, notes_rev: str, air_rev: str) -> pd.DataFrame:
+    """Union of chart-backed and airplay-backed songs for Watched.
+
+    ``catalog_rev`` catches newly created songs, ``notes_rev`` catches status
+    edits, and ``air_rev`` catches songs newly linked by the airplay importer.
+    """
+    return pd.DataFrame(monitoring_song_catalog())
 
 
 @st.cache_resource(show_spinner=False, max_entries=12)
@@ -857,12 +975,12 @@ def source_health_frame() -> tuple[pd.DataFrame, list[str]]:
 def render_nav_tabs(current: str) -> None:
     tabs = [
         ("dashboard", "Dashboard"),
-        ("song", "Utwór"),
         ("archive", "Notowania"),
         ("airplay", "Emisje"),
+        ("watched", "Watched"),
+        ("song", "Utwór"),
         ("library", "Baza"),
-        ("our_radio", "EMAUS"),
-        ("data", "Dane"),
+        ("our_radio", "Schedule"),
         ("settings", "Ustawienia"),
         ("methodology", "Manual"),
     ]
@@ -2353,6 +2471,79 @@ LOCAL_ETM_PRESETS = {
 }
 
 
+LOCAL_ELEMENT_PRESETS_SETTING = "emaus_element_presets_json_v1"
+
+
+def _local_saved_element_presets() -> dict[str, list[str]]:
+    raw = get_app_settings([LOCAL_ELEMENT_PRESETS_SETTING]).get(LOCAL_ELEMENT_PRESETS_SETTING, "")
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        data = {}
+    out: dict[str, list[str]] = {}
+    if isinstance(data, dict):
+        valid = set(LOCAL_EVENT_LABELS)
+        for name, values in data.items():
+            if not isinstance(values, list):
+                continue
+            cleaned = [str(v) for v in values if str(v) in valid]
+            if cleaned:
+                out[str(name)] = cleaned
+    return out
+
+
+def _local_save_element_preset(name: str, values: list[str]) -> None:
+    clean_name = str(name or "").strip()
+    cleaned = [str(v) for v in values if str(v) in LOCAL_EVENT_LABELS]
+    if not clean_name or not cleaned:
+        return
+    presets = _local_saved_element_presets()
+    presets[clean_name] = cleaned
+    set_app_settings({LOCAL_ELEMENT_PRESETS_SETTING: json.dumps(presets, ensure_ascii=False, sort_keys=True)})
+
+
+def _local_delete_element_preset(name: str) -> None:
+    presets = _local_saved_element_presets()
+    presets.pop(str(name), None)
+    set_app_settings({LOCAL_ELEMENT_PRESETS_SETTING: json.dumps(presets, ensure_ascii=False, sort_keys=True)})
+
+
+def _local_event_tone_class(row: dict) -> str:
+    event_type = str(row.get("event_type") or "other")
+    if event_type == "song":
+        return "rc-tone-song"
+    if event_type == "traffic":
+        return "rc-tone-traffic"
+    if event_type == "etm":
+        return "rc-tone-etm"
+    return "rc-tone-link"
+
+
+def _local_hour_nav_html() -> str:
+    return '<div class="rc-hour-nav">' + ''.join(
+        f'<a href="#rc-hour-{hour:02d}" title="Skocz do {hour:02d}:00">{hour:02d}</a>'
+        for hour in range(24)
+    ) + '</div>'
+
+
+def _local_row_clock_for_live(row: dict) -> tuple[float, float] | None:
+    try:
+        start = float(row.get("sort_seconds"))
+        runtime = max(0.0, float(row.get("runtime_seconds") or 0.0))
+    except (TypeError, ValueError):
+        return None
+    now = datetime.now().astimezone()
+    wall = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1_000_000
+    elapsed = wall - start
+    if elapsed < -12 * 3600:
+        elapsed += 86400
+    if elapsed < 0:
+        return None
+    if runtime > 0:
+        elapsed = min(elapsed, runtime)
+    return elapsed, runtime
+
+
 def _local_etm_kind(row: dict) -> str:
     if str(row.get("event_type") or "") != "etm":
         return ""
@@ -2424,6 +2615,26 @@ def _local_apply_hour_boundary_gaps(rows: list[dict]) -> list[dict]:
         if clock is None:
             return None
         return clock - hour * 3600.0
+
+    # Repair immutable snapshots created before 1.2.20. The old midnight
+    # carry parser could count queued next-day rows returned by the 23h GetLog
+    # request, yielding values such as +56 minutes at 00:00. Native Zetta TOH
+    # is normally 0, so for this specific old derived source prefer the stored
+    # native value when the derived carry is clearly implausible.
+    for marker in by_hour.get(0, []):
+        if str(marker.get("event_type") or "") != "etm" or _local_etm_kind(marker) not in {"Hard", "Soft"}:
+            continue
+        if str(marker.get("zetta_gap_source") or "") not in {"previous_hour_tail", "previous_hour_reset"}:
+            continue
+        try:
+            gap_ms = float(marker.get("zetta_gap_ms")) if marker.get("zetta_gap_ms") is not None else 0.0
+            native_ms = float(marker.get("zetta_gap_native_ms")) if marker.get("zetta_gap_native_ms") is not None else None
+        except (TypeError, ValueError):
+            continue
+        if abs(gap_ms) >= 10 * 60 * 1000 and native_ms is not None:
+            marker["zetta_gap_ms"] = native_ms
+            marker["zetta_gap_source"] = "native_midnight_guard"
+            marker["etm_delta_raw"] = _local_gap_ms_to_raw(native_ms)
 
     def first_playable_after(group: list[dict], index: int, reset_clock: float) -> float | None:
         for candidate in group[index + 1:]:
@@ -2835,10 +3046,13 @@ def _render_local_timeline_grid(frame: pd.DataFrame, columns: list[str], *, key:
 
 def _local_play_status_icon(row: dict, kind: str) -> tuple[str, str, str]:
     event_type = str(row.get("event_type") or "")
+    phase = str(row.get("_display_phase") or "")
     if event_type == "toh":
         return "◆", "#ff79c6", "Top of the hour"
     if event_type == "etm":
-        return "◇", "#f4cf57", _local_etm_kind(row) or "ETM"
+        return "◇", "#69d6ff", _local_etm_kind(row) or "ETM"
+    if phase == "future_schedule":
+        return "○", "#f4b942", "Scheduled — jeszcze nie zagrano"
     if kind != "played":
         return "•", ("#ff5d5d" if event_type == "traffic" else "#f4cf57" if event_type != "song" else "#d9dde3"), "Scheduled"
     try:
@@ -2850,7 +3064,7 @@ def _local_play_status_icon(row: dict, kind: str) -> tuple[str, str, str]:
     if status in {4, 5}:
         return "✕", "#ff5d5d", str(row.get("zetta_status") or "Niezagrane")
     if status in {3, 6, 7, 8}:
-        return "✓", "#45c878", str(row.get("zetta_status") or "Zagrane")
+        return "✓", "#87909d" if phase == "played_past" else "#45c878", str(row.get("zetta_status") or "Zagrane")
     if status in {1, 10}:
         return "○", "#f4b942", str(row.get("zetta_status") or "Oczekuje")
     return "•", "#9fa8b5", str(row.get("zetta_status") or "")
@@ -2869,8 +3083,12 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
 
     if event_type == "toh":
         label = f"Top of the hour · {raw_time[:5] or ''}"
+        try:
+            hour = int(row.get("schedule_hour"))
+        except (TypeError, ValueError):
+            hour = int(raw_time[:2]) if len(raw_time) >= 2 and raw_time[:2].isdigit() else 0
         return (
-            '<div class="rc-local-row rc-toh">'
+            f'<div id="rc-hour-{hour:02d}" class="rc-local-row rc-toh">'
             f'<div class="rc-local-icon" style="color:{icon_color}" title="{html.escape(icon_title)}">{html.escape(icon)}</div>'
             f'<div class="rc-local-time">{html.escape(raw_time)}</div>'
             f'<div>{html.escape(label)}</div></div>'
@@ -2888,7 +3106,10 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
         value = str(row.get(key) or "").strip()
         if value:
             meta_bits.append(f"{label} {value}")
-    if kind == "played":
+    phase = str(row.get("_display_phase") or "")
+    if phase == "future_schedule":
+        meta_bits.append("Scheduled — jeszcze nie zagrano")
+    elif kind == "played":
         status_name = str(row.get("zetta_status") or "").strip()
         if status_name:
             meta_bits.append(status_name)
@@ -2898,12 +3119,20 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
     meta = " · ".join(meta_bits)
 
     runtime = str(row.get("runtime_raw") or "")
-    played_raw = str(row.get("played_raw") or "") if kind == "played" else ""
+    played_raw = str(row.get("played_raw") or "") if kind == "played" and phase != "future_schedule" else ""
     try:
         status_code = int(row.get("zetta_status_code") or 0)
     except (TypeError, ValueError):
         status_code = 0
-    now_class = " rc-now" if kind == "played" and status_code in {-3, 2, 9} else ""
+    current = kind == "played" and phase != "future_schedule" and status_code in {-3, 2, 9}
+
+    classes = ["rc-local-row", _local_event_tone_class(row)]
+    if current:
+        classes.append("rc-now")
+    elif phase == "played_past":
+        classes.append("rc-played-past")
+    elif phase == "future_schedule":
+        classes.append("rc-future-schedule")
 
     title_html = html.escape(main)
     song_id = row.get("song_id")
@@ -2921,8 +3150,22 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
         except (TypeError, ValueError):
             pass
 
+    progress = ""
+    if current:
+        live = _local_row_clock_for_live(row)
+        if live is not None:
+            elapsed, duration = live
+            if duration > 0:
+                pct = min(100.0, max(0.0, 100.0 * elapsed / duration))
+                remaining = max(0.2, duration - elapsed)
+                progress = (
+                    '<div class="rc-row-progress">'
+                    f'<span style="--rc-start:{pct:.2f}%;--rc-duration:{remaining:.2f}s"></span>'
+                    '</div>'
+                )
+
     return (
-        f'<div class="rc-local-row{now_class}">'
+        f'<div class="{" ".join(classes)}">'
         f'<div class="rc-local-icon" style="color:{icon_color}" title="{html.escape(icon_title)}">{html.escape(icon)}</div>'
         f'<div class="rc-local-time">{html.escape(raw_time)}</div>'
         f'<div class="rc-local-category">{html.escape(category)}</div>'
@@ -2930,9 +3173,8 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
         f'<div class="rc-local-meta">{html.escape(meta)}</div></div>'
         f'<div class="rc-local-runtime">{html.escape(runtime)}</div>'
         f'<div class="rc-local-played">{html.escape(played_raw)}</div>'
-        '</div>'
+        f'{progress}</div>'
     )
-
 
 
 def _local_with_toh_separators(rows: list[dict]) -> list[dict]:
@@ -2972,17 +3214,136 @@ def _local_with_toh_separators(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _local_events_match(a: dict, b: dict) -> bool:
+    a_ext = str(a.get("external_id") or "").strip()
+    b_ext = str(b.get("external_id") or "").strip()
+    if a_ext and b_ext and a_ext == b_ext:
+        return True
+    if str(a.get("event_type") or "") != str(b.get("event_type") or ""):
+        return False
+    if a.get("song_id") is not None and b.get("song_id") is not None:
+        try:
+            if int(a.get("song_id")) == int(b.get("song_id")):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return (
+        normalize(str(a.get("artist") or "")) == normalize(str(b.get("artist") or ""))
+        and normalize(str(a.get("title") or "")) == normalize(str(b.get("title") or ""))
+        and bool(str(a.get("title") or "").strip())
+    )
+
+
+def _local_played_continuity_rows(revision: str, service_date: str, played_rows: list[dict]) -> list[dict]:
+    """Played history + current item + Scheduled tail for today's live view."""
+    out = [dict(row) for row in played_rows]
+    for row in out:
+        try:
+            status = int(row.get("zetta_status_code") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if status in {-3, 2, 9}:
+            row["_display_phase"] = "current"
+        elif status in {3, 6, 7, 8} or str(row.get("event_type") or "") in {"etm", "toh"}:
+            row["_display_phase"] = "played_past"
+
+    if service_date != date.today().isoformat():
+        return out
+    if service_date not in set(cached_local_dates(revision, "schedule")):
+        return out
+
+    current = next((r for r in out if str(r.get("_display_phase") or "") == "current"), None)
+    playable_past = [
+        r for r in out
+        if str(r.get("event_type") or "") not in {"etm", "toh", "command"}
+        and str(r.get("_display_phase") or "") in {"played_past", "current"}
+    ]
+    pivot = current or (playable_past[-1] if playable_past else None)
+    if pivot is None:
+        return out
+
+    scheduled = [dict(row) for row in cached_local_day_events(revision, "schedule", service_date)]
+    scheduled = _local_apply_hour_boundary_gaps(scheduled)
+    scheduled = _local_apply_ignore_reset_gaps(scheduled)
+    pivot_index = None
+    for idx, row in enumerate(scheduled):
+        if _local_events_match(pivot, row):
+            pivot_index = idx
+            break
+    if pivot_index is None:
+        try:
+            pivot_sort = float(pivot.get("sort_seconds"))
+        except (TypeError, ValueError):
+            pivot_sort = None
+        if pivot_sort is not None:
+            for idx, row in enumerate(scheduled):
+                try:
+                    if float(row.get("sort_seconds")) >= pivot_sort:
+                        pivot_index = idx
+                        break
+                except (TypeError, ValueError):
+                    continue
+    if pivot_index is None:
+        return out
+
+    # Future technical rows from Played may have leaked through because ETMs
+    # are stored for reconciliation even before playout. Keep only rows at or
+    # before the actual/current pivot and take everything after it from cutoff.
+    try:
+        pivot_sort = float(pivot.get("sort_seconds"))
+    except (TypeError, ValueError):
+        pivot_sort = None
+    if pivot_sort is not None:
+        out = [
+            r for r in out
+            if str(r.get("event_type") or "") not in {"etm", "toh"}
+            or (r.get("sort_seconds") is not None and float(r.get("sort_seconds")) <= pivot_sort + 0.05)
+        ]
+
+    for row in scheduled[pivot_index + 1:]:
+        row["_display_phase"] = "future_schedule"
+        out.append(row)
+    return out
+
+
+def _local_traffic_block_html(rows: list[dict], kind: str) -> str:
+    body = "".join(_local_timeline_row_html(row, kind) for row in rows)
+    start = str(rows[0].get("air_time_raw") or "") if rows else ""
+    return (
+        '<details class="rc-traffic-block">'
+        f'<summary>REKLAMA/AUTOPROMOCJA <span class="rc-traffic-count">{len(rows)} poz. · {html.escape(start)}</span></summary>'
+        f'{body}</details>'
+    )
+
+
 def _render_local_timeline_cards(rows: list[dict], kind: str) -> None:
     if not rows:
         st.info("Brak elementów dla wybranych filtrów.")
         return
     right_header = "Zagrano" if kind == "played" else ""
-    body = "".join(_local_timeline_row_html(row, kind) for row in rows)
+    parts: list[str] = []
+    traffic: list[dict] = []
+
+    def flush_traffic() -> None:
+        nonlocal traffic
+        if traffic:
+            parts.append(_local_traffic_block_html(traffic, kind))
+            traffic = []
+
+    for row in rows:
+        if str(row.get("event_type") or "") == "traffic":
+            traffic.append(row)
+            continue
+        flush_traffic()
+        parts.append(_local_timeline_row_html(row, kind))
+    flush_traffic()
+
+    st.markdown(_local_hour_nav_html(), unsafe_allow_html=True)
     st.markdown(
         '<div class="rc-local-scroll">'
         '<div class="rc-local-head"><div></div><div>Czas</div><div>Kategoria</div><div>Element / metadane</div>'
         f'<div>Runtime</div><div>{html.escape(right_header)}</div></div>'
-        + body + '</div>',
+        + "".join(parts) + '</div>',
         unsafe_allow_html=True,
     )
     if any(str(row.get("event_type") or "") == "song" and row.get("song_id") is not None for row in rows):
@@ -3071,12 +3432,18 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         format_func=lambda value: str(value) if isinstance(value, str) else f"{int(value):02d}:00–{int(value):02d}:59+",
         key=f"{key_prefix}_hour",
     )
-    preset_options = [*LOCAL_ELEMENT_FILTER_PRESETS, "Własny"]
+
+    saved_presets = _local_saved_element_presets()
+    saved_labels = {f"★ {name}": name for name in saved_presets}
+    preset_options = [*LOCAL_ELEMENT_FILTER_PRESETS, *saved_labels, "Własny"]
+    preset_key = f"{key_prefix}_element_preset"
+    if st.session_state.get(preset_key) not in preset_options:
+        st.session_state.pop(preset_key, None)
     element_preset = pcol.selectbox(
         "Preset elementów",
         preset_options,
         index=0,
-        key=f"{key_prefix}_element_preset",
+        key=preset_key,
     )
     if element_preset == "Własny":
         selected_types = st.multiselect(
@@ -3086,20 +3453,31 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
             format_func=lambda value: LOCAL_EVENT_LABELS.get(value, value),
             key=f"{key_prefix}_types_custom",
         )
+        ncol, scol = st.columns([2.4, .8], vertical_alignment="bottom")
+        preset_name = ncol.text_input("Nazwa nowego presetu", key=f"{key_prefix}_preset_name", placeholder="np. Muzyka + jingle")
+        if scol.button("Zapisz preset", key=f"{key_prefix}_preset_save", disabled=not preset_name.strip() or not selected_types):
+            _local_save_element_preset(preset_name, selected_types)
+            st.rerun()
+    elif element_preset in saved_labels:
+        selected_types = list(saved_presets.get(saved_labels[element_preset], []))
+        d1, d2 = st.columns([3.5, .8], vertical_alignment="bottom")
+        d1.caption("Własny preset zapisany w ustawieniach RadioCharts.")
+        if d2.button("Usuń preset", key=f"{key_prefix}_preset_delete"):
+            _local_delete_element_preset(saved_labels[element_preset])
+            st.rerun()
     else:
         selected_types = list(LOCAL_ELEMENT_FILTER_PRESETS[element_preset])
 
     etm_kinds = set(LOCAL_ETM_KINDS)
-    ignore_resets = kind == "schedule"
     if "etm" in selected_types:
-        ecol, xcol, rcol = st.columns([1.25, 2.15, 1.05], vertical_alignment="bottom")
+        ecol, xcol = st.columns([1.25, 2.15], vertical_alignment="bottom")
         etm_preset_options = [*LOCAL_ETM_PRESETS, "Własna kombinacja"]
         etm_preset = ecol.selectbox(
-            "ETM",
+            "ETM w playliście",
             etm_preset_options,
             index=0,
             key=f"{key_prefix}_etm_preset",
-            help="Filtruje ETM-y po nazwie GSelectora: Hard / Soft / Reset / Hit.",
+            help="Filtruje markery pokazywane w playliście. Osobna zakładka ETM pokazuje pełną mapę gapów.",
         )
         if etm_preset == "Własna kombinacja":
             etm_kinds = set(xcol.multiselect(
@@ -3111,49 +3489,27 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         else:
             etm_kinds = set(LOCAL_ETM_PRESETS[etm_preset])
             xcol.caption(" ")
-        if kind == "schedule":
-            ignore_resets = rcol.toggle(
-                "Ignoruj resety",
-                value=True,
-                key=f"{key_prefix}_ignore_resets",
-                help=(
-                    "RESET nie jest kotwicą czasu. W tym widoku jego gap jest przenoszony do kolejnego "
-                    "HARD/SOFT; HARD i SOFT traktujemy jako dokładne kotwice."
-                ),
-            )
 
-    # One cached SQLite read per selected day. Hour/type filters and summary are
-    # computed in memory instead of reading/decoding the same day 2–3 times.
-    full_day_rows = cached_local_day_events(revision, kind, selected_date)
+    full_day_rows = [dict(row) for row in cached_local_day_events(revision, kind, selected_date)]
     if kind == "schedule":
-        # Rebuild HH:00 Hard/Soft carry from the preceding scheduling hour in
-        # memory as well. This fixes already-stored snapshots from 1.2.12-1.2.15
-        # without rewriting the cutoff in SQLite.
         full_day_rows = _local_apply_hour_boundary_gaps(full_day_rows)
-    if kind == "schedule" and ignore_resets:
-        # Recalculate on the complete day before applying the hour filter so
-        # RESET carry can cross hourly GetLog windows.
+        # User-facing schedule uses the alternative interpretation by default:
+        # RESET is informational, HARD/SOFT are the actual timing anchors.
         full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)
-    # ETM overview is deliberately always a full-day view. Changing the
-    # playlist hour must not make the timing map jump around or hide anchors.
-    _render_local_etm_gap_summary(
-        full_day_rows,
-        ignore_resets=(ignore_resets if kind == "schedule" else False),
-    )
+    elif kind == "played":
+        full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
 
+    # TOH is a navigation separator in both whole-day and single-hour views.
+    full_day_rows = _local_with_toh_separators(full_day_rows)
     hour_rows = [
         row for row in full_day_rows
         if selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour)
     ]
-    if selected_hour == "Cały dzień":
-        hour_rows = _local_with_toh_separators(hour_rows)
     rows = [
         row for row in hour_rows
         if (not selected_types or str(row.get("event_type") or "") in selected_types)
-        or (selected_hour == "Cały dzień" and str(row.get("event_type") or "") == "toh")
+        or str(row.get("event_type") or "") == "toh"
     ]
-    if selected_hour != "Cały dzień":
-        rows = [row for row in rows if str(row.get("event_type") or "") != "toh"]
     if "etm" in selected_types:
         rows = _local_filter_etm_rows(rows, etm_kinds)
 
@@ -3181,17 +3537,50 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
     if kind == "played" and selected_date == date.today().isoformat():
         _render_local_now_playing_fragment(selected_date)
     _render_local_timeline_cards(rows, kind)
-    if rows and all(str(r.get("source_system") or "") == "zetta2go" for r in rows):
-        st.caption(
-            "Gap przy ETM pochodzi bezpośrednio z Zetta2GO. Played pokazuje tylko elementy zagrane / będące w trakcie; "
-            "pełny stan READY/NOT_PLAYED jest zachowany w tle do porównania z cutoff Scheduled."
-        )
+    if kind == "played" and selected_date == date.today().isoformat():
+        st.caption("Played: zakończone elementy są lekko wyszarzone i kursywą; po aktualnie granym elemencie lista przechodzi w cutoff Scheduled, żeby zachować ciągłość dnia.")
     else:
-        st.caption(
-            "Gap przy ETM pokazuje wartość +/- z eksportu GSelectora (nie gap wyliczony przez Zettę); przy pozostałych "
-            "elementach pokazuje nadczas 60+ minutes/hour. Presety elementów i filtr ETM pozwalają szybko wybrać Hard, "
-            "Soft, Reset, Hit albo dowolną kombinację."
-        )
+        st.caption("Kolory: piosenki białe · linki/jingle/audycje żółte · ETM niebieskie · Top of the hour różowe · reklama/autopromocja czerwona i zwijana.")
+
+
+def _render_local_etm_page(revision: str) -> None:
+    dates = cached_local_dates(revision, "schedule")
+    if not dates:
+        st.info("Brak Scheduled — nie ma danych ETM.")
+        return
+    default_date = _local_default_date(dates, "schedule") or date.fromisoformat(dates[-1])
+    c1, c2, c3 = st.columns([1.0, .9, 1.2], vertical_alignment="bottom")
+    selected_date = c1.selectbox(
+        "Dzień",
+        dates,
+        index=dates.index(default_date.isoformat()) if default_date.isoformat() in dates else len(dates)-1,
+        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
+        key="our_radio_etm_date",
+    )
+    ignore_resets = c2.toggle(
+        "Ignoruj resety",
+        value=True,
+        key="our_radio_etm_ignore_resets",
+        help="RESET jest informacyjny; jego gap przechodzi do kolejnego HARD/SOFT. HARD/SOFT są kotwicami czasu.",
+    )
+    marker_filter = c3.segmented_control(
+        "Markery",
+        ["Hard + Soft", "Hard", "Soft"],
+        default="Hard + Soft",
+        key="our_radio_etm_marker_filter",
+    ) or "Hard + Soft"
+
+    rows = [dict(row) for row in cached_local_day_events(revision, "schedule", selected_date)]
+    rows = _local_apply_hour_boundary_gaps(rows)
+    if ignore_resets:
+        rows = _local_apply_ignore_reset_gaps(rows)
+    allowed = {"Hard", "Soft"} if marker_filter == "Hard + Soft" else {marker_filter}
+    filtered = [
+        row for row in rows
+        if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) in allowed
+    ]
+    _render_local_etm_gap_summary(filtered, ignore_resets=ignore_resets)
+    st.caption("Mapa obejmuje zawsze cały dzień. 00:00 jest dodatkowo chronione przed starym błędem, w którym 60+ pozycje z poprzedniej doby mogły sztucznie dać kilkadziesiąt minut gapu.")
 
 
 def _local_status_symbol(status: str) -> tuple[str, str, str]:
@@ -3221,17 +3610,10 @@ def _local_log_row_html(
     ghost_note: str = "",
 ) -> str:
     event_type = str(row.get("event_type") or "other")
-    if ghost:
-        color = "#8b929c"
-    elif event_type == "song":
-        color = "#f4f4f5"
-    elif event_type == "traffic":
-        color = "#ff5d5d"
-    else:
-        color = "#f4cf57"
-
-    category = str(row.get("category") or "")
+    category = str(row.get("category_code") or row.get("category") or "")
     short_cat = category.split("/", 1)[0] if category else LOCAL_EVENT_LABELS.get(event_type, event_type)
+    if event_type == "etm":
+        short_cat = _local_etm_kind(row).upper() or short_cat or "ETM"
     artist = str(row.get("artist") or "").strip()
     title = str(row.get("title") or "").strip()
     content = f"{artist} — {title}" if event_type == "song" and artist else (title or category)
@@ -3249,49 +3631,92 @@ def _local_log_row_html(
     if "ścięty" in str(status).casefold():
         badge = '<span class="rc-log-badge rc-log-badge-fade">FADE</span>'
 
-    row_class = "rc-log-row rc-log-ghost" if ghost else "rc-log-row"
+    classes = ["rc-log-row", _local_event_tone_class(row)]
+    if ghost:
+        classes.append("rc-log-ghost")
+
+    title_html = html.escape(content)
+    song_id = row.get("song_id")
+    if event_type == "song" and song_id is not None:
+        try:
+            sid = int(song_id)
+            href = f"?view=song&song={sid}"
+            title_html = (
+                f'<a class="rc-local-song-link" href="{html.escape(href)}" '
+                'onclick="return false" '
+                'ondblclick="window.location.href=this.href; return false" '
+                'title="Dwuklik: otwórz kartę utworu">'
+                f'{html.escape(content)}</a>'
+            )
+        except (TypeError, ValueError):
+            pass
+
     return (
-        f'<div class="{row_class}" style="color:{color}">'
+        f'<div class="{" ".join(classes)}">'
         f'<div class="rc-log-status {status_class}" title="{html.escape(status_title)}">{html.escape(symbol)}</div>'
         f'<div class="rc-log-time">{html.escape(time_label)}</div>'
         f'<div class="rc-log-cat">{html.escape(short_cat)}</div>'
-        f'<div class="rc-log-main"><div class="rc-log-title">{html.escape(content)}</div>'
+        f'<div class="rc-log-main"><div class="rc-log-title">{title_html}</div>'
         f'<div class="rc-log-meta">{html.escape(meta)}</div></div>'
         f'<div class="rc-log-runtime">{html.escape(runtime)}</div>'
         f'<div class="rc-log-flags">{badge}</div></div>'
     )
 
 
-def _local_compare_rows_html(hour: int, pairs: list[dict]) -> str:
-    body = []
-    for pair in pairs:
-        status = str(pair.get("status") or "OK")
-        scheduled = pair.get("scheduled_row")
-        played = pair.get("played_row")
-        if scheduled is None and played is not None:
-            left = _local_log_row_html(
-                played, status, ghost=True, ghost_note="brak w Scheduled — element dodany",
-            )
-            right = _local_log_row_html(played, status)
-        elif played is None and scheduled is not None:
-            left = _local_log_row_html(scheduled, status)
-            right = _local_log_row_html(
-                scheduled, status, ghost=True, ghost_note="nie zagrano — pozycja z Scheduled",
-            )
-        elif scheduled is not None and played is not None:
-            left = _local_log_row_html(scheduled, status)
-            if status == "Oczekuje":
-                right = _local_log_row_html(
-                    played,
-                    status,
-                    ghost=True,
-                    ghost_note="jeszcze nie zagrano — oczekuje w Zetta",
-                )
-            else:
-                right = _local_log_row_html(played, status)
+def _local_compare_pair_html(pair: dict) -> str:
+    status = str(pair.get("status") or "OK")
+    scheduled = pair.get("scheduled_row")
+    played = pair.get("played_row")
+    if scheduled is None and played is not None:
+        left = _local_log_row_html(played, status, ghost=True, ghost_note="brak w Scheduled — element dodany")
+        right = _local_log_row_html(played, status)
+    elif played is None and scheduled is not None:
+        left = _local_log_row_html(scheduled, status)
+        right = _local_log_row_html(scheduled, status, ghost=True, ghost_note="nie zagrano — pozycja z Scheduled")
+    elif scheduled is not None and played is not None:
+        left = _local_log_row_html(scheduled, status)
+        if status == "Oczekuje":
+            right = _local_log_row_html(played, status, ghost=True, ghost_note="jeszcze nie zagrano — oczekuje w Zetta")
         else:
+            right = _local_log_row_html(played, status)
+    else:
+        return ""
+    return f'<div class="rc-compare-pair">{left}{right}</div>'
+
+
+def _local_compare_pair_is_traffic(pair: dict) -> bool:
+    for side in (pair.get("scheduled_row"), pair.get("played_row")):
+        if isinstance(side, dict) and str(side.get("event_type") or "") == "traffic":
+            return True
+    return False
+
+
+def _local_compare_rows_html(hour: int, pairs: list[dict]) -> str:
+    body: list[str] = []
+    traffic: list[dict] = []
+
+    def flush_traffic() -> None:
+        nonlocal traffic
+        if not traffic:
+            return
+        inner = "".join(_local_compare_pair_html(pair) for pair in traffic)
+        body.append(
+            '<details class="rc-traffic-block rc-compare-traffic">'
+            '<summary>'
+            f'<span>REKLAMA/AUTOPROMOCJA <span class="rc-traffic-count">{len(traffic)} poz.</span></span>'
+            '</summary>' + inner + '</details>'
+        )
+        traffic = []
+
+    for pair in pairs:
+        if _local_compare_pair_is_traffic(pair):
+            traffic.append(pair)
             continue
-        body.append(f'<div class="rc-compare-pair">{left}{right}</div>')
+        flush_traffic()
+        rendered = _local_compare_pair_html(pair)
+        if rendered:
+            body.append(rendered)
+    flush_traffic()
 
     if not body:
         body.append(
@@ -3379,13 +3804,18 @@ def _render_local_comparison(revision: str) -> None:
     elif problem_hours:
         default_hour = problem_hours[0]
 
-    selected_hour = st.selectbox(
-        "Blok godzinny",
+    selected_hour = st.segmented_control(
+        "Skocz do Top of the hour",
         list(range(24)),
-        index=default_hour,
-        format_func=_hour_label,
-        key="our_radio_compare_hour",
+        default=default_hour,
+        format_func=lambda hour: f"{int(hour):02d}",
+        key="our_radio_compare_hour_v2",
     )
+    if selected_hour is None:
+        selected_hour = default_hour
+    selected_meta = hour_meta.get(int(selected_hour), {})
+    selected_diffs = int(selected_meta.get("differences") or 0)
+    st.caption(f"{_hour_label(int(selected_hour))} · przyciski 00–23 przełączają blok od Top of the hour.")
     comparison = hour_details.get(int(selected_hour))
     if comparison is None:
         st.info("Brak danych porównania dla wybranego bloku godzinnego.")
@@ -3773,6 +4203,102 @@ def _render_settings() -> None:
         st.rerun()
 
 
+def _render_watched_page(chart_rev: str, air_rev: str) -> None:
+    """Candidate/Watch work queue plus the strongest unheard titles.
+
+    Membership is frozen in session state on first render.  Grid edits rerun
+    Streamlit, but a song moved e.g. from Candidate to Baza stays visible until
+    the user actually reloads the browser page, exactly like a working queue.
+    """
+    st.subheader("👀 Watched")
+    st.caption(
+        "Kolejka robocza z Dashboardu i Emisji. Najpierw wszystkie statusy Candidate, potem Watch; "
+        "niżej 50 najwyższych Popularity ze statusem „Nie słuchałem”. Zmiana statusu nie usuwa wiersza aż do odświeżenia strony."
+    )
+
+    catalog_rev = catalog_revision()
+    notes_rev = song_catalog_revision()
+    base = cached_watched_base_frame(chart_rev, air_rev, catalog_rev, notes_rev).copy()
+    if base.empty:
+        st.info("Brak utworów z Dashboardu lub Emisji.")
+        return
+
+    snapshot_key = "watched_page_snapshot_v1"
+    snapshot = st.session_state.get(snapshot_key)
+    if not isinstance(snapshot, dict):
+        status = base["status"].fillna("Nie słuchałem").astype(str).map(normalized_status)
+        candidate_mask = status.isin(set(CANDIDATE_STATUSES))
+        watch_mask = status.eq("Watch")
+        tracked = base.loc[candidate_mask | watch_mask, ["song_id", "popularity"]].copy()
+        tracked["_group"] = [0 if s in set(CANDIDATE_STATUSES) else 1 for s in status.loc[tracked.index]]
+        tracked = tracked.sort_values(["_group", "popularity", "song_id"], ascending=[True, False, True])
+
+        unheard = base.loc[status.eq("Nie słuchałem"), ["song_id", "popularity"]].copy()
+        unheard = unheard.sort_values(["popularity", "song_id"], ascending=[False, True]).head(50)
+        snapshot = {
+            "tracked_ids": [int(x) for x in tracked["song_id"].tolist()],
+            "unheard_ids": [int(x) for x in unheard["song_id"].tolist()],
+        }
+        st.session_state[snapshot_key] = snapshot
+
+    def _snapshot_frame(ids: list[int]) -> pd.DataFrame:
+        if not ids:
+            return pd.DataFrame(columns=base.columns)
+        indexed = base.drop_duplicates("song_id").set_index("song_id", drop=False)
+        present = [int(sid) for sid in ids if int(sid) in indexed.index]
+        if not present:
+            return pd.DataFrame(columns=base.columns)
+        return indexed.loc[present].reset_index(drop=True)
+
+    tracked_view = _snapshot_frame(list(snapshot.get("tracked_ids") or []))
+    unheard_view = _snapshot_frame(list(snapshot.get("unheard_ids") or []))
+
+    candidate_count = int(tracked_view["status"].isin(CANDIDATE_STATUSES).sum()) if not tracked_view.empty else 0
+    watch_count = int(tracked_view["status"].eq("Watch").sum()) if not tracked_view.empty else 0
+    render_compact_metrics([
+        ("Candidate", candidate_count),
+        ("Watch", watch_count),
+        ("W kolejce", len(tracked_view)),
+        ("Top Nie słuchałem", len(unheard_view)),
+    ])
+
+    table_cols = [
+        "song_id", "artist", "title", "release_month", "preview", "heard", "status", "downloaded",
+        "spotify", "spotify_copy", "popularity", "familiarity", "momentum", "radio_reach", "airplay_spins_7d", "avg_position",
+        "RMF", "RMF_weeks", "ZET", "ZET_weeks", "OLIA", "OLIA_weeks", "OLIS", "OLIS_weeks", "ESKA", "ESKA_weeks", "note",
+    ]
+
+    st.markdown("### Candidate + Watch")
+    if tracked_view.empty:
+        st.info("Brak utworów ze statusem Candidate lub Watch.")
+    else:
+        tracked_show = tracked_view[[c for c in table_cols if c in tracked_view.columns]].copy()
+        render_song_grid(
+            tracked_show,
+            key="watched_tracked_grid",
+            height=max(260, min(760, 92 + 38 * len(tracked_show))),
+            editable_state=True,
+            source_layout="auto",
+            floating_hscroll=True,
+            row_numbers=True,
+        )
+
+    st.markdown("### Top 50 Popularity · Nie słuchałem")
+    if unheard_view.empty:
+        st.info("Brak utworów ze statusem „Nie słuchałem”.")
+    else:
+        unheard_show = unheard_view[[c for c in table_cols if c in unheard_view.columns]].copy()
+        render_song_grid(
+            unheard_show,
+            key="watched_unheard_grid",
+            height=min(760, 92 + 38 * len(unheard_show)),
+            editable_state=True,
+            source_layout="auto",
+            floating_hscroll=True,
+            row_numbers=True,
+        )
+
+
 view_key = BOOT_VIEW_KEY
 render_nav_tabs(view_key)
 install_client_helpers()
@@ -3780,11 +4306,11 @@ install_client_helpers()
 # Resolve each revision at most once per Streamlit rerun.  Tab changes rerun the
 # script, so repeated revision queries used to add visible latency before the
 # actual page query even started.
-_chart_views = {"dashboard", "archive", "song", "airplay", "library"}
-_air_views = {"archive", "song", "airplay", "library"}
+_chart_views = {"dashboard", "archive", "song", "airplay", "watched", "library"}
+_air_views = {"archive", "song", "airplay", "watched", "library"}
 CHART_REV = chart_revision() if view_key in _chart_views else ""
 AIR_REV = airplay_revision() if view_key in _air_views else ""
-AIR_DATA_REV = airplay_data_revision() if view_key == "dashboard" else ""
+AIR_DATA_REV = airplay_data_revision() if view_key in {"dashboard", "watched"} else ""
 REVISION = CHART_REV
 
 if view_key in {"dashboard", "archive"}:
@@ -4673,6 +5199,9 @@ elif view_key == "airplay":
                 merge_select_mode=True,
             )
 
+elif view_key == "watched":
+    _render_watched_page(CHART_REV, AIR_DATA_REV)
+
 elif view_key == "library":
     st.subheader("🎵 Baza")
     library_rows = cached_radio_library_catalog(song_catalog_revision()).copy()
@@ -4852,9 +5381,9 @@ elif view_key == "library":
         )
 
 elif view_key == "our_radio":
-    st.subheader("📻 EMAUS")
+    st.subheader("📅 Schedule")
     st.caption(
-        "EMAUS jest trzymany osobno od monitoringu rynku. Przy skonfigurowanym Zetta2GO Scheduled = ostatni snapshot "
+        "Schedule / EMAUS jest trzymany osobno od monitoringu rynku. Przy skonfigurowanym Zetta2GO Scheduled = ostatni snapshot "
         "logu przed emisją (cutoff 23:59 dnia poprzedniego), a Played = live log Zetty odświeżany co minutę. "
         "Ręczny GSelector zostaje jako fallback i archiwum."
     )
@@ -4865,13 +5394,15 @@ elif view_key == "our_radio":
     local_rev = local_station_revision()
     section = st.segmented_control(
         "Widok EMAUS",
-        ["Scheduled", "Played", "Porównanie", "Utwory", "Import"],
+        ["Scheduled", "ETM", "Played", "Porównanie", "Utwory", "Import"],
         default="Scheduled",
         key="our_radio_section",
         label_visibility="collapsed",
     ) or "Scheduled"
     if section == "Scheduled":
         _render_local_timeline("schedule", "our_radio_schedule", local_rev)
+    elif section == "ETM":
+        _render_local_etm_page(local_rev)
     elif section == "Played":
         _render_local_timeline("played", "our_radio_played", local_rev)
     elif section == "Porównanie":

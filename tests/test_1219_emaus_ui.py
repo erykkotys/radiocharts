@@ -85,8 +85,8 @@ def test_1219_emaus_ui_contract():
 
     assert "grid-auto-flow:column" in app
     assert "min(3, max(1, math.ceil(len(cards) / 12)))" in app
-    assert '"Ignoruj resety",\n                value=True' in app
-    assert "_render_local_etm_gap_summary(\n        full_day_rows" in app
+    assert '"Ignoruj resety",\n        value=True' in app
+    assert "def _render_local_etm_page" in app and "_render_local_etm_gap_summary(filtered, ignore_resets=ignore_resets)" in app
     assert "Top of the hour" in app and "#ff79c6" in app
     assert "_render_local_timeline_cards(rows, kind)" in app
     assert "Mood" in app and "Opener" in app and "T.Open" in app and "T.Close" in app
