@@ -1534,6 +1534,27 @@ def install_client_helpers() -> None:
             });
           }
 
+          // Playlist rows are rendered by st.markdown in the parent document.
+          // Inline onclick handlers are not reliable there (Streamlit/browser
+          // sanitisation can strip or ignore them), so handle preview clicks
+          // with one delegated page-level listener instead.
+          if (!host.__rcPreviewDelegationInstalled) {
+            host.__rcPreviewDelegationInstalled = true;
+            doc.addEventListener('click', function(ev) {
+              const target = ev.target && ev.target.closest ? ev.target.closest('.rc-local-preview') : null;
+              if (!target) return;
+              ev.preventDefault();
+              ev.stopPropagation();
+              if (typeof host.__rcPlayPreview !== 'function') return;
+              host.__rcPlayPreview({
+                songId: target.dataset.song || '',
+                artist: target.dataset.artist || '',
+                title: target.dataset.title || '',
+                spotify: target.dataset.spotify || ''
+              });
+            }, true);
+          }
+
           if (typeof host.__rcPlayPreview === 'function') return;
 
           const norm = (x) => String(x || '')
@@ -1605,7 +1626,9 @@ def install_client_helpers() -> None:
             const spot = player.querySelector('#__rcPlayerSpotify');
             if (spotify) { spot.href = spotify; spot.style.display = ''; }
             else { spot.style.display = 'none'; }
-            player.querySelector('#__rcPlayerStatus').textContent = 'Szukam podglądu…';
+            const statusEl = player.querySelector('#__rcPlayerStatus');
+            statusEl.textContent = 'Szukam podglądu…';
+            statusEl.style.display = 'block';
 
             const cb = '__rcPreviewCB_' + Date.now() + '_' + Math.floor(Math.random()*1000000);
             const script = doc.createElement('script');
@@ -1629,12 +1652,14 @@ def install_client_helpers() -> None:
                   if (score > bestScore) { best = r; bestScore = score; }
                 }
                 if (!best) {
-                  player.querySelector('#__rcPlayerStatus').textContent = 'Brak 30-sekundowego podglądu dla tego utworu.';
+                  statusEl.textContent = 'Brak 30-sekundowego podglądu dla tego utworu.';
+                  statusEl.style.display = 'block';
                   return;
                 }
                 audio.src = best.previewUrl;
                 audio.load();
-                player.querySelector('#__rcPlayerStatus').textContent = '';
+                statusEl.textContent = '';
+                statusEl.style.display = 'none';
                 const promise = audio.play();
                 if (promise && promise.catch) promise.catch(() => {});
               } finally {
@@ -1642,7 +1667,11 @@ def install_client_helpers() -> None:
               }
             };
             script.onerror = function() {
-              if (host.__rcPreviewSongId === songId) player.querySelector('#__rcPlayerStatus').textContent = 'Nie udało się pobrać podglądu.';
+              if (host.__rcPreviewSongId === songId) {
+                const statusEl = player.querySelector('#__rcPlayerStatus');
+                statusEl.textContent = 'Nie udało się pobrać podglądu.';
+                statusEl.style.display = 'block';
+              }
               cleanup();
             };
             const term = encodeURIComponent(artist + ' ' + title);
@@ -3160,7 +3189,7 @@ def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "sche
             f'data-song="{html.escape(str(preview_key), quote=True)}" '
             f'data-artist="{html.escape(artist, quote=True)}" data-title="{html.escape(title, quote=True)}" '
             f'data-spotify="{html.escape(spotify_search_url(artist, title), quote=True)}" '
-            'onclick="event.stopPropagation(); if(window.top.__rcPlayPreview){window.top.__rcPlayPreview({songId:this.dataset.song,artist:this.dataset.artist,title:this.dataset.title,spotify:this.dataset.spotify});}">▶</span>'
+            '>▶</span>'
         )
 
     title_html = html.escape(main)
@@ -3707,7 +3736,7 @@ def _local_log_row_html(
             f'data-song="{html.escape(str(preview_key), quote=True)}" '
             f'data-artist="{html.escape(artist, quote=True)}" data-title="{html.escape(title, quote=True)}" '
             f'data-spotify="{html.escape(spotify_search_url(artist, title), quote=True)}" '
-            'onclick="event.stopPropagation(); if(window.top.__rcPlayPreview){window.top.__rcPlayPreview({songId:this.dataset.song,artist:this.dataset.artist,title:this.dataset.title,spotify:this.dataset.spotify});}">▶</span>'
+            '>▶</span>'
         )
     song_id = row.get("song_id")
     if event_type == "song" and song_id is not None:

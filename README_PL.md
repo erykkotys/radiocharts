@@ -1,3 +1,9 @@
+## 1.2.23 — odsłuch 30 s w Schedule
+
+- Naprawiono przycisk ▶ w Schedule/Porównaniu: playlisty renderowane przez `st.markdown` korzystają teraz z delegowanego handlera kliknięć w dokumencie strony zamiast zawodnego inline `onclick`.
+- Floating player pokazuje komunikat „Szukam podglądu…” i czytelny błąd, jeśli iTunes Preview nie zwróci 30-sekundowego fragmentu.
+- Android: numer wydania zsynchronizowany do 1.2.23 / `versionCode = 46`.
+
 ## 1.2.22 — Watched i porządek głównej nawigacji
 
 - Główne zakładki web są ułożone: **Dashboard, Notowania, Emisje, Watched, Utwór, Baza, Schedule, Ustawienia, Manual**. Techniczna strona **Dane** nadal działa pod bezpośrednim adresem `?view=data`, ale nie zajmuje miejsca w głównym pasku.
