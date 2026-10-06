@@ -144,6 +144,12 @@ data class LocalRadioCompareRow(
     val note: String = "",
 )
 
+data class LocalRadioComparePair(
+    val status: String = "",
+    val scheduled_row: LocalRadioEvent? = null,
+    val played_row: LocalRadioEvent? = null,
+)
+
 data class LocalRadioCompareResponse(
     val service_date: String = "",
     val hour: Int? = null,
@@ -160,6 +166,7 @@ data class LocalRadioCompareResponse(
     val in_progress: Int = 0,
     val differences: Int = 0,
     val rows: List<LocalRadioCompareRow> = emptyList(),
+    val display_pairs: List<LocalRadioComparePair> = emptyList(),
 )
 
 data class LocalRadioSongStat(

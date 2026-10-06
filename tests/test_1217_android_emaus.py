@@ -8,7 +8,7 @@ def test_android_has_native_emaus_navigation_and_tabs():
     assert '"emaus" to "Schedule"' in main
     assert 'listOf("Scheduled", "ETM", "Played", "Porównanie", "Utwory", "Import")' in main
     assert 'composable("emaus")' in main
-    assert 'LocalRadioScreen(store)' in main
+    assert 'LocalRadioScreen(store, previewVm)' in main
     assert 'localRadioDates' in api
     assert 'localRadioEvents' in api
     assert 'localRadioCompare' in api

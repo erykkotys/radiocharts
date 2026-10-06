@@ -625,10 +625,22 @@ def local_radio_compare(
     hour: int | None = Query(default=None, ge=0, le=23),
 ) -> dict[str, Any]:
     result = local_compare_hour(service_date, hour) if hour is not None else local_compare_day(service_date)
-    return {
-        k: ([{kk: _clean(vv) for kk, vv in row.items()} for row in v] if k == "rows" else _clean(v))
-        for k, v in result.items()
-    }
+    payload: dict[str, Any] = {}
+    for key, value in result.items():
+        if key == "rows":
+            payload[key] = [{kk: _clean(vv) for kk, vv in row.items()} for row in value]
+        elif key == "display_pairs":
+            payload[key] = [
+                {
+                    "status": str(pair.get("status") or ""),
+                    "scheduled_row": ({kk: _clean(vv) for kk, vv in pair["scheduled_row"].items()} if isinstance(pair.get("scheduled_row"), dict) else None),
+                    "played_row": ({kk: _clean(vv) for kk, vv in pair["played_row"].items()} if isinstance(pair.get("played_row"), dict) else None),
+                }
+                for pair in value
+            ]
+        else:
+            payload[key] = _clean(value)
+    return payload
 
 
 @app.post("/api/v1/local-radio/zetta/test")

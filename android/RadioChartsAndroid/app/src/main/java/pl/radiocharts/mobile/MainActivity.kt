@@ -56,6 +56,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneOffset
+import kotlin.math.absoluteValue
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -352,7 +353,7 @@ class PreviewPlayerVm(app: android.app.Application) : androidx.lifecycle.Android
             composable("dashboard") { SongListScreen("dashboard", "Dashboard", nav::navigate, previewVm = previewVm) }
             composable("airplay") { SongListScreen("airplay", "Emisje", nav::navigate, withPeriod=true, previewVm = previewVm) }
             composable("library") { SongListScreen("library", "Baza", nav::navigate, withPeriod=true, previewVm = previewVm) }
-            composable("emaus") { LocalRadioScreen(store) { sid -> nav.navigate("song/$sid") } }
+            composable("emaus") { LocalRadioScreen(store, previewVm) { sid -> nav.navigate("song/$sid") } }
             composable("settings") { SettingsScreen(updateStatus = updateStatus, onCheckUpdates = { checkUpdates(true) }) }
             composable("song/{id}", arguments=listOf(navArgument("id"){type=NavType.IntType})) { back ->
                 SongScreen(back.arguments?.getInt("id") ?: 0, previewVm, nav::navigate)
@@ -1131,7 +1132,7 @@ private fun chartOffset(
 }
 
 
-@Composable fun LocalRadioScreen(store: SettingsStore, onSong: (Int) -> Unit) {
+@Composable fun LocalRadioScreen(store: SettingsStore, previewVm: PreviewPlayerVm, onSong: (Int) -> Unit) {
     var tab by remember { mutableStateOf(0) }
     val tabs = listOf("Scheduled", "ETM", "Played", "Porównanie", "Utwory", "Import")
     Column(Modifier.fillMaxSize()) {
@@ -1141,10 +1142,10 @@ private fun chartOffset(
             }
         }
         when (tab) {
-            0 -> LocalRadioTimeline(store, "schedule", onSong)
+            0 -> LocalRadioTimeline(store, "schedule", onSong, previewVm)
             1 -> LocalRadioEtm(store)
-            2 -> LocalRadioTimeline(store, "played", onSong)
-            3 -> LocalRadioCompare(store, onSong)
+            2 -> LocalRadioTimeline(store, "played", onSong, previewVm)
+            3 -> LocalRadioCompare(store, onSong, previewVm)
             4 -> LocalRadioSongs(store)
             else -> LocalRadioImport(store)
         }
@@ -1189,6 +1190,11 @@ private fun chartOffset(
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        OutlinedButton(
+            onClick = { onHour(LocalTime.now().hour) },
+            modifier = Modifier.heightIn(min = 32.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) { Text("⌂", style = MaterialTheme.typography.labelSmall) }
         (0..23).forEach { h ->
             OutlinedButton(
                 onClick = { onHour(h) },
@@ -1212,7 +1218,7 @@ private fun localRadioDefaultDate(kind: String, dates: List<String>): String {
     }
 }
 
-@Composable private fun LocalRadioTimeline(store: SettingsStore, kind: String, onSong: (Int) -> Unit) {
+@Composable private fun LocalRadioTimeline(store: SettingsStore, kind: String, onSong: (Int) -> Unit, previewVm: PreviewPlayerVm) {
     var dates by remember(kind) { mutableStateOf<List<String>>(emptyList()) }
     var day by remember(kind) { mutableStateOf("") }
     var hour by remember(kind) { mutableStateOf(LocalTime.now().hour) }
@@ -1274,9 +1280,9 @@ private fun localRadioDefaultDate(kind: String, dates: List<String>): String {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             itemsIndexed(groups, key = { index, group -> "${kind}_${group.firstOrNull()?.id ?: index}_$index" }) { _, group ->
                 if (group.size > 1 && group.all { it.event_type == "traffic" }) {
-                    LocalRadioTrafficBlock(group, kind, onSong)
+                    LocalRadioTrafficBlock(group, kind, onSong, previewVm)
                 } else {
-                    LocalRadioEventCard(group.first(), kind, onSong)
+                    LocalRadioEventCard(group.first(), kind, onSong, previewVm)
                 }
             }
         }
@@ -1291,7 +1297,7 @@ private fun localRadioTextColor(row: LocalRadioEvent): Color = when (row.event_t
     else -> Color(0xFFF4CF57)
 }
 
-@Composable private fun LocalRadioTrafficBlock(rows: List<LocalRadioEvent>, kind: String, onSong: (Int) -> Unit) {
+@Composable private fun LocalRadioTrafficBlock(rows: List<LocalRadioEvent>, kind: String, onSong: (Int) -> Unit, previewVm: PreviewPlayerVm) {
     var open by remember(rows.firstOrNull()?.id) { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFF1B0F12))) {
         Column {
@@ -1305,13 +1311,40 @@ private fun localRadioTextColor(row: LocalRadioEvent): Color = when (row.event_t
                 Text("${rows.size} poz.", color = Color(0xFFFF8C8C), style = MaterialTheme.typography.labelSmall)
             }
             if (open) {
-                rows.forEach { LocalRadioEventCard(it, kind, onSong) }
+                rows.forEach { LocalRadioEventCard(it, kind, onSong, previewVm) }
             }
         }
     }
 }
 
-@Composable private fun LocalRadioEventCard(row: LocalRadioEvent, kind: String, onSong: (Int) -> Unit) {
+@Composable private fun LocalRadioPreviewButton(row: LocalRadioEvent, previewVm: PreviewPlayerVm) {
+    if (row.event_type != "song" || (row.artist.isBlank() && row.title.isBlank())) return
+    // Odsłuch iTunes nie wymaga canonical song_id. Dla jeszcze niescalonych pozycji
+    // Schedule używamy stabilnego ujemnego klucza tylko do stanu playera.
+    val previewKey = row.song_id ?: -((row.artist + "\u0000" + row.title).hashCode().toLong().absoluteValue % 2_000_000_000L).toInt() - 1
+    val preview by previewVm.state.collectAsStateWithLifecycle()
+    val loading = preview.loadingSongId == previewKey
+    val playing = preview.playingSongId == previewKey
+    val song = remember(previewKey, row.artist, row.title) {
+        SongRow(song_id = previewKey, artist = row.artist, title = row.title)
+    }
+    IconButton(
+        onClick = { previewVm.toggle(song) },
+        modifier = Modifier.size(38.dp),
+    ) {
+        Text(
+            when {
+                loading -> "…"
+                playing -> "Ⅱ"
+                else -> "▶"
+            },
+            color = if (playing) Color(0xFF45C878) else Color.White,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+@Composable private fun LocalRadioEventCard(row: LocalRadioEvent, kind: String, onSong: (Int) -> Unit, previewVm: PreviewPlayerVm) {
     val current = kind == "played" && (row.display_phase == "current" || row.zetta_status_code in listOf(2, 9))
     val past = kind == "played" && row.display_phase == "played_past" && !current
     val future = kind == "played" && row.display_phase == "future_schedule"
@@ -1373,6 +1406,7 @@ private fun localRadioTextColor(row: LocalRadioEvent): Color = when (row.event_t
                     }
                 }
             }
+            LocalRadioPreviewButton(row, previewVm)
         }
     }
 }
@@ -1439,13 +1473,14 @@ private fun localRadioTextColor(row: LocalRadioEvent): Color = when (row.event_t
     }
 }
 
-@Composable private fun LocalRadioCompare(store: SettingsStore, onSong: (Int) -> Unit) {
+@Composable private fun LocalRadioCompare(store: SettingsStore, onSong: (Int) -> Unit, previewVm: PreviewPlayerVm) {
     var dates by remember { mutableStateOf<List<String>>(emptyList()) }
     var day by remember { mutableStateOf("") }
     var hour by remember { mutableStateOf(LocalTime.now().hour) }
     var result by remember { mutableStateOf<LocalRadioCompareResponse?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     LaunchedEffect(Unit) {
         try {
@@ -1463,13 +1498,31 @@ private fun localRadioTextColor(row: LocalRadioEvent): Color = when (row.event_t
         finally { loading = false }
     }
 
-    val groups = remember(result?.rows) {
-        buildList<List<LocalRadioCompareRow>> {
-            var traffic = mutableListOf<LocalRadioCompareRow>()
-            fun flush() { if (traffic.isNotEmpty()) { add(traffic.toList()); traffic = mutableListOf() } }
-            (result?.rows ?: emptyList()).forEach { row ->
-                if (row.event_type == "traffic") traffic.add(row) else { flush(); add(listOf(row)) }
+    val pairGroups = remember(result?.display_pairs, result?.rows) {
+        val pairs = if (!result?.display_pairs.isNullOrEmpty()) {
+            result?.display_pairs ?: emptyList()
+        } else {
+            // Backward-compatible fallback for an older API: treat the flattened row as Played.
+            (result?.rows ?: emptyList()).map { flat ->
+                LocalRadioComparePair(
+                    status = flat.status,
+                    played_row = LocalRadioEvent(
+                        event_type = flat.event_type,
+                        category = flat.category,
+                        artist = flat.artist,
+                        title = flat.title,
+                        song_id = flat.song_id,
+                        air_time_raw = flat.played_time.ifBlank { flat.scheduled_time },
+                    ),
+                )
             }
+        }
+        buildList<List<LocalRadioComparePair>> {
+            var traffic = mutableListOf<LocalRadioComparePair>()
+            fun isTraffic(pair: LocalRadioComparePair): Boolean =
+                pair.scheduled_row?.event_type == "traffic" || pair.played_row?.event_type == "traffic"
+            fun flush() { if (traffic.isNotEmpty()) { add(traffic.toList()); traffic = mutableListOf() } }
+            pairs.forEach { pair -> if (isTraffic(pair)) traffic.add(pair) else { flush(); add(listOf(pair)) } }
             flush()
         }
     }
@@ -1488,61 +1541,128 @@ private fun localRadioTextColor(row: LocalRadioEvent): Color = when (row.event_t
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (error.isNotBlank()) Text("Błąd: $error", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
+        if (landscape) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp)) {
+                Text("Scheduled cutoff", modifier = Modifier.weight(1f).padding(horizontal = 6.dp), fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(8.dp))
+                Text("Played / live Zetta", modifier = Modifier.weight(1f).padding(horizontal = 6.dp), fontWeight = FontWeight.Bold)
+            }
+        } else {
+            Text("Played / live Zetta", modifier = Modifier.padding(horizontal = 12.dp, vertical = 3.dp), fontWeight = FontWeight.Bold)
+        }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            itemsIndexed(groups, key = { index, group -> "cmp_${group.firstOrNull()?.scheduled_time}_${group.firstOrNull()?.played_time}_$index" }) { _, group ->
-                if (group.size > 1 && group.all { it.event_type == "traffic" }) {
-                    LocalRadioCompareTrafficBlock(group, onSong)
+            itemsIndexed(pairGroups, key = { index, group -> "cmp_pair_${group.firstOrNull()?.scheduled_row?.id}_${group.firstOrNull()?.played_row?.id}_$index" }) { _, group ->
+                if (group.size > 1 && group.all { it.scheduled_row?.event_type == "traffic" || it.played_row?.event_type == "traffic" }) {
+                    LocalRadioCompareTrafficPairBlock(group, landscape, onSong, previewVm)
                 } else {
-                    LocalRadioCompareCard(group.first(), onSong)
+                    LocalRadioComparePairCard(group.first(), landscape, onSong, previewVm)
                 }
             }
         }
     }
 }
 
-@Composable private fun LocalRadioCompareTrafficBlock(rows: List<LocalRadioCompareRow>, onSong: (Int) -> Unit) {
-    var open by remember(rows.firstOrNull()?.scheduled_time, rows.firstOrNull()?.played_time) { mutableStateOf(false) }
+@Composable private fun LocalRadioCompareTrafficPairBlock(
+    pairs: List<LocalRadioComparePair>,
+    landscape: Boolean,
+    onSong: (Int) -> Unit,
+    previewVm: PreviewPlayerVm,
+) {
+    var open by remember(pairs.firstOrNull()?.scheduled_row?.id, pairs.firstOrNull()?.played_row?.id) { mutableStateOf(false) }
+    val playedParent = pairs.firstNotNullOfOrNull { it.played_row } ?: pairs.firstNotNullOfOrNull { it.scheduled_row }
+    val scheduledParent = pairs.firstNotNullOfOrNull { it.scheduled_row }
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFF1B0F12))) {
         Column {
-            Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (open) "−" else "+", color = Color(0xFFFF5D5D), fontWeight = FontWeight.Bold, modifier = Modifier.width(24.dp))
-                Text("REKLAMA/AUTOPROMOCJA", color = Color(0xFFFF5D5D), fontWeight = FontWeight.Bold)
-                Spacer(Modifier.weight(1f))
-                Text("${rows.size} poz.", color = Color(0xFFFF8C8C), style = MaterialTheme.typography.labelSmall)
+            if (landscape) {
+                Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    LocalRadioCompareTrafficParent(scheduledParent, pairs.size, open, Modifier.weight(1f))
+                    Spacer(Modifier.width(8.dp))
+                    LocalRadioCompareTrafficParent(playedParent, pairs.size, open, Modifier.weight(1f))
+                }
+            } else {
+                Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    LocalRadioCompareTrafficParent(playedParent, pairs.size, open, Modifier.weight(1f))
+                }
             }
-            if (open) rows.forEach { LocalRadioCompareCard(it, onSong) }
+            if (open) {
+                Column(Modifier.padding(start = 12.dp, bottom = 8.dp)) {
+                    pairs.forEach { LocalRadioComparePairCard(it, landscape, onSong, previewVm) }
+                }
+            }
         }
     }
 }
 
-@Composable private fun LocalRadioCompareCard(row: LocalRadioCompareRow, onSong: (Int) -> Unit) {
-    val waiting = row.status == "Oczekuje"
-    val eventColor = when (row.event_type) {
-        "song" -> Color(0xFFF4F4F5)
-        "traffic" -> Color(0xFFFF5D5D)
-        "etm" -> Color(0xFF69D6FF)
-        "toh" -> Color(0xFFFF79C6)
-        else -> Color(0xFFF4CF57)
+@Composable private fun LocalRadioCompareTrafficParent(row: LocalRadioEvent?, count: Int, open: Boolean, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text(if (open) "−" else "+", color = Color(0xFFFF5D5D), fontWeight = FontWeight.Bold, modifier = Modifier.width(22.dp))
+        Text(row?.air_time_raw.orEmpty(), color = Color(0xFFFF8C8C), style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(72.dp))
+        Text("REKLAMA/AUTOPROMOCJA", color = Color(0xFFFF5D5D), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.weight(1f))
+        Text("$count poz.", color = Color(0xFFFF8C8C), style = MaterialTheme.typography.labelSmall)
     }
-    val statusColor = when {
-        waiting -> MaterialTheme.colorScheme.onSurfaceVariant
-        row.status == "OK" -> Color(0xFF45C878)
-        else -> MaterialTheme.colorScheme.error
-    }
-    var modifier = Modifier.fillMaxWidth()
-    if (row.event_type == "song" && row.song_id != null) {
-        modifier = modifier.pointerInput(row.song_id) { detectTapGestures(onDoubleTap = { onSong(row.song_id) }) }
-    }
-    Card(modifier) {
-        Column(Modifier.padding(10.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(row.status, color = statusColor, fontWeight = FontWeight.Bold)
-                Text(listOf(row.scheduled_time, row.played_time).filter { it.isNotBlank() }.joinToString(" → "), style = MaterialTheme.typography.labelSmall)
+}
+
+@Composable private fun LocalRadioComparePairCard(
+    pair: LocalRadioComparePair,
+    landscape: Boolean,
+    onSong: (Int) -> Unit,
+    previewVm: PreviewPlayerVm,
+) {
+    if (landscape) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Box(Modifier.weight(1f)) {
+                LocalRadioCompareSide(pair.scheduled_row, pair.status, "schedule", onSong, previewVm, "brak w Scheduled — element dodany")
             }
-            Text(listOf(row.artist, row.title).filter { it.isNotBlank() }.joinToString(" — ").ifBlank { row.category }, color = eventColor, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            val details = listOf(row.start_delta.takeIf { it.isNotBlank() }?.let { "Δ $it" }, row.runtime_cut.takeIf { it.isNotBlank() }?.let { "runtime $it" }, row.note.takeIf { it.isNotBlank() }).filterNotNull().joinToString(" · ")
-            if (details.isNotBlank()) Text(details, style = MaterialTheme.typography.labelSmall)
-            if (row.event_type == "song" && row.song_id != null) Text("Dwuklik: karta utworu", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.weight(1f)) {
+                LocalRadioCompareSide(pair.played_row, pair.status, "played", onSong, previewVm, "nie zagrano — pozycja z Scheduled")
+            }
+        }
+    } else {
+        // W pionie priorytetem jest faktyczny log Played. Scheduled pokazujemy tylko jako ghost,
+        // gdy elementu po prawej naprawdę nie ma.
+        val played = pair.played_row
+        if (played != null) {
+            LocalRadioCompareSide(played, pair.status, "played", onSong, previewVm, "")
+        } else {
+            LocalRadioCompareGhost(pair.scheduled_row, pair.status, "nie zagrano — pozycja z Scheduled")
+        }
+    }
+}
+
+@Composable private fun LocalRadioCompareSide(
+    row: LocalRadioEvent?,
+    status: String,
+    kind: String,
+    onSong: (Int) -> Unit,
+    previewVm: PreviewPlayerVm,
+    missingText: String,
+) {
+    if (row == null) {
+        LocalRadioCompareGhost(null, status, missingText)
+        return
+    }
+    Column {
+        val statusColor = when {
+            status == "OK" -> Color(0xFF45C878)
+            status == "Oczekuje" || status == "W trakcie" -> Color(0xFFF4B942)
+            else -> Color(0xFFFF6B6B)
+        }
+        Text(status, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+        LocalRadioEventCard(row, kind, onSong, previewVm)
+    }
+}
+
+@Composable private fun LocalRadioCompareGhost(row: LocalRadioEvent?, status: String, note: String) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFF15191F))) {
+        Column(Modifier.padding(10.dp)) {
+            Text(status, color = Color(0xFFFF6B6B), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            if (row != null) {
+                Text(row.air_time_raw, color = Color(0xFF8A919A), style = MaterialTheme.typography.labelSmall)
+                Text(listOf(row.artist, row.title).filter { it.isNotBlank() }.joinToString(" — ").ifBlank { row.category }, color = localRadioTextColor(row).copy(alpha = .38f), fontStyle = FontStyle.Italic)
+            }
+            Text(note, color = Color(0xFF8A919A), style = MaterialTheme.typography.labelSmall)
         }
     }
 }

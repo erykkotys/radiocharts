@@ -58,7 +58,7 @@ def test_1220_hour_navigation_and_song_deep_links_include_comparison():
     assert "rc-hour-nav" in APP
     assert "rc-local-song-link" in APP
     assert "LocalHourJumpBar" in ANDROID
-    assert "LocalRadioCompare(store, onSong)" in ANDROID
+    assert "LocalRadioCompare(store, onSong, previewVm)" in ANDROID
     assert "song_id: Int?" in MODELS
 
 
