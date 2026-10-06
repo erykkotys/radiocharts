@@ -384,6 +384,13 @@ def preview_import(data: bytes | str, filename: str = "") -> dict[str, Any]:
 
 
 def _existing_song_id(con, artist: str, title: str) -> int | None:
+    """Resolve an EMAUS credit through the shared RadioCharts identity layer.
+
+    Exact matches/aliases stay fastest, then we deliberately reuse the same
+    conservative matcher used by airplay + imported Baza.  This lets the radio
+    library act as a bridge between Zetta/GSelector credits and the
+    chart/airplay catalogue (radio edits, suffixes, credit variants, etc.).
+    """
     akey, tkey = db.normalize(artist), db.normalize(title)
     if not akey or not tkey:
         return None
@@ -395,7 +402,27 @@ def _existing_song_id(con, artist: str, title: str) -> int | None:
            WHERE artist_key=? AND title_key=? LIMIT 1""",
         (akey, tkey),
     ).fetchone()
-    return int(row["canonical_song_id"]) if row else None
+    if row:
+        return int(row["canonical_song_id"])
+    try:
+        matched = db._match_song_id(con, artist, title)
+    except Exception:
+        matched = None
+    if matched is not None:
+        # Remember the exact EMAUS spelling so later snapshots no longer need
+        # fuzzy matching.  It also survives future identity merges.
+        try:
+            con.execute(
+                """INSERT INTO song_identity_aliases(artist_key,title_key,canonical_song_id,source,created_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(artist_key,title_key) DO UPDATE SET
+                     canonical_song_id=excluded.canonical_song_id,source=excluded.source,created_at=excluded.created_at""",
+                (akey, tkey, int(matched), "emaus", datetime.now(timezone.utc).isoformat()),
+            )
+        except Exception:
+            pass
+        return int(matched)
+    return None
 
 
 
@@ -644,6 +671,7 @@ def parse_zetta2go_log(
             "stretch": cell[13] if len(cell) > 13 else None,
             "calculated_times": calculated,
             "zetta_gap_ms": asset.get("gap") if entry_type == 15 else None,
+            "zetta_gap_native_ms": asset.get("gap") if entry_type == 15 else None,
             "zetta_original_gap_ms": asset.get("ogap") if entry_type == 15 else None,
             **(_zetta_asset_metadata(asset) if entry_type == 106 else {}),
         }
@@ -2346,7 +2374,7 @@ def _compare_hour_rows(
         elif zetta_status in ZETTA_UPCOMING_STATUS_CODES:
             status = "Kolejność" if moved else "Oczekuje"
             status_note = str(played_row.get("zetta_status") or "")
-        elif zetta_status in {-3, 2, 9}:
+        elif zetta_status in {2, 9}:
             if moved:
                 status = "Kolejność + w trakcie"
             else:
@@ -2613,11 +2641,13 @@ def delete_import(import_id: int, station_key: str = STATION_KEY) -> dict[str, A
 
 
 def ensure_song_links_current(station_key: str = STATION_KEY) -> dict[str, int]:
-    """Relink previously unmatched EMAUS songs against current identities.
+    """Relink EMAUS songs through the shared catalogue and create missing stubs.
 
-    The pass is intentionally cheap and repeatable (only NULL song_id rows are
-    inspected), so newly-created RadioCharts songs and later alias merges can be
-    picked up without re-importing the GSelector files.
+    Existing chart/airplay/Baza identities are preferred (including conservative
+    aliases).  A genuinely new Zetta-only song gets a shared ``songs`` row so
+    it is still clickable from Schedule.  When that recording later appears in
+    charts/airplay, the normal identity merge can consolidate it without losing
+    the local-station history.
     """
     db.init_db()
     with db.connect() as con:
@@ -2634,6 +2664,12 @@ def ensure_song_links_current(station_key: str = STATION_KEY) -> dict[str, int]:
             if key not in cache:
                 cache[key] = _existing_song_id(con, artist, title)
             song_id = cache[key]
+            if song_id is None and artist.strip() and title.strip():
+                try:
+                    song_id = db.get_or_create_song(con, artist, title)
+                    cache[key] = song_id
+                except Exception:
+                    song_id = None
             if song_id is not None:
                 con.execute("UPDATE local_station_events SET song_id=? WHERE id=?", (int(song_id), int(row["id"])))
                 linked += 1

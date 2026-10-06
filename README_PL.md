@@ -1,4 +1,4 @@
-## 1.2.21 — Watched i porządek głównej nawigacji
+## 1.2.22 — Watched i porządek głównej nawigacji
 
 - Główne zakładki web są ułożone: **Dashboard, Notowania, Emisje, Watched, Utwór, Baza, Schedule, Ustawienia, Manual**. Techniczna strona **Dane** nadal działa pod bezpośrednim adresem `?view=data`, ale nie zajmuje miejsca w głównym pasku.
 - Dotychczasowa zakładka **EMAUS** w głównym pasku nazywa się teraz **Schedule**; wewnątrz nadal pracuje na danych EMAUS/Zetta2GO.
@@ -6,7 +6,7 @@
 - Pierwsza tabela Watched pokazuje najpierw wszystkie statusy `* Candidate`, a potem `Watch`, z tymi samymi edytowalnymi statusami i metrykami co pozostałe główne tabele.
 - Pod nią jest **Top 50 Popularity** spośród utworów ze statusem **Nie słuchałem**, również z połączonego świata Dashboard + Emisje.
 - Członkostwo obu tabel jest zamrażane na czas bieżącej strony: po zmianie statusu np. na `Baza G1` utwór pozostaje na ekranie i znika/przenosi się dopiero po odświeżeniu strony.
-- Android ma zsynchronizowany numer wydania 1.2.21 / `versionCode = 44`; etykieta EMAUS w dolnej nawigacji została zmieniona na **Schedule**.
+- Android ma zsynchronizowany numer wydania 1.2.22 / `versionCode = 45`; etykieta EMAUS w dolnej nawigacji została zmieniona na **Schedule**.
 
 ## 1.2.20 — spójny EMAUS, ETM i live continuity
 

@@ -51,7 +51,10 @@ def test_1220_played_continuity_and_inline_progress_exist_web_and_android():
 
 
 def test_1220_hour_navigation_and_song_deep_links_include_comparison():
-    assert "def _local_hour_nav_html" in APP
+    assert "def _render_local_hour_nav" in APP
+    assert "window.parent.document" in APP
+    assert "data-target=\"now\"" in APP
+    assert "our-radio-compare-hour-" in APP
     assert "rc-hour-nav" in APP
     assert "rc-local-song-link" in APP
     assert "LocalHourJumpBar" in ANDROID

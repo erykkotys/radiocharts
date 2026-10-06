@@ -88,7 +88,7 @@ def test_1219_emaus_ui_contract():
     assert '"Ignoruj resety",\n        value=True' in app
     assert "def _render_local_etm_page" in app and "_render_local_etm_gap_summary(filtered, ignore_resets=ignore_resets)" in app
     assert "Top of the hour" in app and "#ff79c6" in app
-    assert "_render_local_timeline_cards(rows, kind)" in app
+    assert "def _render_local_timeline_cards(rows: list[dict], kind: str, *, anchor_prefix: str)" in app
     assert "Mood" in app and "Opener" in app and "T.Open" in app and "T.Close" in app
     assert "ondblclick" in app and "?view=song&song=" in app
     assert "@st.fragment(run_every=5.0)" in app

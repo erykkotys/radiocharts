@@ -2620,6 +2620,54 @@ def monitoring_song_catalog() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+
+
+def watched_song_catalog() -> list[dict]:
+    """Fast Watched universe with only the fields needed for membership/ranking.
+
+    Unlike ``monitoring_song_catalog`` + ``compute_scores`` over the complete
+    catalogue, this query resolves only the *latest* position per chart source.
+    Detailed familiarity/momentum/weeks are added later only for the rows that
+    are actually displayed.
+    """
+    init_db()
+    with connect() as con:
+        rows = con.execute(
+            """WITH latest_dates AS (
+                   SELECT source,MAX(chart_date) AS chart_date
+                   FROM chart_issues
+                   GROUP BY source
+               ), latest_issue AS (
+                   SELECT ci.source,MAX(ci.id) AS issue_id
+                   FROM chart_issues ci
+                   JOIN latest_dates d ON d.source=ci.source AND d.chart_date=ci.chart_date
+                   GROUP BY ci.source
+               ), latest_pos AS (
+                   SELECT e.song_id,
+                          MAX(CASE WHEN li.source='RMF' THEN e.position END) AS RMF_pos,
+                          MAX(CASE WHEN li.source='ZET' THEN e.position END) AS ZET_pos,
+                          MAX(CASE WHEN li.source='ESKA' THEN e.position END) AS ESKA_pos,
+                          MAX(CASE WHEN li.source='OLIA' THEN e.position END) AS OLIA_pos,
+                          MAX(CASE WHEN li.source='OLIS' THEN e.position END) AS OLIS_pos
+                   FROM latest_issue li
+                   JOIN chart_entries e ON e.issue_id=li.issue_id
+                   GROUP BY e.song_id
+               )
+               SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+                      COALESCE(n.heard,0) AS heard,
+                      COALESCE(n.status,'Nie słuchałem') AS status,
+                      COALESCE(n.downloaded,0) AS downloaded,
+                      COALESCE(n.note,'') AS note,n.updated_at,
+                      lp.RMF_pos,lp.ZET_pos,lp.ESKA_pos,lp.OLIA_pos,lp.OLIS_pos
+               FROM songs s
+               LEFT JOIN song_notes n ON n.song_id=s.id
+               LEFT JOIN latest_pos lp ON lp.song_id=s.id
+               WHERE EXISTS (SELECT 1 FROM chart_entries e WHERE e.song_id=s.id)
+                  OR EXISTS (SELECT 1 FROM airplay_plays p WHERE p.song_id=s.id)
+               ORDER BY s.id"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
 def get_song(song_id: int) -> dict | None:
     """Fetch one shared song row with live user state."""
     init_db()

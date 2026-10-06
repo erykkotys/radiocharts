@@ -23,7 +23,7 @@ from radiocharts.db import (
     airplay_presence_summary, airplay_revision, airplay_song_presence, airplay_station_coverage,
     airplay_spin_counts, airplay_summary, airplay_track_detail_by_song, canonical_song_id, chart_archive_summary, chart_revision, get_song, init_db,
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
-    source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision, catalog_revision, monitoring_song_catalog,
+    source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision, catalog_revision, monitoring_song_catalog, watched_song_catalog,
     parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
     merge_song_group, get_app_settings, set_app_settings,
 )
@@ -122,9 +122,9 @@ st.markdown(
       .rc-etm-kind { color:var(--rc-etm); font-weight:800; overflow:hidden; text-overflow:ellipsis; }
       .rc-etm-gap { color:#f4f4f5; font-weight:780; font-variant-numeric:tabular-nums; text-align:right; }
       .rc-etm-risk { color:#f4b942; font-weight:800; cursor:help; }
-      .rc-hour-nav { display:flex; flex-wrap:wrap; gap:.22rem; margin:.22rem 0 .38rem; }
-      .rc-hour-nav a { min-width:30px; text-align:center; color:#cfd5df; background:#151b23; border:1px solid #3a4350; border-radius:5px; padding:.16rem .30rem; font-size:.68rem; font-weight:760; text-decoration:none; }
-      .rc-hour-nav a:hover { color:#fff; border-color:#687485; background:#202834; }
+      .rc-hour-nav { display:flex; flex-wrap:wrap; gap:.22rem; margin:.05rem 0; }
+      .rc-hour-nav button { min-width:30px; text-align:center; color:#cfd5df; background:#151b23; border:1px solid #3a4350; border-radius:5px; padding:.16rem .30rem; font-size:.68rem; font-weight:760; cursor:pointer; }
+      .rc-hour-nav button:hover { color:#fff; border-color:#687485; background:#202834; }
       .rc-local-scroll { max-height:690px; overflow:auto; border:1px solid #313844; border-radius:7px; background:#090d12; scroll-behavior:smooth; }
       .rc-local-head, .rc-local-row { display:grid; grid-template-columns:26px 105px 72px minmax(300px,1fr) 64px 70px; gap:.42rem; min-width:850px; align-items:start; }
       .rc-local-head { position:sticky; top:0; z-index:5; padding:.44rem .48rem; background:#11161d; border-bottom:1px solid #313844; color:#cfd5df; font-size:.69rem; font-weight:750; text-transform:uppercase; letter-spacing:.02em; }
@@ -150,18 +150,26 @@ st.markdown(
       .rc-local-meta { margin-top:.08rem; color:#9fa8b5; font-size:.67rem; white-space:normal; overflow-wrap:anywhere; }
       .rc-local-runtime { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
       .rc-local-played { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; color:#9fe0b2; }
-      .rc-local-song-link { color:inherit; text-decoration:none; cursor:pointer; }
-      .rc-local-song-link:hover { text-decoration:underline; text-decoration-style:dotted; }
+      .rc-local-song-link { color:var(--rc-song) !important; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:2px; cursor:pointer; }
+      .rc-local-song-link:hover { color:#fff !important; text-decoration-style:solid; }
+      .rc-local-preview { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; margin-right:.28rem; border:1px solid #46505f; border-radius:50%; color:#9fd6ff; background:#141b24; font-size:.62rem; font-style:normal; cursor:pointer; vertical-align:middle; }
+      .rc-local-preview:hover { color:#fff; border-color:#6fa7d0; background:#1b2632; }
       .rc-row-progress { grid-column:4 / 7; height:4px; background:#26342b; border-radius:999px; overflow:hidden; margin:.16rem 0 .04rem; }
       .rc-row-progress > span { display:block; height:100%; background:#45c878; border-radius:999px; width:var(--rc-start); animation:rc-live-grow var(--rc-duration) linear forwards; }
       @keyframes rc-live-grow { from { width:var(--rc-start); } to { width:100%; } }
-      details.rc-traffic-block { border-bottom:1px solid #331d20; background:#120b0d; }
-      details.rc-traffic-block > summary { list-style:none; cursor:pointer; color:var(--rc-traffic); background:#1b0f12; padding:.34rem .55rem; font-size:.76rem; font-weight:820; border-top:1px solid #4b252b; border-bottom:1px solid #4b252b; }
+      details.rc-traffic-block { border:0; background:#120b0d; }
+      details.rc-traffic-block > summary { list-style:none; cursor:pointer; padding:0; margin:0; }
       details.rc-traffic-block > summary::-webkit-details-marker { display:none; }
-      details.rc-traffic-block > summary::before { content:'+'; display:inline-block; width:1.1rem; font-size:1rem; font-weight:900; }
-      details.rc-traffic-block[open] > summary::before { content:'−'; }
+      .rc-traffic-parent { color:var(--rc-traffic) !important; background:#1b0f12 !important; border-top:1px solid #4b252b; border-bottom:1px solid #4b252b; font-weight:760; }
+      .rc-traffic-toggle::before { content:'+'; font-size:1rem; font-weight:900; }
+      details.rc-traffic-block[open] .rc-traffic-toggle::before { content:'−'; }
       .rc-traffic-count { opacity:.72; font-weight:600; margin-left:.35rem; }
+      .rc-traffic-children { border-left:3px solid #51262d; margin-left:1.25rem; }
+      .rc-traffic-children .rc-local-row { background:#0e0a0c; padding-left:.72rem; }
+      .rc-traffic-children .rc-log-row { background:#0e0a0c; padding-left:.72rem; }
       .rc-compare-traffic > summary { display:block; min-width:1080px; }
+      .rc-compare-hour-anchor { scroll-margin-top:50px; }
+      .rc-compare-hour-title { color:var(--rc-toh); background:#1b1020; border-top:1px solid #6d3159; border-bottom:1px solid #6d3159; padding:.34rem .60rem; font-weight:800; }
       .rc-now-card { border:1px solid #2f7d4a; background:#10231a; border-radius:7px; padding:.42rem .60rem; margin:.18rem 0 .42rem; }
       .rc-now-title { font-weight:750; color:#e8f7ed; }
       .rc-now-meta { font-size:.70rem; color:#a9cbb4; margin-top:.08rem; }
@@ -637,16 +645,16 @@ def cached_watched_base_frame(
     catalog_rev: str,
     notes_rev: str,
 ) -> pd.DataFrame:
-    """Common Dashboard + Emisje universe used by the Watched page.
+    """Lightweight Watched membership/ranking frame.
 
-    The frame intentionally contains live status state as part of the cache key;
-    membership is snapshotted separately in ``st.session_state`` so a status
-    change does not make a row disappear until the browser page is reloaded.
+    Do not compute full historical scores for tens of thousands of monitoring
+    songs here. SQLite supplies only latest chart positions; recent-airplay
+    popularity is already cached. Detailed scores are calculated later only for
+    the rows that actually made the Watched snapshot.
     """
-    base = cached_monitoring_song_catalog(catalog_rev, notes_rev, air_rev).copy()
+    base = pd.DataFrame(watched_song_catalog())
     if base.empty:
         return base
-
     base["song_id"] = pd.to_numeric(base["song_id"], errors="coerce")
     base = base[base["song_id"].notna()].copy()
     base["song_id"] = base["song_id"].astype(int)
@@ -655,60 +663,28 @@ def cached_watched_base_frame(
     base["downloaded"] = base.get("downloaded", False).fillna(False).astype(bool)
     base["note"] = base.get("note", "").fillna("").astype(str)
 
-    scored = cached_scores(chart_rev)
-    score_cols = [
-        "song_id", "first_chart_date", "familiarity", "momentum",
-        "RMF_pos", "RMF_weeks", "ZET_pos", "ZET_weeks",
-        "ESKA_pos", "ESKA_weeks", "OLIA_pos", "OLIA_weeks", "OLIS_pos", "OLIS_weeks",
-    ]
-    if not scored.empty:
-        score_keep = scored[[c for c in score_cols if c in scored.columns]].drop_duplicates("song_id")
-        base = base.merge(score_keep, on="song_id", how="left")
-
     air_pop = cached_airplay_popularity(air_rev, 28)
     if not air_pop.empty:
         base = base.merge(air_pop, on="song_id", how="left")
-    if "airplay_volume_index" not in base.columns:
-        base["airplay_volume_index"] = 0.0
-    base["airplay_volume_index"] = pd.to_numeric(base["airplay_volume_index"], errors="coerce").fillna(0.0)
+    base["airplay_volume_index"] = pd.to_numeric(base.get("airplay_volume_index", 0.0), errors="coerce").fillna(0.0)
     base["chart_popularity_bonus"] = _chart_popularity_bonus(base)
-    base["popularity"] = (
-        0.80 * base["airplay_volume_index"] + 0.20 * base["chart_popularity_bonus"]
-    ).clip(lower=0.0, upper=100.0).round(1)
+    base["popularity"] = (0.80 * base["airplay_volume_index"] + 0.20 * base["chart_popularity_bonus"]).clip(0,100).round(1)
 
     presence = pd.DataFrame(cached_airplay_presence(air_rev, 7).get("rows") or [])
     if not presence.empty and "song_id" in presence.columns:
         keep = [c for c in ["song_id", "radio_reach", "spins"] if c in presence.columns]
         presence = presence[keep].drop_duplicates("song_id").rename(columns={"spins": "airplay_spins_7d"})
         base = base.merge(presence, on="song_id", how="left")
-    if "radio_reach" not in base.columns:
-        base["radio_reach"] = 0.0
-    else:
-        base["radio_reach"] = pd.to_numeric(base["radio_reach"], errors="coerce").fillna(0.0)
-    if "airplay_spins_7d" not in base.columns:
-        base["airplay_spins_7d"] = 0
-    else:
-        base["airplay_spins_7d"] = pd.to_numeric(base["airplay_spins_7d"], errors="coerce").fillna(0).astype(int)
-    for col in ["familiarity", "momentum"]:
-        if col not in base.columns:
-            base[col] = 0.0
-        else:
-            base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0.0)
-
-    pos_cols = [c for c in ["RMF_pos", "ZET_pos", "ESKA_pos", "OLIA_pos", "OLIS_pos"] if c in base.columns]
-    base["avg_position"] = base[pos_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if pos_cols else float("nan")
+    base["radio_reach"] = pd.to_numeric(base.get("radio_reach", 0.0), errors="coerce").fillna(0.0)
+    base["airplay_spins_7d"] = pd.to_numeric(base.get("airplay_spins_7d", 0), errors="coerce").fillna(0).astype(int)
     for src in ["RMF", "ZET", "OLIA", "OLIS", "ESKA"]:
-        pos_col = f"{src}_pos"
+        pos_col=f"{src}_pos"
         base[src] = base[pos_col].map(position_sort_value).astype(int) if pos_col in base.columns else 999
-    base["release_month"] = [
-        release_month(rel, first)
-        for rel, first in zip(
-            base["release_date"] if "release_date" in base.columns else [""] * len(base),
-            base["first_chart_date"] if "first_chart_date" in base.columns else [""] * len(base),
-        )
-    ]
+    pos_cols=[c for c in ["RMF_pos","ZET_pos","ESKA_pos","OLIA_pos","OLIS_pos"] if c in base.columns]
+    base["avg_position"] = base[pos_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if pos_cols else float("nan")
+    base["release_month"] = [release_month(rel, "") for rel in base.get("release_date", pd.Series([""]*len(base)))]
     base["preview"] = "▶"
-    base["spotify"] = [spotify_search_url(a, t) for a, t in zip(base["artist"], base["title"])]
+    base["spotify"] = [spotify_search_url(a,t) for a,t in zip(base["artist"],base["title"])]
     base["spotify_copy"] = base["spotify"]
     return base
 
@@ -982,6 +958,7 @@ def render_nav_tabs(current: str) -> None:
         ("library", "Baza"),
         ("our_radio", "Schedule"),
         ("settings", "Ustawienia"),
+        ("data", "Dane"),
         ("methodology", "Manual"),
     ]
     links = []
@@ -2519,11 +2496,44 @@ def _local_event_tone_class(row: dict) -> str:
     return "rc-tone-link"
 
 
-def _local_hour_nav_html() -> str:
-    return '<div class="rc-hour-nav">' + ''.join(
-        f'<a href="#rc-hour-{hour:02d}" title="Skocz do {hour:02d}:00">{hour:02d}</a>'
-        for hour in range(24)
-    ) + '</div>'
+def _render_local_hour_nav(scope_id: str, *, current_hour: int | None = None) -> None:
+    """Client-only 00–23 navigation; never reruns Streamlit or changes tabs."""
+    safe_scope = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(scope_id or "schedule"))
+    now_hour = datetime.now().hour if current_hour is None else int(current_hour) % 24
+    buttons = ['<button type="button" data-target="now" title="Teraz">⌂</button>']
+    buttons += [f'<button type="button" data-target="{hour:02d}" title="Skocz do {hour:02d}:00">{hour:02d}</button>' for hour in range(24)]
+    components.html(
+        f"""
+        <style>
+          html,body{{margin:0;padding:0;background:transparent;overflow:hidden}}
+          .rc-hour-nav{{display:flex;flex-wrap:wrap;gap:3px;align-items:center}}
+          button{{min-width:30px;height:24px;padding:1px 5px;border:1px solid #3a4350;border-radius:5px;background:#151b23;color:#cfd5df;font:700 11px system-ui;cursor:pointer}}
+          button:hover{{background:#202834;border-color:#687485;color:#fff}}
+          button:first-child{{color:#9fe0b2;border-color:#356a49}}
+        </style>
+        <div class="rc-hour-nav">{''.join(buttons)}</div>
+        <script>
+        (() => {{
+          const scope={json.dumps(safe_scope)};
+          const fallbackHour={now_hour};
+          const parentDoc=window.parent.document;
+          function go(target) {{
+            let el=null;
+            if (target==='now') {{
+              el=parentDoc.getElementById(scope+'-now');
+              if (!el) el=parentDoc.getElementById(scope+'-hour-'+String(fallbackHour).padStart(2,'0'));
+            }} else {{
+              el=parentDoc.getElementById(scope+'-hour-'+target);
+            }}
+            if (el) el.scrollIntoView({{behavior:'smooth',block:'center',inline:'nearest'}});
+          }}
+          document.querySelectorAll('button[data-target]').forEach(b => b.addEventListener('click', () => go(b.dataset.target)));
+        }})();
+        </script>
+        """,
+        height=30,
+        scrolling=False,
+    )
 
 
 def _local_row_clock_for_live(row: dict) -> tuple[float, float] | None:
@@ -3059,8 +3069,10 @@ def _local_play_status_icon(row: dict, kind: str) -> tuple[str, str, str]:
         status = int(row.get("zetta_status_code") or 0)
     except (TypeError, ValueError):
         status = 0
-    if status in {-3, 2, 9}:
+    if status in {2, 9}:
         return "▶", "#45c878", str(row.get("zetta_status") or "W trakcie")
+    if status == -3:
+        return "◌", "#d6a84b", str(row.get("zetta_status") or "Pending Played")
     if status in {4, 5}:
         return "✕", "#ff5d5d", str(row.get("zetta_status") or "Niezagrane")
     if status in {3, 6, 7, 8}:
@@ -3070,7 +3082,7 @@ def _local_play_status_icon(row: dict, kind: str) -> tuple[str, str, str]:
     return "•", "#9fa8b5", str(row.get("zetta_status") or "")
 
 
-def _local_timeline_row_html(row: dict, kind: str) -> str:
+def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "schedule") -> str:
     event_type = str(row.get("event_type") or "other")
     icon, icon_color, icon_title = _local_play_status_icon(row, kind)
     raw_time = str(row.get("air_time_raw") or "")
@@ -3081,6 +3093,7 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
         else:
             category = str(row.get("category") or "").split("/", 1)[0].strip() or LOCAL_EVENT_LABELS.get(event_type, event_type)
 
+    safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(anchor_prefix or "schedule"))
     if event_type == "toh":
         label = f"Top of the hour · {raw_time[:5] or ''}"
         try:
@@ -3088,7 +3101,7 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
         except (TypeError, ValueError):
             hour = int(raw_time[:2]) if len(raw_time) >= 2 and raw_time[:2].isdigit() else 0
         return (
-            f'<div id="rc-hour-{hour:02d}" class="rc-local-row rc-toh">'
+            f'<div id="{safe_prefix}-hour-{hour:02d}" class="rc-local-row rc-toh">'
             f'<div class="rc-local-icon" style="color:{icon_color}" title="{html.escape(icon_title)}">{html.escape(icon)}</div>'
             f'<div class="rc-local-time">{html.escape(raw_time)}</div>'
             f'<div>{html.escape(label)}</div></div>'
@@ -3109,6 +3122,8 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
     phase = str(row.get("_display_phase") or "")
     if phase == "future_schedule":
         meta_bits.append("Scheduled — jeszcze nie zagrano")
+    elif phase == "current_schedule":
+        meta_bits.append("Scheduled · TERAZ")
     elif kind == "played":
         status_name = str(row.get("zetta_status") or "").strip()
         if status_name:
@@ -3124,7 +3139,10 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
         status_code = int(row.get("zetta_status_code") or 0)
     except (TypeError, ValueError):
         status_code = 0
-    current = kind == "played" and phase != "future_schedule" and status_code in {-3, 2, 9}
+    # CURRENT/PAUSED are authoritative. PENDING_PLAYED (-3) is a transition
+    # state and can coexist with the real CURRENT row, so it must not light up
+    # as another "now playing" item.
+    current = (kind == "played" and phase != "future_schedule" and status_code in {2, 9}) or phase == "current_schedule"
 
     classes = ["rc-local-row", _local_event_tone_class(row)]
     if current:
@@ -3133,6 +3151,17 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
         classes.append("rc-played-past")
     elif phase == "future_schedule":
         classes.append("rc-future-schedule")
+
+    preview_html = ""
+    if event_type == "song" and (artist or title):
+        preview_key = row.get("song_id") or row.get("external_id") or f"{artist}|{title}"
+        preview_html = (
+            '<span class="rc-local-preview" title="Odsłuch 30 s" '
+            f'data-song="{html.escape(str(preview_key), quote=True)}" '
+            f'data-artist="{html.escape(artist, quote=True)}" data-title="{html.escape(title, quote=True)}" '
+            f'data-spotify="{html.escape(spotify_search_url(artist, title), quote=True)}" '
+            'onclick="event.stopPropagation(); if(window.top.__rcPlayPreview){window.top.__rcPlayPreview({songId:this.dataset.song,artist:this.dataset.artist,title:this.dataset.title,spotify:this.dataset.spotify});}">▶</span>'
+        )
 
     title_html = html.escape(main)
     song_id = row.get("song_id")
@@ -3149,10 +3178,12 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
             )
         except (TypeError, ValueError):
             pass
+    title_html = preview_html + title_html
 
     progress = ""
     if current:
-        live = _local_row_clock_for_live(row)
+        live_source = row.get("_live_row") if isinstance(row.get("_live_row"), dict) else row
+        live = _local_row_clock_for_live(live_source)
         if live is not None:
             elapsed, duration = live
             if duration > 0:
@@ -3164,8 +3195,9 @@ def _local_timeline_row_html(row: dict, kind: str) -> str:
                     '</div>'
                 )
 
+    row_id = f' id="{safe_prefix}-now"' if current else ""
     return (
-        f'<div class="{" ".join(classes)}">'
+        f'<div{row_id} class="{" ".join(classes)}">'
         f'<div class="rc-local-icon" style="color:{icon_color}" title="{html.escape(icon_title)}">{html.escape(icon)}</div>'
         f'<div class="rc-local-time">{html.escape(raw_time)}</div>'
         f'<div class="rc-local-category">{html.escape(category)}</div>'
@@ -3234,89 +3266,91 @@ def _local_events_match(a: dict, b: dict) -> bool:
     )
 
 
-def _local_played_continuity_rows(revision: str, service_date: str, played_rows: list[dict]) -> list[dict]:
-    """Played history + current item + Scheduled tail for today's live view."""
-    out = [dict(row) for row in played_rows]
-    for row in out:
-        try:
-            status = int(row.get("zetta_status_code") or 0)
-        except (TypeError, ValueError):
-            status = 0
-        if status in {-3, 2, 9}:
-            row["_display_phase"] = "current"
-        elif status in {3, 6, 7, 8} or str(row.get("event_type") or "") in {"etm", "toh"}:
-            row["_display_phase"] = "played_past"
+def _local_current_played_row(revision: str, service_date: str) -> dict | None:
+    rows = [dict(r) for r in cached_local_day_events(revision, "played", service_date)]
+    # CURRENT is the only reliable on-air status; PAUSED is the same live item.
+    for wanted in (2, 9):
+        found = next((r for r in rows if int(r.get("zetta_status_code") or 0) == wanted and str(r.get("event_type") or "") not in {"etm","toh","command"}), None)
+        if found:
+            return found
+    return None
 
+
+def _local_schedule_current_rows(revision: str, service_date: str, rows: list[dict]) -> list[dict]:
+    out=[dict(r) for r in rows]
     if service_date != date.today().isoformat():
         return out
-    if service_date not in set(cached_local_dates(revision, "schedule")):
+    current=_local_current_played_row(revision, service_date)
+    if not current:
         return out
-
-    current = next((r for r in out if str(r.get("_display_phase") or "") == "current"), None)
-    playable_past = [
-        r for r in out
-        if str(r.get("event_type") or "") not in {"etm", "toh", "command"}
-        and str(r.get("_display_phase") or "") in {"played_past", "current"}
-    ]
-    pivot = current or (playable_past[-1] if playable_past else None)
-    if pivot is None:
-        return out
-
-    scheduled = [dict(row) for row in cached_local_day_events(revision, "schedule", service_date)]
-    scheduled = _local_apply_hour_boundary_gaps(scheduled)
-    scheduled = _local_apply_ignore_reset_gaps(scheduled)
-    pivot_index = None
-    for idx, row in enumerate(scheduled):
-        if _local_events_match(pivot, row):
-            pivot_index = idx
+    for row in out:
+        if _local_events_match(current, row):
+            row["_display_phase"]="current_schedule"
+            row["_live_row"]=current
             break
-    if pivot_index is None:
-        try:
-            pivot_sort = float(pivot.get("sort_seconds"))
-        except (TypeError, ValueError):
-            pivot_sort = None
-        if pivot_sort is not None:
-            for idx, row in enumerate(scheduled):
-                try:
-                    if float(row.get("sort_seconds")) >= pivot_sort:
-                        pivot_index = idx
-                        break
-                except (TypeError, ValueError):
-                    continue
-    if pivot_index is None:
+    return out
+
+
+def _local_played_continuity_rows(revision: str, service_date: str, played_rows: list[dict]) -> list[dict]:
+    """Played history + authoritative CURRENT item + Scheduled tail."""
+    out=[dict(row) for row in played_rows]
+    current = next((r for r in out if int(r.get("zetta_status_code") or 0) in {2,9} and str(r.get("event_type") or "") not in {"etm","toh","command"}), None)
+    current_sort = float(current.get("sort_seconds")) if current and current.get("sort_seconds") is not None else None
+    for row in out:
+        try: status=int(row.get("zetta_status_code") or 0)
+        except (TypeError,ValueError): status=0
+        if status in {2,9}:
+            row["_display_phase"]="current"
+        elif status in {3,6,7,8} or (status == -3 and current_sort is not None and float(row.get("sort_seconds") or 1e12) <= current_sort):
+            row["_display_phase"]="played_past"
+
+    if service_date != date.today().isoformat() or service_date not in set(cached_local_dates(revision,"schedule")):
         return out
-
-    # Future technical rows from Played may have leaked through because ETMs
-    # are stored for reconciliation even before playout. Keep only rows at or
-    # before the actual/current pivot and take everything after it from cutoff.
-    try:
-        pivot_sort = float(pivot.get("sort_seconds"))
-    except (TypeError, ValueError):
-        pivot_sort = None
-    if pivot_sort is not None:
-        out = [
-            r for r in out
-            if str(r.get("event_type") or "") not in {"etm", "toh"}
-            or (r.get("sort_seconds") is not None and float(r.get("sort_seconds")) <= pivot_sort + 0.05)
-        ]
-
-    for row in scheduled[pivot_index + 1:]:
+    playable_past=[r for r in out if str(r.get("event_type") or "") not in {"etm","toh","command"} and str(r.get("_display_phase") or "") in {"played_past","current"}]
+    pivot=current or (playable_past[-1] if playable_past else None)
+    if pivot is None: return out
+    scheduled=[dict(r) for r in cached_local_day_events(revision,"schedule",service_date)]
+    scheduled=_local_apply_ignore_reset_gaps(_local_apply_hour_boundary_gaps(scheduled))
+    pivot_index=next((i for i,r in enumerate(scheduled) if _local_events_match(pivot,r)),None)
+    if pivot_index is None:
+        try: ps=float(pivot.get("sort_seconds"))
+        except (TypeError,ValueError): ps=None
+        if ps is not None:
+            pivot_index=next((i for i,r in enumerate(scheduled) if r.get("sort_seconds") is not None and float(r.get("sort_seconds"))>=ps),None)
+    if pivot_index is None: return out
+    try: ps=float(pivot.get("sort_seconds"))
+    except (TypeError,ValueError): ps=None
+    if ps is not None:
+        out=[r for r in out if str(r.get("event_type") or "") not in {"etm","toh"} or (r.get("sort_seconds") is not None and float(r.get("sort_seconds"))<=ps+.05)]
+    for row in scheduled[pivot_index+1:]:
         row["_display_phase"] = "future_schedule"
         out.append(row)
     return out
 
 
-def _local_traffic_block_html(rows: list[dict], kind: str) -> str:
-    body = "".join(_local_timeline_row_html(row, kind) for row in rows)
-    start = str(rows[0].get("air_time_raw") or "") if rows else ""
+def _local_traffic_block_html(rows: list[dict], kind: str, *, anchor_prefix: str) -> str:
+    body = "".join(_local_timeline_row_html(row, kind, anchor_prefix=anchor_prefix) for row in rows)
+    first = rows[0] if rows else {}
+    start = str(first.get("air_time_raw") or "")
+    category = str(first.get("category_code") or "REKL").strip() or "REKL"
+    count = len(rows)
+    parent = (
+        '<div class="rc-local-row rc-tone-traffic rc-traffic-parent">'
+        '<div class="rc-local-icon rc-traffic-toggle"></div>'
+        f'<div class="rc-local-time">{html.escape(start)}</div>'
+        f'<div class="rc-local-category">{html.escape(category)}</div>'
+        f'<div class="rc-local-main"><div class="rc-local-title">REKLAMA/AUTOPROMOCJA '
+        f'<span class="rc-traffic-count">{count} poz.</span></div></div>'
+        '<div class="rc-local-runtime"></div><div class="rc-local-played"></div></div>'
+    )
     return (
         '<details class="rc-traffic-block">'
-        f'<summary>REKLAMA/AUTOPROMOCJA <span class="rc-traffic-count">{len(rows)} poz. · {html.escape(start)}</span></summary>'
-        f'{body}</details>'
+        f'<summary>{parent}</summary>'
+        f'<div class="rc-traffic-children">{body}</div></details>'
     )
 
 
-def _render_local_timeline_cards(rows: list[dict], kind: str) -> None:
+def _render_local_timeline_cards(rows: list[dict], kind: str, *, anchor_prefix: str) -> None:
     if not rows:
         st.info("Brak elementów dla wybranych filtrów.")
         return
@@ -3327,7 +3361,7 @@ def _render_local_timeline_cards(rows: list[dict], kind: str) -> None:
     def flush_traffic() -> None:
         nonlocal traffic
         if traffic:
-            parts.append(_local_traffic_block_html(traffic, kind))
+            parts.append(_local_traffic_block_html(traffic, kind, anchor_prefix=anchor_prefix))
             traffic = []
 
     for row in rows:
@@ -3335,19 +3369,19 @@ def _render_local_timeline_cards(rows: list[dict], kind: str) -> None:
             traffic.append(row)
             continue
         flush_traffic()
-        parts.append(_local_timeline_row_html(row, kind))
+        parts.append(_local_timeline_row_html(row, kind, anchor_prefix=anchor_prefix))
     flush_traffic()
 
-    st.markdown(_local_hour_nav_html(), unsafe_allow_html=True)
+    _render_local_hour_nav(anchor_prefix)
     st.markdown(
-        '<div class="rc-local-scroll">'
+        f'<div id="{html.escape(anchor_prefix)}-scroll" class="rc-local-scroll">'
         '<div class="rc-local-head"><div></div><div>Czas</div><div>Kategoria</div><div>Element / metadane</div>'
         f'<div>Runtime</div><div>{html.escape(right_header)}</div></div>'
         + "".join(parts) + '</div>',
         unsafe_allow_html=True,
     )
-    if any(str(row.get("event_type") or "") == "song" and row.get("song_id") is not None for row in rows):
-        st.caption("Dwuklik w nazwę utworu otwiera jego kartę RadioCharts.")
+    if any(str(row.get("event_type") or "") == "song" for row in rows):
+        st.caption("▶ = odsłuch 30 s · dwuklik w podkreślony biały tytuł otwiera kartę Utwór.")
 
 
 @st.fragment(run_every=5.0)
@@ -3360,7 +3394,7 @@ def _render_local_now_playing_fragment(service_date: str) -> None:
             row for row in rows
             if str(row.get("source_system") or "") == "zetta2go"
             and str(row.get("event_type") or "") not in {"etm", "toh", "command"}
-            and int(row.get("zetta_status_code") or 0) in {-3, 2, 9}
+            and int(row.get("zetta_status_code") or 0) in {2, 9}
         ),
         None,
     )
@@ -3496,6 +3530,7 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         # User-facing schedule uses the alternative interpretation by default:
         # RESET is informational, HARD/SOFT are the actual timing anchors.
         full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)
+        full_day_rows = _local_schedule_current_rows(revision, selected_date, full_day_rows)
     elif kind == "played":
         full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
 
@@ -3536,7 +3571,7 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
 
     if kind == "played" and selected_date == date.today().isoformat():
         _render_local_now_playing_fragment(selected_date)
-    _render_local_timeline_cards(rows, kind)
+    _render_local_timeline_cards(rows, kind, anchor_prefix=f"{key_prefix}-list")
     if kind == "played" and selected_date == date.today().isoformat():
         st.caption("Played: zakończone elementy są lekko wyszarzone i kursywą; po aktualnie granym elemencie lista przechodzi w cutoff Scheduled, żeby zachować ciągłość dnia.")
     else:
@@ -3581,6 +3616,34 @@ def _render_local_etm_page(revision: str) -> None:
     ]
     _render_local_etm_gap_summary(filtered, ignore_resets=ignore_resets)
     st.caption("Mapa obejmuje zawsze cały dzień. 00:00 jest dodatkowo chronione przed starym błędem, w którym 60+ pozycje z poprzedniej doby mogły sztucznie dać kilkadziesiąt minut gapu.")
+
+    # Make the remaining small disagreements auditable instead of hiding the
+    # arithmetic. Native = value returned by Zetta; carry = RESET contribution;
+    # wynik = what the Ignore RESET view displays.
+    diag=[]
+    for row in filtered:
+        if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) not in {"Hard","Soft"}:
+            continue
+        native = row.get("zetta_gap_native_ms")
+        if native is None and str(row.get("zetta_gap_source") or "").startswith("native"):
+            native = row.get("zetta_gap_ms")
+        if native is None and row.get("zetta_gap_source") in {None,"","native"}:
+            native = row.get("zetta_gap_ms")
+        effective = row.get("zetta_gap_ignore_resets_ms") if ignore_resets else row.get("zetta_gap_ms")
+        carry = row.get("zetta_gap_ignore_resets_carry_ms") if ignore_resets else 0
+        diag.append({
+            "Czas": str(row.get("air_time_raw") or "")[:8],
+            "ETM": _local_etm_kind(row).upper(),
+            "Zetta": _local_gap_ms_to_raw(native) if native is not None else "—",
+            "Carry RESET": _local_gap_ms_to_raw(carry) if carry not in (None,0,0.0) else "+00:00",
+            "Wynik": _local_gap_ms_to_raw(effective) if effective is not None else str(row.get("etm_delta_raw") or "—"),
+            "Źródło": str(row.get("zetta_gap_source") or "native"),
+            "RESET-y": int(row.get("zetta_gap_ignore_resets_reset_count") or 0),
+        })
+    with st.expander("Diagnostyka ETM — skąd bierze się różnica", expanded=False):
+        if diag:
+            st.dataframe(pd.DataFrame(diag), hide_index=True, use_container_width=True, height=min(520, 42+32*len(diag)))
+            st.caption("Jeśli Zetta i Wynik różnią się, różnica powinna być dokładnie pokazana w Carry RESET. Dzięki temu można wskazać konkretny RESET, który powoduje rozjazd, zamiast zgadywać po całym dniu.")
 
 
 def _local_status_symbol(status: str) -> tuple[str, str, str]:
@@ -3636,6 +3699,16 @@ def _local_log_row_html(
         classes.append("rc-log-ghost")
 
     title_html = html.escape(content)
+    preview_html = ""
+    if event_type == "song" and (artist or title):
+        preview_key = row.get("song_id") or row.get("external_id") or f"{artist}|{title}"
+        preview_html = (
+            '<span class="rc-local-preview" title="Odsłuch 30 s" '
+            f'data-song="{html.escape(str(preview_key), quote=True)}" '
+            f'data-artist="{html.escape(artist, quote=True)}" data-title="{html.escape(title, quote=True)}" '
+            f'data-spotify="{html.escape(spotify_search_url(artist, title), quote=True)}" '
+            'onclick="event.stopPropagation(); if(window.top.__rcPlayPreview){window.top.__rcPlayPreview({songId:this.dataset.song,artist:this.dataset.artist,title:this.dataset.title,spotify:this.dataset.spotify});}">▶</span>'
+        )
     song_id = row.get("song_id")
     if event_type == "song" and song_id is not None:
         try:
@@ -3650,6 +3723,7 @@ def _local_log_row_html(
             )
         except (TypeError, ValueError):
             pass
+    title_html = preview_html + title_html
 
     return (
         f'<div class="{" ".join(classes)}">'
@@ -3663,7 +3737,7 @@ def _local_log_row_html(
     )
 
 
-def _local_compare_pair_html(pair: dict) -> str:
+def _local_compare_pair_html(pair: dict, *, anchor_prefix: str = "our-radio-compare") -> str:
     status = str(pair.get("status") or "OK")
     scheduled = pair.get("scheduled_row")
     played = pair.get("played_row")
@@ -3675,217 +3749,89 @@ def _local_compare_pair_html(pair: dict) -> str:
         right = _local_log_row_html(scheduled, status, ghost=True, ghost_note="nie zagrano — pozycja z Scheduled")
     elif scheduled is not None and played is not None:
         left = _local_log_row_html(scheduled, status)
-        if status == "Oczekuje":
-            right = _local_log_row_html(played, status, ghost=True, ghost_note="jeszcze nie zagrano — oczekuje w Zetta")
-        else:
-            right = _local_log_row_html(played, status)
+        right = _local_log_row_html(played, status, ghost=(status == "Oczekuje"), ghost_note="jeszcze nie zagrano — oczekuje w Zetta" if status == "Oczekuje" else "")
     else:
         return ""
-    return f'<div class="rc-compare-pair">{left}{right}</div>'
+    is_now = False
+    if isinstance(played, dict):
+        try: is_now = int(played.get("zetta_status_code") or 0) in {2,9}
+        except (TypeError,ValueError): pass
+    row_id = f' id="{anchor_prefix}-now"' if is_now else ""
+    return f'<div{row_id} class="rc-compare-pair">{left}{right}</div>'
 
 
 def _local_compare_pair_is_traffic(pair: dict) -> bool:
-    for side in (pair.get("scheduled_row"), pair.get("played_row")):
-        if isinstance(side, dict) and str(side.get("event_type") or "") == "traffic":
-            return True
-    return False
+    return any(isinstance(side, dict) and str(side.get("event_type") or "") == "traffic" for side in (pair.get("scheduled_row"), pair.get("played_row")))
 
 
-def _local_compare_rows_html(hour: int, pairs: list[dict]) -> str:
+def _local_compare_traffic_parent(row: dict | None, count: int) -> str:
+    row = row or {}
+    raw_time = str(row.get("air_time_raw") or "")
+    category = str(row.get("category_code") or "REKL").strip() or "REKL"
+    return (
+        '<div class="rc-log-row rc-tone-traffic rc-traffic-parent">'
+        '<div class="rc-log-status rc-traffic-toggle"></div>'
+        f'<div class="rc-log-time">{html.escape(raw_time)}</div>'
+        f'<div class="rc-log-cat">{html.escape(category)}</div>'
+        f'<div class="rc-log-main"><div class="rc-log-title">REKLAMA/AUTOPROMOCJA <span class="rc-traffic-count">{count} poz.</span></div></div>'
+        '<div class="rc-log-runtime"></div></div>'
+    )
+
+
+def _local_compare_hour_body(pairs: list[dict]) -> str:
     body: list[str] = []
     traffic: list[dict] = []
-
-    def flush_traffic() -> None:
+    def flush() -> None:
         nonlocal traffic
-        if not traffic:
-            return
-        inner = "".join(_local_compare_pair_html(pair) for pair in traffic)
-        body.append(
-            '<details class="rc-traffic-block rc-compare-traffic">'
-            '<summary>'
-            f'<span>REKLAMA/AUTOPROMOCJA <span class="rc-traffic-count">{len(traffic)} poz.</span></span>'
-            '</summary>' + inner + '</details>'
-        )
-        traffic = []
-
+        if not traffic: return
+        left_row = next((p.get("scheduled_row") for p in traffic if isinstance(p.get("scheduled_row"),dict)), None)
+        right_row = next((p.get("played_row") for p in traffic if isinstance(p.get("played_row"),dict)), None)
+        parents = f'<div class="rc-compare-pair">{_local_compare_traffic_parent(left_row,len(traffic))}{_local_compare_traffic_parent(right_row,len(traffic))}</div>'
+        inner = ''.join(_local_compare_pair_html(p) for p in traffic)
+        body.append(f'<details class="rc-traffic-block rc-compare-traffic"><summary>{parents}</summary><div class="rc-traffic-children">{inner}</div></details>')
+        traffic=[]
     for pair in pairs:
-        if _local_compare_pair_is_traffic(pair):
-            traffic.append(pair)
-            continue
-        flush_traffic()
-        rendered = _local_compare_pair_html(pair)
-        if rendered:
-            body.append(rendered)
-    flush_traffic()
-
-    if not body:
-        body.append(
-            '<div class="rc-compare-pair"><div class="rc-log-empty">Brak elementów.</div>'
-            '<div class="rc-log-empty">Brak elementów.</div></div>'
-        )
-    return (
-        '<div class="rc-compare-scroll">'
-        '<div class="rc-compare-head">'
-        f'<div>Scheduled · {int(hour):02d}:00–{int(hour):02d}:59+</div>'
-        f'<div>Played · {int(hour):02d}:00–{int(hour):02d}:59+</div>'
-        '</div>' + "".join(body) + '</div>'
-    )
+        if _local_compare_pair_is_traffic(pair): traffic.append(pair); continue
+        flush(); rendered=_local_compare_pair_html(pair)
+        if rendered: body.append(rendered)
+    flush()
+    return ''.join(body) or '<div class="rc-compare-pair"><div class="rc-log-empty">Brak elementów.</div><div class="rc-log-empty">Brak elementów.</div></div>'
 
 
 def _render_local_comparison(revision: str) -> None:
-    scheduled_dates = set(cached_local_dates(revision, "schedule"))
-    played_dates = set(cached_local_dates(revision, "played"))
-    overlap = sorted(scheduled_dates & played_dates)
+    overlap = sorted(set(cached_local_dates(revision,"schedule")) & set(cached_local_dates(revision,"played")))
     if not overlap:
-        st.info(
-            "Nie ma jeszcze dnia, dla którego są jednocześnie Scheduled i Played. "
-            "Po pierwszym eksporcie Played dla dnia z planem porównanie pojawi się automatycznie."
-        )
+        st.info("Nie ma jeszcze dnia, dla którego są jednocześnie Scheduled i Played.")
         return
-
-    st.markdown(
-        """
-        <style>
-          .rc-compare-scroll { max-height:690px; overflow:auto; border:1px solid #313844; border-radius:7px; background:#090d12; }
-          .rc-compare-head { display:grid; grid-template-columns:minmax(520px,1fr) minmax(520px,1fr); gap:1rem; min-width:1080px; position:sticky; top:0; z-index:4; }
-          .rc-compare-head > div { padding:.48rem .62rem; background:#11161d; border-bottom:1px solid #313844; font-weight:700; color:#e7e9ed; }
-          .rc-compare-pair { display:grid; grid-template-columns:minmax(520px,1fr) minmax(520px,1fr); gap:1rem; min-width:1080px; align-items:stretch; }
-          .rc-log-row { display:grid; grid-template-columns:28px 118px 52px minmax(0,1fr) 62px; gap:.42rem; align-items:start; padding:.31rem .48rem; border-bottom:1px solid #1b222c; background:#090d12; font-size:.80rem; min-width:0; height:100%; }
-          .rc-log-row:hover { background:#0f151d; }
-          .rc-log-status { display:flex; align-items:center; justify-content:center; min-height:1.25rem; font-size:1rem; font-weight:850; line-height:1; }
-          .rc-status-ok { color:#45c878; }
-          .rc-status-bad { color:#ff5d5d; }
-          .rc-status-move { color:#f4b942; }
-          .rc-status-cut { color:#ff8c5a; }
-          .rc-log-time { font-variant-numeric:tabular-nums; white-space:nowrap; font-weight:650; }
-          .rc-log-cat { font-weight:760; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-          .rc-log-main { min-width:0; }
-          .rc-log-title { font-weight:650; white-space:normal; overflow-wrap:anywhere; }
-          .rc-log-meta { margin-top:.08rem; font-size:.67rem; opacity:.66; white-space:normal; overflow-wrap:anywhere; }
-          .rc-log-runtime { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; opacity:.88; }
-          .rc-log-flags { grid-column:4 / 6; margin-top:-.10rem; }
-          .rc-log-badge { display:inline-block; margin:.10rem .25rem 0 0; padding:.02rem .24rem; border:1px solid #8a792e; border-radius:4px; color:#f4cf57; font-size:.60rem; font-weight:750; }
-          .rc-log-badge-fade { border-color:#a84848; color:#ff6b6b; }
-          .rc-log-ghost { opacity:.27; filter:grayscale(.85); }
-          .rc-log-ghost:hover { opacity:.36; filter:grayscale(.7); }
-          .rc-log-empty { padding:1rem; color:#858c96; border-bottom:1px solid #1b222c; }
-          @media (max-width:900px) {
-            .rc-compare-head, .rc-compare-pair { min-width:980px; grid-template-columns:minmax(470px,1fr) minmax(470px,1fr); }
-            .rc-log-row { grid-template-columns:26px 92px 46px minmax(0,1fr) 52px; font-size:.74rem; }
-          }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    selected_date = st.selectbox(
-        "Dzień do porównania",
-        overlap,
-        index=len(overlap) - 1,
-        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
-        key="our_radio_compare_date",
-    )
-    # One cached full-day comparison supplies both the 24 h summary and the
-    # selected hour. 1.2.5 still reopened/decoded SQLite for compare_hour here.
-    day_cmp = cached_local_compare_day(revision, selected_date)
-    hour_meta = {int(item["hour"]): item for item in day_cmp.get("hours", [])}
-    hour_details = {int(item["hour"]): item for item in day_cmp.get("hour_details", [])}
-
-    def _hour_label(hour: int) -> str:
-        item = hour_meta.get(int(hour), {})
-        diffs = int(item.get("differences") or 0)
-        suffix = "OK" if diffs == 0 else f"{diffs} różn."
-        return f"{int(hour):02d}:00–{int(hour):02d}:59+  ·  {suffix}"
-
-    default_hour = 0
-    problem_hours = [h for h in range(24) if int(hour_meta.get(h, {}).get("differences") or 0) > 0]
-    if selected_date == date.today().isoformat():
-        default_hour = datetime.now().hour
-    elif problem_hours:
-        default_hour = problem_hours[0]
-
-    selected_hour = st.segmented_control(
-        "Skocz do Top of the hour",
-        list(range(24)),
-        default=default_hour,
-        format_func=lambda hour: f"{int(hour):02d}",
-        key="our_radio_compare_hour_v2",
-    )
-    if selected_hour is None:
-        selected_hour = default_hour
-    selected_meta = hour_meta.get(int(selected_hour), {})
-    selected_diffs = int(selected_meta.get("differences") or 0)
-    st.caption(f"{_hour_label(int(selected_hour))} · przyciski 00–23 przełączają blok od Top of the hour.")
-    comparison = hour_details.get(int(selected_hour))
-    if comparison is None:
-        st.info("Brak danych porównania dla wybranego bloku godzinnego.")
-        return
-
-    render_compact_metrics([
-        ("Scheduled cutoff", comparison["scheduled"]),
-        ("Zagrane / w trakcie", comparison.get("played_actual", comparison["played"])),
-        ("Oczekuje", comparison.get("waiting", 0)),
-        ("Różnice", comparison["differences"]),
-        ("Niezagrane / dodane", f"{comparison['missed']} / {comparison['added']}"),
-    ])
-    st.caption(
-        "✓ zgodne · ✕ niezagrane/usunięte · + dodane po cutoff · ↻ zmieniona kolejność · ≠ podmieniony asset · "
-        "○ oczekuje · ▶ w trakcie. Scheduled to ostatni snapshot przed emisją; prawa strona to aktualny log Zetty, "
-        "więc ingerencje po cutoff widać jeszcze zanim dany element miał zagrać."
-    )
-
-    st.markdown(
-        _local_compare_rows_html(int(selected_hour), comparison.get("display_pairs") or []),
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Scheduled i Played mają jeden wspólny pionowy scroll — rolka myszy przewija oba logi jednocześnie. "
-        "Celowo nie dokładam osobnych scrolli bocznych, żeby nie komplikować obsługi i synchronizacji."
-    )
-
-    st.markdown("#### Różnice w tej godzinie")
-    diffs = pd.DataFrame(comparison["difference_rows"])
-    if diffs.empty:
-        st.success("Kolejność i zawartość bloku są zgodne. Różnice czasu startu są ignorowane.")
-    else:
-        diffs["Typ"] = diffs["event_type"].map(LOCAL_EVENT_LABELS).fillna(diffs["event_type"])
-        diffs["Pozycja"] = diffs.apply(
-            lambda r: (
-                f"{int(r['scheduled_position'])} → {int(r['played_position'])}"
-                if pd.notna(r.get("scheduled_position")) and pd.notna(r.get("played_position"))
-                else (f"plan {int(r['scheduled_position'])}" if pd.notna(r.get("scheduled_position")) else f"played {int(r['played_position'])}")
-            ),
-            axis=1,
-        )
-        diffs = diffs.rename(columns={
-            "status": "Status", "scheduled_time": "Plan", "played_time": "Played",
-            "start_delta": "Δ startu", "runtime_cut": "Ścięcie", "artist": "Wykonawca",
-            "title": "Element / tytuł", "note": "Uwagi",
-        })
-        st.dataframe(
-            diffs[["Status", "Pozycja", "Plan", "Played", "Δ startu", "Ścięcie", "Typ", "Wykonawca", "Element / tytuł", "Uwagi"]],
-            hide_index=True, use_container_width=True, height=min(620, 42 + 35 * len(diffs)),
-        )
-        st.caption(
-            "Δ startu ma format +M:SS / -M:SS i jest informacją pomocniczą — sama różnica czasu nie tworzy błędu. "
-            "„Ścięty” dla utworu pojawia się dopiero, gdy Played jest co najmniej 10% i minimum 10 s krótszy od Scheduled; "
-            "kilkusekundowe trimy/crossfade'y nie są liczone jako cięcie."
-        )
-
-    with st.expander("Podsumowanie wszystkich 24 godzin", expanded=False):
-        hours = pd.DataFrame(day_cmp.get("hours") or [])
-        if not hours.empty:
-            hours["Godzina"] = hours["hour"].map(lambda h: f"{int(h):02d}:00")
-            hours = hours.rename(columns={
-                "scheduled": "Scheduled", "played": "Live log", "differences": "Różnice",
-                "missed": "Niezagrane", "added": "Dodane", "reordered": "Kolejność", "faded": "Ścięte",
-                "changed": "Zmienione", "waiting": "Oczekuje", "in_progress": "W trakcie",
-                "played_actual": "Zagrane / w trakcie",
-            })
-            st.dataframe(
-                hours[[c for c in ["Godzina", "Scheduled", "Zagrane / w trakcie", "Live log", "Oczekuje", "Różnice", "Niezagrane", "Dodane", "Zmienione", "Kolejność", "Ścięte", "W trakcie"] if c in hours.columns]],
-                hide_index=True, use_container_width=True, height=430,
-            )
+    st.markdown("""
+    <style>
+      .rc-compare-scroll{max-height:690px;overflow:auto;border:1px solid #313844;border-radius:7px;background:#090d12;scroll-behavior:smooth}
+      .rc-compare-head,.rc-compare-pair{display:grid;grid-template-columns:minmax(520px,1fr) minmax(520px,1fr);gap:1rem;min-width:1080px}
+      .rc-compare-head{position:sticky;top:0;z-index:4}.rc-compare-head>div{padding:.48rem .62rem;background:#11161d;border-bottom:1px solid #313844;font-weight:700}
+      .rc-log-row{display:grid;grid-template-columns:28px 118px 52px minmax(0,1fr) 62px;gap:.42rem;align-items:start;padding:.31rem .48rem;border-bottom:1px solid #1b222c;background:#090d12;font-size:.80rem;min-width:0;height:100%}
+      .rc-log-row:hover{background:#0f151d}.rc-log-status{display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:850}.rc-status-ok{color:#45c878}.rc-status-bad{color:#ff5d5d}.rc-status-move{color:#f4b942}.rc-status-cut{color:#ff8c5a}
+      .rc-log-time{font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:650}.rc-log-cat{font-weight:760;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-log-main{min-width:0}.rc-log-title{font-weight:650;overflow-wrap:anywhere}.rc-log-meta{font-size:.67rem;opacity:.66;overflow-wrap:anywhere}.rc-log-runtime{text-align:right;white-space:nowrap}.rc-log-flags{grid-column:4/6}.rc-log-ghost{opacity:.27;filter:grayscale(.85)}.rc-log-empty{padding:1rem;color:#858c96}
+    </style>""", unsafe_allow_html=True)
+    selected_date=st.selectbox("Dzień do porównania",overlap,index=len(overlap)-1,format_func=lambda raw:date.fromisoformat(raw).strftime("%d.%m.%Y"),key="our_radio_compare_date")
+    day_cmp=cached_local_compare_day(revision,selected_date)
+    hour_meta={int(x["hour"]):x for x in day_cmp.get("hours",[])}
+    hour_details={int(x["hour"]):x for x in day_cmp.get("hour_details",[])}
+    totals={k:sum(int(hour_meta.get(h,{}).get(k) or 0) for h in range(24)) for k in ["scheduled","played_actual","waiting","differences","missed","added"]}
+    render_compact_metrics([("Scheduled cutoff",totals["scheduled"]),("Zagrane / w trakcie",totals["played_actual"]),("Oczekuje",totals["waiting"]),("Różnice",totals["differences"]),("Niezagrane / dodane",f"{totals['missed']} / {totals['added']}")])
+    _render_local_hour_nav("our-radio-compare", current_hour=datetime.now().hour)
+    sections=[]
+    for hour in range(24):
+        detail=hour_details.get(hour,{})
+        diffs=int(hour_meta.get(hour,{}).get("differences") or 0)
+        sections.append(f'<div id="our-radio-compare-hour-{hour:02d}" class="rc-compare-hour-anchor"><div class="rc-compare-hour-title">{hour:02d}:00–{hour:02d}:59+ · {"OK" if diffs==0 else str(diffs)+" różn."}</div>{_local_compare_hour_body(detail.get("display_pairs") or [])}</div>')
+    st.markdown('<div id="our-radio-compare-scroll" class="rc-compare-scroll"><div class="rc-compare-head"><div>Scheduled cutoff</div><div>Played / live Zetta</div></div>'+''.join(sections)+'</div>',unsafe_allow_html=True)
+    st.caption("⌂ = aktualnie odtwarzany element (lub bieżąca godzina). 00–23 tylko przewijają ten log — bez reloadu. ▶ = odsłuch 30 s; dwuklik białego podkreślonego utworu otwiera kartę Utwór.")
+    all_diffs=[]
+    for hour in range(24): all_diffs.extend((hour_details.get(hour,{}) or {}).get("difference_rows") or [])
+    with st.expander(f"Różnice w całym dniu ({len(all_diffs)})",expanded=False):
+        diffs=pd.DataFrame(all_diffs)
+        if diffs.empty: st.success("Brak różnic zawartości/kolejności.")
+        else: st.dataframe(diffs,hide_index=True,use_container_width=True,height=min(620,42+35*len(diffs)))
 
 
 def _render_local_song_stats(revision: str) -> None:
@@ -4252,6 +4198,24 @@ def _render_watched_page(chart_rev: str, air_rev: str) -> None:
 
     tracked_view = _snapshot_frame(list(snapshot.get("tracked_ids") or []))
     unheard_view = _snapshot_frame(list(snapshot.get("unheard_ids") or []))
+
+    # Historical familiarity/momentum/weeks are the expensive part. Compute
+    # them only for the frozen working set, never for the complete monitoring
+    # universe. This keeps first Watched paint close to Dashboard/Emisje speed.
+    visible_ids = tuple(sorted({int(x) for x in [*tracked_view.get("song_id", []), *unheard_view.get("song_id", [])]}))
+    if visible_ids:
+        details = cached_basic_song_metrics(chart_rev, air_rev, visible_ids)
+        if not details.empty:
+            detail_cols = [c for c in details.columns if c != "song_id"]
+            for name, frame in (("tracked", tracked_view), ("unheard", unheard_view)):
+                if frame.empty:
+                    continue
+                drop = [c for c in detail_cols if c in frame.columns]
+                merged = frame.drop(columns=drop, errors="ignore").merge(details, on="song_id", how="left")
+                if name == "tracked":
+                    tracked_view = merged
+                else:
+                    unheard_view = merged
 
     candidate_count = int(tracked_view["status"].isin(CANDIDATE_STATUSES).sum()) if not tracked_view.empty else 0
     watch_count = int(tracked_view["status"].eq("Watch").sum()) if not tracked_view.empty else 0

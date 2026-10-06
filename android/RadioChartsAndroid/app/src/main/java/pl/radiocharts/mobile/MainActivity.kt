@@ -1312,7 +1312,7 @@ private fun localRadioTextColor(row: LocalRadioEvent): Color = when (row.event_t
 }
 
 @Composable private fun LocalRadioEventCard(row: LocalRadioEvent, kind: String, onSong: (Int) -> Unit) {
-    val current = kind == "played" && (row.display_phase == "current" || row.zetta_status_code in listOf(-3, 2, 9))
+    val current = kind == "played" && (row.display_phase == "current" || row.zetta_status_code in listOf(2, 9))
     val past = kind == "played" && row.display_phase == "played_past" && !current
     val future = kind == "played" && row.display_phase == "future_schedule"
     val toh = row.event_type == "toh"

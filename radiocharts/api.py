@@ -522,12 +522,22 @@ def _mobile_local_event_match(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 def _mobile_played_continuity(service_date: date, hour: int | None) -> list[dict[str, Any]]:
     played = [dict(row) for row in local_events_for_day("played", service_date)]
+    current = next((r for r in played if int(r.get("zetta_status_code") or 0) in {2,9} and str(r.get("event_type") or "") not in {"etm","toh","command"}), None)
+    try:
+        current_sort = float(current.get("sort_seconds")) if current is not None else None
+    except (TypeError, ValueError):
+        current_sort = None
     for row in played:
         try:
             status = int(row.get("zetta_status_code") or 0)
         except (TypeError, ValueError):
             status = 0
-        row["display_phase"] = "current" if status in {-3, 2, 9} else "played_past"
+        if status in {2,9}:
+            row["display_phase"] = "current"
+        elif status in {3,6,7,8} or (status == -3 and current_sort is not None and row.get("sort_seconds") is not None and float(row.get("sort_seconds")) <= current_sort):
+            row["display_phase"] = "played_past"
+        else:
+            row["display_phase"] = ""
     if service_date == date.today():
         scheduled = [dict(row) for row in local_events_for_day("schedule", service_date)]
         current = next((r for r in played if r.get("display_phase") == "current" and str(r.get("event_type") or "") not in {"etm", "toh", "command"}), None)

@@ -410,7 +410,7 @@ def test_cross_system_gselector_cutoff_matches_zetta_played_by_text(tmp_path, mo
 def test_future_waiting_rows_have_pending_ui_contract():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
     assert "jeszcze nie zagrano — oczekuje w Zetta" in app
-    assert '("Zagrane / w trakcie", comparison.get("played_actual", comparison["played"]))' in app
+    assert '("Zagrane / w trakcie",totals["played_actual"])' in app
 
 
 def test_1213_ui_has_ignore_resets_switch_and_recalculates_before_hour_filter():

@@ -16,12 +16,11 @@ def test_1221_main_web_nav_order_and_labels():
         '("library", "Baza")',
         '("our_radio", "Schedule")',
         '("settings", "Ustawienia")',
+        '("data", "Dane")',
         '("methodology", "Manual")',
     ]
     positions = [APP.index(item) for item in expected]
     assert positions == sorted(positions)
-    nav_block = APP[APP.index("def render_nav_tabs"):APP.index("st.markdown('<div class=\"rc-app-title\"")]
-    assert '("data", "Dane")' not in nav_block
 
 
 def test_1221_watched_combines_chart_and_airplay_and_freezes_membership():

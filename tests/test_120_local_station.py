@@ -272,8 +272,8 @@ def test_v125_compare_day_reads_each_daily_log_once(tmp_path, monkeypatch):
 
 def test_v126_shared_compare_scroll_lazy_subviews_and_status_contract():
     assert 'class="rc-compare-scroll"' in APP
-    assert 'Scheduled i Played mają jeden wspólny pionowy scroll' in APP
-    assert 'st.segmented_control(' in APP
+    assert '_render_local_hour_nav("our-radio-compare"' in APP
+    assert 'our-radio-compare-hour-' in APP
     assert '["Scheduled", "ETM", "Played", "Porównanie", "Utwory", "Import"]' in APP
     assert 'tab_schedule, tab_played, tab_compare, tab_songs, tab_import = st.tabs' not in APP
     assert '_bootstrap_local_station_seed_once()' in APP
