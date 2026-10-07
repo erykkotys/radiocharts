@@ -1,0 +1,800 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <meta name="app-version" content="0.10.1">
+  <title>Emaus Hub</title>
+  <link rel="icon" href="/static/brand-icon.png?v=0.10.1" type="image/png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/styles.css?v=0.10.1">
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="#checker" data-view="checker" aria-label="Emaus Hub">
+      <img class="brand-icon" src="/static/brand-icon.png" alt="" width="48" height="48">
+      <span class="brand-copy"><strong>Emaus Hub</strong><small id="headerVersion">Serwer v0.10.1</small></span>
+    </a>
+    <nav class="main-nav" aria-label="Główna nawigacja">
+      <a class="nav-button active" href="#checker" data-view="checker">Sprawdzacz</a>
+      <a class="nav-button" href="#shows" data-view="shows">Audycje</a>
+      <a class="nav-button" href="#timetable" data-view="timetable">Ramówka</a>
+      <a class="nav-button" href="#calendar" data-view="calendar">Grafik</a>
+      <a class="nav-button" href="#played" data-view="played">Played</a>
+      <a class="nav-button" href="#ftp" data-view="ftp">FTP</a>
+      <a class="nav-button" href="#spy" data-view="spy">Odsłuch</a>
+    </nav>
+    <div class="header-actions">
+      <button id="helpButton" class="icon-button help-button" type="button" title="Instrukcja" aria-label="Instrukcja">?</button>
+      <button id="settingsButton" class="icon-button settings-button" type="button" title="Ustawienia" aria-label="Ustawienia">⚙</button>
+      <button id="lockButton" class="icon-button lock-button" type="button" title="Odblokuj edycję" aria-label="Odblokuj edycję">
+        <span id="lockIcon">🔒</span><span id="lockText">Edycja</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="main-shell">
+    <section id="checkerView" class="view active">
+      <div class="date-toolbar panel">
+        <button id="previousDate" class="date-arrow" type="button" aria-label="Poprzedni dzień">‹</button>
+        <button id="dateButton" class="date-button" type="button">
+          <strong id="weekdayLabel">—</strong>
+          <span id="dateLabel">—</span>
+          <small id="weekLabel">—</small>
+        </button>
+        <input id="datePicker" class="native-date" type="date" aria-label="Wybierz datę">
+        <button id="nextDate" class="date-arrow" type="button" aria-label="Następny dzień">›</button>
+        <button id="todayButton" class="secondary-button" type="button">Dzisiaj</button>
+        <button id="refreshButton" class="primary-button" type="button">Odśwież</button>
+      </div>
+
+      <div id="reportSummary" class="summary-grid" aria-live="polite">
+        <article class="summary-card total"><span>Audycje</span><strong id="totalCount">—</strong></article>
+        <article class="summary-card found"><span>Są</span><strong id="foundCount">—</strong></article>
+        <article class="summary-card missing"><span>Brakuje</span><strong id="missingCount">—</strong></article>
+      </div>
+      <div class="checker-tools">
+        <label>Sortowanie <select id="reportSort"><option value="name">Alfabetycznie</option><option value="time">Według godziny</option></select></label>
+        <span>Brakujące audycje są zawsze wyżej.</span>
+      </div>
+
+      <div id="emptyReport" class="empty-state hidden">
+        <strong>Brak audycji w tym dniu</strong>
+        <span>Wybierz inną datę albo dodaj regułę emisji na ekranie Audycje.</span>
+      </div>
+
+      <section id="missingSection" class="report-section hidden">
+        <div class="section-heading"><h2>Brakuje</h2><span id="missingBadge" class="count-badge danger">0</span></div>
+        <div id="missingList" class="report-list"></div>
+      </section>
+      <section id="foundSection" class="report-section hidden">
+        <div class="section-heading"><h2>Są</h2><span id="foundBadge" class="count-badge success">0</span></div>
+        <div id="foundList" class="report-list"></div>
+      </section>
+    </section>
+
+    <section id="showsView" class="view">
+      <div class="shows-toolbar panel">
+        <div>
+          <h1>Audycje</h1>
+          <p id="showsMeta">Ładowanie…</p>
+        </div>
+        <div class="toolbar-actions">
+          <label class="search-box"><span>⌕</span><input id="showSearch" type="search" placeholder="Szukaj audycji"></label>
+          <button id="addShowButton" class="primary-button edit-only" type="button">Dodaj audycję</button>
+        </div>
+      </div>
+      <div id="importWarning" class="notice warning hidden" role="status">
+        <span id="importWarningText"></span>
+        <button id="dismissImportWarning" class="notice-close" type="button" aria-label="Ukryj komunikat">×</button>
+      </div>
+      <div class="shows-list-header" aria-hidden="true">
+        <span>Audycja</span><span>Tagi</span><span>Harmonogram i czas</span><span>Emisja</span><span></span>
+      </div>
+      <div id="showsList" class="shows-list"></div>
+    </section>
+
+    <section id="timetableView" class="view">
+      <div class="timetable-toolbar panel">
+        <div>
+          <h1>Ramówka</h1>
+          <p>Zegar emisji. Po odblokowaniu przeciągaj pozycje po siatce ramówki.</p>
+        </div>
+        <div class="timetable-toolbar-actions">
+          <button id="timetableWideButton" class="secondary-button" type="button" aria-pressed="false">↔ Szeroki</button>
+          <button id="timetableFullscreenButton" class="secondary-button" type="button">⛶ Pełny ekran</button>
+          <button id="timetableRefresh" class="secondary-button" type="button">Odśwież</button>
+          <button id="addTimetableEntry" class="primary-button hidden" type="button">Dodaj element</button>
+        </div>
+      </div>
+
+      <div class="timetable-view-panel panel">
+        <div class="timetable-view-group"><strong>Zakres</strong><div class="segmented-control" id="timetableRange">
+          <button type="button" data-range="1">1 dzień</button><button type="button" data-range="3">3 dni</button><button type="button" data-range="7">Tydzień</button>
+        </div></div>
+        <div class="timetable-view-group"><strong>Widok</strong><div class="segmented-control" id="timetableDensity">
+          <button type="button" data-density="compact">Kompaktowy</button><button type="button" data-density="full">Pełny · siatka 5 min</button>
+        </div></div>
+        <label class="timetable-zoom-control"><span><strong>Skala czasu</strong><output id="timetableZoomValue" for="timetableZoom">60 px / 5 min</output></span><input id="timetableZoom" type="range" min="36" max="144" step="2" value="60"></label>
+        <label class="timetable-zoom-control"><span><strong>Wysokość obszaru</strong><output id="timetableViewportHeightValue" for="timetableViewportHeight">72% ekranu</output></span><input id="timetableViewportHeight" type="range" min="45" max="95" step="5" value="72"></label>
+        <div class="timetable-day-navigation">
+          <button id="timetablePreviousDay" class="date-arrow" type="button" aria-label="Poprzedni dzień">‹</button>
+          <label class="field"><span>Początek widoku</span><select id="timetableDay"></select></label>
+          <button id="timetableNextDay" class="date-arrow" type="button" aria-label="Następny dzień">›</button>
+        </div>
+      </div>
+
+      <div class="timetable-layer-panel panel">
+        <strong>Warstwy</strong>
+        <div id="timetableLayers" class="timetable-layers"></div>
+        <span class="timetable-layer-hint">Audycje są tymi samymi elementami co w Sprawdzaczu. Pozostałe pozycje ramówki można kopiować przez Alt + przeciągnięcie.</span>
+      </div>
+
+      <div class="timetable-hour-jumps panel"><strong>Skocz do godziny</strong><div id="timetableHourJumps"></div></div>
+
+      <p id="timetableError" class="field-error hidden"></p>
+      <div class="timetable-board-shell panel">
+        <div id="timetableBoard" class="timetable-board" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="calendarView" class="view">
+      <div class="calendar-toolbar panel">
+        <div>
+          <h1>Grafik</h1>
+          <p><span id="calendarName">Kalendarz Google</span> · godziny w formacie 24h</p>
+        </div>
+        <div class="calendar-toolbar-actions">
+          <button id="calendarPrevious" class="date-arrow" type="button" aria-label="Poprzedni zakres">‹</button>
+          <button id="calendarToday" class="secondary-button" type="button">Dzisiaj</button>
+          <label class="calendar-date-field"><span>Data</span><input id="calendarDate" type="date"></label>
+          <button id="calendarNext" class="date-arrow" type="button" aria-label="Następny zakres">›</button>
+          <button id="calendarRefresh" class="secondary-button" type="button">Odśwież</button>
+          <button id="addCalendarEvent" class="primary-button edit-only hidden" type="button">Dodaj wydarzenie</button>
+        </div>
+      </div>
+      <div class="calendar-options panel">
+        <div class="calendar-range-copy"><strong id="calendarRangeLabel">—</strong><small id="calendarTimezoneLabel">Europe/Warsaw</small></div>
+        <div class="segmented-control" id="calendarRange">
+          <button type="button" data-range="1">1 dzień</button>
+          <button type="button" data-range="3">3 dni</button>
+          <button type="button" data-range="7">Tydzień</button>
+        </div>
+        <span id="calendarEditHint" class="calendar-edit-hint">Odblokuj kłódkę, aby zmieniać grafik.</span>
+      </div>
+      <div id="calendarSetupNotice" class="notice warning hidden" role="status">
+        <span id="calendarSetupText">Połącz Kalendarz Google w Ustawieniach.</span>
+        <button id="calendarOpenSettings" class="secondary-button" type="button">Otwórz ustawienia</button>
+      </div>
+      <div id="calendarReadonlyNotice" class="notice warning hidden" role="status">
+        <span>Wybrany kalendarz jest tylko do odczytu. Wybierz w Ustawieniach kalendarz z prawem zapisu, aby edytować wydarzenia.</span>
+      </div>
+      <p id="calendarError" class="field-error hidden"></p>
+      <div id="calendarShell" class="calendar-shell panel">
+        <div id="calendarBoard" class="calendar-board" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="playedView" class="view">
+      <div class="played-toolbar panel">
+        <div>
+          <h1>Played</h1>
+          <p>Log emisyjny Radia Emaus na żywo z Zetta2GO.</p>
+        </div>
+        <div class="played-date-controls">
+          <button id="playedPreviousDate" class="date-arrow" type="button" aria-label="Poprzedni dzień">‹</button>
+          <label class="field"><span>Data emisji</span><input id="playedDate" type="date"></label>
+          <button id="playedNextDate" class="date-arrow" type="button" aria-label="Następny dzień">›</button>
+          <button id="playedToday" class="secondary-button" type="button">Dzisiaj</button>
+          <button id="playedRefresh" class="primary-button" type="button">Odśwież Zettę</button>
+        </div>
+      </div>
+      <div id="playedSetupNotice" class="notice warning hidden" role="status">
+        <span>Skonfiguruj połączenie Zetta2GO w Ustawieniach.</span>
+        <button id="playedOpenSettings" class="secondary-button" type="button">Otwórz ustawienia</button>
+      </div>
+      <div class="played-controls panel">
+        <div id="playedFilters" class="segmented-control played-filters">
+          <button class="active" type="button" data-played-filter="all">Wszystkie</button>
+          <button type="button" data-played-filter="music">Muzyka</button>
+          <button type="button" data-played-filter="jingle">Jingle/linki</button>
+          <button type="button" data-played-filter="shows">Audycje</button>
+          <button type="button" data-played-filter="ads">Reklamy</button>
+          <button type="button" data-played-filter="etm">ETM</button>
+        </div>
+        <div class="played-sync-state"><span id="playedLiveState">Oczekiwanie na dane</span><small id="playedLastSync">—</small></div>
+      </div>
+      <div class="played-hour-navigation panel">
+        <button id="playedNow" class="played-hour-button home" type="button" title="Przejdź do aktualnie granego">⌂</button>
+        <div id="playedHourButtons"></div>
+      </div>
+      <p id="playedError" class="field-error hidden"></p>
+      <div id="playedList" class="played-list" aria-live="polite"></div>
+      <div id="playedEmpty" class="empty-state hidden"><strong>Brak danych</strong><span>Po odświeżeniu log emisyjny pojawi się tutaj.</span></div>
+    </section>
+
+    <section id="ftpView" class="view">
+      <div class="ftp-toolbar panel">
+        <div>
+          <h1>Automatyczne FTP</h1>
+          <p>Podgląd zadań uruchamianych automatycznie co godzinę, codziennie.</p>
+        </div>
+        <div class="ftp-toolbar-actions">
+          <span id="ftpCredentialsStatus" class="ftp-credentials-status">Dane FTP: sprawdzanie…</span>
+          <button id="ftpTasksRefresh" class="primary-button" type="button">Odśwież</button>
+        </div>
+      </div>
+
+      <div class="ftp-summary-grid" aria-live="polite">
+        <article class="summary-card total"><span>Zadania</span><strong id="ftpTaskCount">—</strong></article>
+        <article class="summary-card found"><span>Udane dziś</span><strong id="ftpSyncedToday">—</strong></article>
+        <article class="summary-card missing"><span>Błędy dziś</span><strong id="ftpFailedToday">—</strong></article>
+        <article class="summary-card running"><span>W toku</span><strong id="ftpRunningCount">—</strong></article>
+      </div>
+
+      <section class="panel ftp-tasks-panel">
+        <div class="section-heading"><h2>Zadania</h2><span id="ftpTasksBadge" class="count-badge">0</span></div>
+        <p class="ftp-rule-explanation">Każde włączone zadanie synchronizuje zdalny folder raz na godzinę, codziennie. Dociąga nowe i zmienione pliki, ale nie usuwa lokalnych plików.</p>
+        <p id="ftpTasksError" class="field-error hidden"></p>
+        <div id="ftpTasksList" class="ftp-tasks-list"></div>
+        <div id="ftpTasksEmpty" class="mini-empty hidden">Brak audycji z włączonym automatycznym pobieraniem FTP.</div>
+      </section>
+
+      <section class="panel ftp-history-panel">
+        <div class="section-heading"><h2>Historia prób</h2><span id="ftpHistoryBadge" class="count-badge">0</span></div>
+        <div id="ftpHistoryList" class="ftp-history-list"></div>
+        <div id="ftpHistoryEmpty" class="mini-empty hidden">Nie wykonano jeszcze żadnej synchronizacji FTP.</div>
+      </section>
+    </section>
+
+    <section id="spyView" class="view">
+      <section class="panel spy-live-panel">
+        <div>
+          <h1>Odsłuch</h1>
+          <p>Wybierz stream Radia Emaus i słuchaj go w głównym playerze.</p>
+        </div>
+        <div class="spy-live-controls">
+          <label for="spyLiveStream">Stream live</label>
+          <div class="spy-live-input-row">
+            <select id="spyLiveStream">
+              <option value="mp3stream">MP3 stream</option>
+              <option value="oggstream">OGG stream</option>
+              <option value="backup">Backup</option>
+              <option value="katedra">Katedra</option>
+              <option value="gostyn">Gostyń</option>
+              <option value="transmisja">Transmisja</option>
+            </select>
+            <button id="spyLivePlay" class="primary-button" type="button">▶ Słuchaj na żywo</button>
+          </div>
+        </div>
+      </section>
+      <div class="spy-toolbar panel">
+        <div>
+          <h2>Szpieg</h2>
+          <p>Odsłuchuj historię emisji i pobieraj wybrane fragmenty.</p>
+        </div>
+        <div class="spy-date-controls">
+          <button id="spyPreviousDate" class="date-arrow" type="button" aria-label="Poprzedni dzień">‹</button>
+          <label class="field spy-date-field"><span>Data nagrania</span><input id="spyDate" type="date"></label>
+          <button id="spyNextDate" class="date-arrow" type="button" aria-label="Następny dzień">›</button>
+          <button id="spyToday" class="secondary-button" type="button">Dzisiaj</button>
+          <button id="spyRefresh" class="primary-button" type="button">Odśwież</button>
+        </div>
+      </div>
+      <div class="spy-layout">
+        <section class="panel spy-files-panel">
+          <div class="section-heading"><h2>Nagrania</h2><span id="spyCount" class="count-badge">0</span></div>
+          <p id="spyError" class="field-error hidden"></p>
+          <div id="spyFileList" class="spy-file-list"></div>
+          <div id="spyEmpty" class="mini-empty hidden">Brak nagrań Szpiega z wybranego dnia.</div>
+        </section>
+        <form id="spyCutForm" class="panel spy-cut-panel">
+          <h2>Wytnij fragment</h2>
+          <p>Wpisz godziny ręcznie w formacie 24-godzinnym. Zakres może przechodzić przez północ.</p>
+          <div class="form-grid">
+            <label class="field"><span>Początek (HH:MM:SS)</span><input id="spyStartTime" type="text" inputmode="numeric" placeholder="12:54:00" pattern="[0-2][0-9]:[0-5][0-9]:[0-5][0-9]" required></label>
+            <label class="field"><span>Koniec (HH:MM:SS)</span><input id="spyEndTime" type="text" inputmode="numeric" placeholder="13:04:34" pattern="[0-2][0-9]:[0-5][0-9]:[0-5][0-9]" required></label>
+            <button id="spyUseStart" class="secondary-button" type="button">Początek z playera</button>
+            <button id="spyUseEnd" class="secondary-button" type="button">Koniec z playera</button>
+            <label class="field span-2"><span>Nazwa pliku (opcjonalnie)</span><input id="spyFilename" type="text" maxlength="180" placeholder="np. rozmowa_z_gosciem"></label>
+          </div>
+          <small>Maksymalna długość wycinka: 180 minut.</small>
+          <p id="spyCutError" class="field-error hidden"></p>
+          <button id="spyCutButton" class="primary-button" type="submit">Przygotuj i pobierz MP3</button>
+        </form>
+      </div>
+      <section class="panel listen-browser-panel">
+        <div class="listen-browser-heading">
+          <div>
+            <h2>Przeglądaj i odsłuchuj pliki</h2>
+            <p>Wybierz dowolny podpięty zasób. Plik uruchomi się w głównym playerze na dole ekranu.</p>
+          </div>
+          <label class="browser-sort"><span>Sortowanie</span><select id="listenBrowserSort">
+            <option value="name">Alfabetycznie</option>
+            <option value="newest">Od najnowszych</option>
+            <option value="oldest">Od najstarszych</option>
+          </select></label>
+        </div>
+        <div id="listenBrowserRootShortcuts" class="browser-root-shortcuts listen-browser-roots" aria-label="Źródło plików do odsłuchu">
+          <button type="button" data-listen-root="media">AUDYCJE</button>
+          <button type="button" data-listen-root="archive">Archiwum</button>
+          <button type="button" data-listen-root="emaus">Emaus</button>
+          <button type="button" data-listen-root="emaus_contact">Emaus Kontakt</button>
+          <button type="button" data-listen-root="favorites">★ Ulubione</button>
+        </div>
+        <div class="browser-path"><button id="listenBrowserRootButton" type="button">AUDYCJE</button><span>/</span><code id="listenBrowserPath"></code></div>
+        <p id="listenBrowserError" class="field-error hidden"></p>
+        <div id="listenBrowserList" class="file-list listen-browser-list"></div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="unlockDialog" class="dialog compact-dialog">
+    <form id="unlockForm">
+      <button class="dialog-close" type="button" data-close-dialog="unlockDialog" aria-label="Zamknij">×</button>
+      <h2>Odblokuj edycję</h2>
+      <p>Wpisz PIN, aby dodawać, zmieniać i usuwać audycje.</p>
+      <label class="field"><span>PIN</span><input id="pinInput" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" required></label>
+      <p id="pinError" class="field-error hidden"></p>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog="unlockDialog">Anuluj</button><button id="unlockSubmit" class="primary-button" type="submit">Odblokuj</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="changePinDialog" class="dialog compact-dialog">
+    <form id="changePinForm">
+      <button class="dialog-close" type="button" data-close-dialog="changePinDialog" aria-label="Zamknij">×</button>
+      <h2>Zmień PIN</h2>
+      <p>Nowy PIN musi zawierać od 4 do 12 cyfr.</p>
+      <label class="field"><span>Nowy PIN</span><input id="newPinInput" type="password" inputmode="numeric" maxlength="12" required></label>
+      <label class="field"><span>Powtórz nowy PIN</span><input id="repeatPinInput" type="password" inputmode="numeric" maxlength="12" required></label>
+      <p id="changePinError" class="field-error hidden"></p>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog="changePinDialog">Anuluj</button><button class="primary-button" type="submit">Zapisz PIN</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="showDialog" class="dialog show-dialog">
+    <form id="showForm">
+      <div class="dialog-header">
+        <div><span id="showDialogEyebrow" class="eyebrow">Nowa audycja</span><h2 id="showDialogTitle">Dodaj audycję</h2></div>
+        <button class="dialog-close" type="button" data-close-dialog="showDialog" aria-label="Zamknij">×</button>
+      </div>
+      <input id="showId" type="hidden">
+      <div class="form-grid">
+        <label class="field"><span>Nazwa audycji</span><input id="showName" type="text" required></label>
+        <div class="duration-fields">
+          <label class="field"><span>Czas typowy (min)</span><input id="showDuration" type="number" min="0.5" max="240" step="0.5" value="45" required></label>
+          <label class="field"><span>Czas maks. (min)</span><input id="showMaxDuration" type="number" min="0.5" max="240" step="0.5" placeholder="bez limitu"><small class="field-note">Dłuższy plik zostanie oznaczony w Sprawdzaczu.</small></label>
+        </div>
+        <div class="toggle-row span-2">
+          <label class="toggle-field"><input id="showActive" type="checkbox" checked><span>Aktywna</span></label>
+          <label class="toggle-field"><input id="showEditing" type="checkbox"><span>PRODUKCJA</span></label>
+          <label class="toggle-field"><input id="showFtp" type="checkbox"><span>FTP</span></label>
+          <label class="toggle-field"><input id="showYoutube" type="checkbox"><span>YT (<code>_yt</code>)</span></label>
+          <label class="toggle-field"><input id="showSendAuthor" type="checkbox"><span>Wysyłka do autora</span></label>
+          <label class="toggle-field"><input id="showAutoArchive" type="checkbox"><span>Autoarchiwizacja</span></label>
+        </div>
+        <label id="authorEmailField" class="field span-2 hidden"><span>E-mail autora / autorów</span><input id="authorEmail" type="text" inputmode="email" autocomplete="off" placeholder="autor@example.com, drugi@example.com"><small class="field-note">Kilka adresów oddziel przecinkiem lub średnikiem. Każdy autor otrzyma osobny e-mail i dostęp do stałego folderu audycji na Google Drive.</small></label>
+        <p class="field-hint span-2">Brak jakiejkolwiek emisji automatycznie ustawi audycję jako nieaktywną.</p>
+      </div>
+
+      <div id="productionMonitoringSection" class="form-section hidden">
+        <div class="form-section-heading">
+          <div><h3>Monitoring folderów produkcji</h3><p>Nowe pliki MP3 i WAV w wybranych folderach i podfolderach uruchomią powiadomienie Pushover. Dla każdego folderu można osobno włączyć autokasowanie.</p></div>
+          <button id="addProductionWatchFolder" class="secondary-button" type="button">Dodaj folder</button>
+        </div>
+        <div id="productionWatchFolders" class="additional-patterns"></div>
+        <div id="noProductionWatchFolders" class="mini-empty">Brak monitorowanych folderów.</div>
+      </div>
+
+      <div class="form-section">
+        <div class="form-section-heading"><div><h3>Pliki audycji</h3><p>Każda część audycji może mieć własny schemat nazwy.</p></div><div class="heading-actions"><button id="addFilePatternButton" class="secondary-button" type="button">Dodaj część</button><button id="browseFileButton" class="secondary-button" type="button">Wybierz plik</button></div></div>
+        <div class="form-grid">
+          <label class="field span-2"><span>Folder</span><div class="input-with-action"><input id="folderPattern" type="text" placeholder="np. Program/%Y/%m"><button id="browseFolderButton" type="button">Wybierz</button></div></label>
+          <label class="field span-2"><span>Schemat nazwy pliku — część 1</span><input id="filenamePattern" type="text" placeholder="np. Program_%Y-%m-%d_cz1.mp3" required></label>
+          <div id="additionalFilePatterns" class="additional-patterns span-2"></div>
+          <div class="pattern-help span-2"><code>%Y</code> rok 4-cyfrowy <code>%y</code> rok 2-cyfrowy <code>%m</code> miesiąc <code>%d</code> dzień <code>%d-3</code> data emisji minus 3 dni</div>
+          <div class="preview-box span-2"><span>Podgląd dla <b id="previewDateLabel">dzisiaj</b></span><code id="pathPreview">—</code></div>
+        </div>
+      </div>
+
+      <div id="ftpSection" class="form-section ftp-section hidden">
+        <div class="form-section-heading">
+          <div><h3>Pobieranie z FTP</h3><p>Folder jest synchronizowany do folderu audycji. Dane logowania pochodzą z pliku serwera.</p></div>
+        </div>
+        <div class="form-grid">
+          <label class="field span-2"><span>Folder źródłowy na FTP</span><div class="input-with-action"><input id="ftpSourcePath" type="text" placeholder="np. /PCR/Radio Warszawa/AUDYCJE - CYKLE/Nazwa"><button id="browseFtpButton" class="ftp-config-button" type="button">Wybierz</button></div></label>
+          <div class="preview-box span-2"><span>Folder docelowy</span><code id="ftpDestinationPreview">—</code></div>
+          <label class="toggle-field span-2"><input id="ftpAutoSync" type="checkbox"><span>Ściągaj automatycznie co godzinę, codziennie</span></label>
+          <label class="toggle-field span-2"><input id="ftpRenameEnabled" type="checkbox"><span>Inny schemat nazwy pliku źródłowego</span></label>
+          <div id="ftpSourcePatternsBlock" class="span-2 hidden">
+            <p class="field-hint ftp-pattern-hint">Dla daty wcześniejszej o trzy dni użyj np. <code>%Y%m_nazwa_%d-3.mp3</code>. Nadal działa też zapis <code>(%d-3)</code>. Przesunięcie obejmuje całą datę, także na granicy miesiąca i roku.</p>
+            <div id="ftpSourcePatterns" class="additional-patterns"></div>
+          </div>
+          <div id="ftpSourceStatus" class="ftp-source-status span-2"></div>
+        </div>
+        <p id="ftpError" class="field-error hidden"></p>
+        <div class="ftp-operation-actions">
+          <button id="ftpSyncNowButton" class="secondary-button ftp-operation-button" type="button">Synchronizuj FTP</button>
+          <button id="ftpRenameNowButton" class="primary-button ftp-operation-button hidden" type="button">Przemianuj</button>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="form-section-heading"><div><h3>Emisje premierowe</h3><p>Jeden plan łączy dni emisji z jedną lub wieloma godzinami odtwarzania tego samego pliku.</p></div><button id="addPremiereSlotButton" class="secondary-button" type="button">Dodaj plan</button></div>
+        <div id="premiereSlots" class="emission-slots"></div>
+        <div id="noPremiereSlots" class="mini-empty">Brak emisji premierowej.</div>
+      </div>
+
+      <div class="form-section">
+        <div class="form-section-heading"><div><h3>Powtórki</h3><p>Powtórka ma własne dni i godziny, ale zawsze tyle samo części co premiera.</p></div><button id="addRepeatButton" class="secondary-button" type="button">Dodaj powtórkę</button></div>
+        <div id="repeatsList" class="repeats-list"></div>
+        <div id="noRepeats" class="mini-empty">Brak powtórek.</div>
+      </div>
+
+      <p id="showError" class="field-error hidden"></p>
+      <div class="dialog-actions split-actions">
+        <button id="deleteShowButton" class="danger-button hidden" type="button">Usuń</button>
+        <span></span>
+        <button id="cancelShowButton" class="secondary-button" type="button" data-close-dialog="showDialog">Anuluj</button>
+        <button id="saveShowButton" class="primary-button" type="submit">Zapisz</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="timetableEntryDialog" class="dialog timetable-entry-dialog">
+    <form id="timetableEntryForm">
+      <div class="dialog-header">
+        <div><span class="eyebrow">Ramówka</span><h2 id="timetableEntryTitle">Dodaj pozycję</h2></div>
+        <button class="dialog-close" type="button" data-close-dialog="timetableEntryDialog" aria-label="Zamknij">×</button>
+      </div>
+      <input id="timetableEntryId" type="hidden">
+      <div class="form-grid">
+        <label class="field hidden"><span>Rodzaj</span><select id="timetableEntryType"><option value="element">Niezależny element ramówki</option></select></label>
+        <label id="timetableShowField" class="field hidden"><span>Audycja</span><select id="timetableShow"></select></label>
+        <label id="timetableShowRoleField" class="field hidden"><span>Emisja</span><select id="timetableShowRole"><option value="main">Premiera</option><option value="repeat">Powtórka</option></select></label>
+        <label id="timetableElementField" class="field"><span>Typ pozycji</span><select id="timetableElement"></select></label>
+        <label id="timetableElementNameField" class="field hidden"><span>Nazwa nowej pozycji</span><input id="timetableElementName" type="text" maxlength="120"></label>
+        <label id="timetableCategoryField" class="field"><span>Warstwa</span><select id="timetableCategory"></select></label>
+        <label class="field"><span>Dzień tygodnia</span><select id="timetableWeekday"></select></label>
+        <label class="field"><span>Godzina</span><input id="timetableStartTime" type="text" inputmode="numeric" placeholder="18:10" required></label>
+        <label class="field"><span>Czas trwania (min)</span><input id="timetableDuration" type="number" min="0.5" max="240" step="0.5" value="5" required></label>
+        <label class="toggle-field span-2"><input id="timetableApproximate" type="checkbox"><span>Godzina orientacyjna („około”)</span></label>
+        <p id="timetableShowSyncInfo" class="timetable-sync-info span-2 hidden">To jest ta sama audycja co w Audycjach i Sprawdzaczu. Zmiana dnia lub godziny aktualizuje jej harmonogram, a czas trwania jest wspólny dla wszystkich jej emisji.</p>
+        <section id="timetableBulkOptions" class="timetable-bulk-options span-2 hidden">
+          <strong>Zastosuj zmianę do grupy emisji</strong>
+          <p>Wybierz minuty wejścia oraz dni. Zmiana godziny przesunie wszystkie pasujące emisje o tę samą różnicę, np. całą grupę <strong>:50</strong>.</p>
+          <div class="timetable-bulk-selectors">
+            <details id="timetableBulkTimes" open>
+              <summary>Godziny i minuty <span id="timetableBulkTimesSummary"></span></summary>
+              <div class="timetable-bulk-actions">
+                <label class="timetable-bulk-toggle"><input id="timetableBulkAllTimes" type="checkbox"><span>Wszystkie godziny</span></label>
+                <button id="timetableBulkCurrentTime" class="secondary-button compact-button" type="button">Tylko ta grupa</button>
+              </div>
+              <div id="timetableBulkMinutes" class="timetable-bulk-entries"></div>
+            </details>
+            <details id="timetableBulkDays" open>
+              <summary>Dni emisji <span id="timetableBulkDaysSummary"></span></summary>
+              <div class="timetable-bulk-actions">
+                <label class="timetable-bulk-toggle"><input id="timetableBulkAllDays" type="checkbox"><span>Wszystkie dni</span></label>
+                <button id="timetableBulkWorkdays" class="secondary-button compact-button" type="button">Pn–Pt</button>
+                <button id="timetableBulkWeekend" class="secondary-button compact-button" type="button">Sb–Nd</button>
+                <button id="timetableBulkCurrentDay" class="secondary-button compact-button" type="button">Tylko ten dzień</button>
+              </div>
+              <div id="timetableBulkDayChoices" class="timetable-bulk-entries"></div>
+            </details>
+          </div>
+          <div id="timetableBulkSelectionSummary" class="timetable-bulk-selection-summary"></div>
+        </section>
+        <label class="field span-2"><span>Notatka (opcjonalnie)</span><textarea id="timetableNote" rows="3" maxlength="500"></textarea></label>
+      </div>
+      <p id="timetableEntryError" class="field-error hidden"></p>
+      <div class="dialog-actions split-actions">
+        <button id="deleteTimetableEntry" class="danger-button hidden" type="button">Usuń</button>
+        <span></span>
+        <button class="secondary-button" type="button" data-close-dialog="timetableEntryDialog">Zamknij</button>
+        <button id="saveTimetableEntry" class="primary-button" type="submit">Zapisz</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="fileDialog" class="dialog file-dialog">
+    <div class="dialog-header"><div><span class="eyebrow">Katalog audycji</span><h2 id="fileDialogTitle">Wybierz plik</h2></div><button id="closeFileDialog" class="dialog-close" type="button" data-close-dialog="fileDialog" aria-label="Zamknij">×</button></div>
+    <div id="browserToolbar" class="browser-toolbar hidden">
+      <div id="browserRootShortcuts" class="browser-root-shortcuts" aria-label="Źródło plików">
+        <button id="mediaRootShortcut" type="button">AUDYCJE</button>
+        <button id="archiveRootShortcut" type="button">Archiwum</button>
+        <button id="emausRootShortcut" type="button">Emaus</button>
+        <button id="emausContactRootShortcut" type="button">Emaus Kontakt</button>
+        <button id="favoritesRootShortcut" type="button">★ Ulubione</button>
+      </div>
+      <label class="browser-sort"><span>Sortowanie</span><select id="browserSort">
+        <option value="name">Alfabetycznie</option>
+        <option value="newest">Od najnowszych</option>
+        <option value="oldest">Od najstarszych</option>
+      </select></label>
+    </div>
+    <div class="browser-path"><button id="fileRootButton" type="button">AUDYCJE</button><span>/</span><code id="browserPath"></code></div>
+    <div id="browserError" class="field-error hidden"></div>
+    <div id="substituteSelection" class="substitute-selection hidden"></div>
+    <div id="fileList" class="file-list"></div>
+    <div id="newFolderForm" class="new-folder-form hidden">
+      <label class="field"><span>Nazwa nowego folderu</span><input id="newFolderName" type="text" maxlength="120" placeholder="np. Nowa audycja"></label>
+      <button id="saveNewFolder" class="primary-button" type="button">Utwórz</button>
+      <button id="cancelNewFolder" class="secondary-button" type="button">Anuluj</button>
+    </div>
+    <div class="dialog-actions"><button id="newFolderButton" class="secondary-button" type="button">Nowy folder</button><span class="dialog-spacer"></span><button id="confirmSubstitute" class="primary-button hidden" type="button">Użyj jako powtórki</button><button id="selectCurrentFolder" class="secondary-button" type="button">Wybierz ten folder</button><button id="cancelFileDialog" class="secondary-button" type="button" data-close-dialog="fileDialog">Anuluj</button></div>
+  </dialog>
+
+  <dialog id="filePropertiesDialog" class="dialog file-properties-dialog">
+    <div class="dialog-header"><div><span class="eyebrow">Browser plików</span><h2 id="filePropertiesTitle">Właściwości</h2></div><button class="dialog-close" type="button" data-close-dialog="filePropertiesDialog" aria-label="Zamknij">×</button></div>
+    <div id="filePropertiesContent" class="file-properties-content"></div>
+    <p id="filePropertiesError" class="field-error hidden"></p>
+    <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog="filePropertiesDialog">Zamknij</button></div>
+  </dialog>
+
+  <dialog id="renameFileDialog" class="dialog compact-dialog">
+    <form id="renameFileForm">
+      <div class="dialog-header"><div><span class="eyebrow">Browser plików</span><h2>Zmień nazwę pliku</h2></div><button class="dialog-close" type="button" data-close-dialog="renameFileDialog" aria-label="Zamknij">×</button></div>
+      <label class="field"><span>Nowa nazwa wraz z rozszerzeniem</span><input id="renameFileName" type="text" maxlength="255" required></label>
+      <p id="renameFileError" class="field-error hidden"></p>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog="renameFileDialog">Anuluj</button><button class="primary-button" type="submit">Zmień nazwę</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="helpDialog" class="dialog help-dialog">
+    <div class="dialog-header help-dialog-header">
+      <div><span class="eyebrow">Instrukcja obsługi</span><h2>Jak działa Emaus Hub</h2></div>
+      <button class="dialog-close" type="button" data-close-dialog="helpDialog" aria-label="Zamknij">×</button>
+    </div>
+    <div class="help-intro">
+      <strong>Najważniejsza zasada</strong>
+      <p>Sprawdzacz nie przechowuje audio w bazie. Baza zawiera konfigurację audycji, a obecność plików jest sprawdzana bezpośrednio w zamontowanych folderach.</p>
+    </div>
+    <div class="help-sections">
+      <details open>
+        <summary>Sprawdzacz i status plików</summary>
+        <p>Wybierz dzień, aby zobaczyć wszystkie zaplanowane premiery i powtórki. Audycja wieloczęściowa jest kompletna dopiero wtedy, gdy istnieją wszystkie części oraz opcjonalny plik YT.</p>
+        <ul><li>Brakujące audycje zawsze trafiają na początek listy.</li><li>Po odblokowaniu edycji brak można świadomie oznaczyć przyciskiem „Ignoruj”. Po potwierdzeniu pozycja trafia do „Są” jako czerwone „Zignorowane”, a powiadomienia o tym braku nie są już wysyłane.</li><li>Przycisk odtwarzania otwiera wspólny player na dole ekranu.</li><li>Po przekroczeniu czasu maksymalnego pojawia się ostrzeżenie.</li></ul>
+      </details>
+      <details>
+        <summary>Audycje, nazwy i harmonogram</summary>
+        <p>Jedna audycja może mieć kilka emisji premierowych, kilka powtórek i wiele części pliku. Znaczniki daty, np. <code>%Y%m%d</code> oraz przesunięcia takie jak <code>%d-3</code>, są obliczane dla dnia emisji.</p>
+        <p>Po pierwszym zapisaniu schematu lub jego zmianie w folderze audycji powstaje plik <code>.wzor</code> z nazwą odpowiadającą schematowi. Audycja bez żadnej emisji staje się nieaktywna.</p>
+      </details>
+      <details>
+        <summary>FTP</summary>
+        <p>„Synchronizuj FTP” wykonuje mirror całego wskazanego folderu. Każda aktywna audycja z włączoną automatyczną synchronizacją jest sprawdzana raz na godzinę, codziennie — niezależnie od dnia i godziny emisji.</p>
+        <p>Dezaktywowanie audycji zatrzymuje zadanie, ale zachowuje jego konfigurację. Usunięcie audycji usuwa również jej zadanie FTP.</p>
+      </details>
+      <details>
+        <summary>Monitoring i kasowanie plików produkcyjnych</summary>
+        <p>Foldery produkcji są skanowane wraz z podfolderami. Monitorowane są wyłącznie pliki MP3 i WAV. Nowy plik może wywołać Pushover tylko u odbiorców z zaznaczoną opcją zmian produkcyjnych.</p>
+        <p>Autokasowanie działa tylko w folderach, przy których je zaznaczono. Czas liczy się od pierwszego wykrycia danej wersji pliku, ale zmiana pliku rozpoczyna odliczanie od nowa. Proces uruchamia się po starcie serwera i później co 15 minut.</p>
+      </details>
+      <details>
+        <summary>Autoarchiwizacja</summary>
+        <p>Po zaznaczeniu autoarchiwizacji Sprawdzacz obserwuje pliki pasujące do schematów audycji. Czas retencji jest liczony od pierwszego wykrycia konkretnej wersji pliku, a nie od daty modyfikacji ani daty w nazwie.</p>
+        <ul><li>Po upływie retencji plik trafia z <code>/AUDYCJE/…</code> do identycznej ścieżki w <code>/Archiwum/…</code>.</li><li>Plik identyczny z istniejącym w Archiwum otrzymuje status <code>archive_restore</code> i nie jest archiwizowany ponownie.</li><li>„Archiwizuj teraz” w menu prawego przycisku pomija czas oczekiwania.</li><li>Usunięcie audycji przenosi jej cały dedykowany folder do Archiwum. Folder współdzielony z inną audycją blokuje usunięcie dla bezpieczeństwa.</li></ul>
+      </details>
+      <details>
+        <summary>Powtórki i browser plików</summary>
+        <p>„Kopiuj premierę” korzysta wyłącznie z ostatniej premiery wynikającej z harmonogramu. „Wybierz ręcznie” pozwala wskazać tyle źródeł, ile części ma audycja. Browser udostępnia AUDYCJE, Archiwum i podłączone udziały, ulubione foldery, odsłuch, właściwości, tworzenie folderów oraz zmianę nazwy. Ikona folderu produkcji otwiera webowy browser od razu we właściwym katalogu. Plik można chwycić za uchwyt ⋮⋮ i przeciągnąć do Nuendo lub Sound Forge.</p>
+      </details>
+      <details>
+        <summary>Odsłuch i Szpieg</summary>
+        <p>Szpieg obsługuje bieżące pliki <code>rec_*</code> oraz godzinne pliki legacy. Jeżeli <code>rec_*</code> jest urwany, zaczyna się z opóźnieniem albo został podzielony na kilka fragmentów, a istnieje pełniejszy plik legacy, aplikacja automatycznie użyje legacy zarówno do odsłuchu, jak i wycinania. Bez pliku legacy pozostawia dostępne fragmenty <code>rec_*</code>.</p>
+      </details>
+      <details>
+        <summary>Wysyłka do autora</summary>
+        <p>Gotowe pliki są kopiowane do stałego folderu audycji na Google Drive. Można podać jednego autora albo kilka adresów oddzielonych przecinkiem lub średnikiem. Każdy odbiorca dostaje osobny e-mail. Sprawdzacz najpierw nadaje odbiorcy imienne uprawnienie; jeżeli Google odrzuci je z powodu braku konta Google, automatycznie włącza niewyszukiwalny dostęp „każdy, kto ma link”. W tym trybie odbiorca nie musi logować się do Google, ale może przekazać działający link innej osobie. Zmiana listy adresów zeruje stan „Wysłano”. Retencję plików na Drive realizuje Sprawdzacz, nie Google Drive.</p>
+      </details>
+      <details>
+        <summary>Grafik — Kalendarz Google</summary>
+        <p>Grafik pokazuje wybrany Kalendarz Google w układzie 1 dnia, 3 dni lub tygodnia. Wszystkie godziny są wyświetlane w formacie 24-godzinnym i strefie Europe/Warsaw.</p>
+        <ul><li>Połączenie konta oraz wybór kalendarza znajdują się w Ustawieniach. Przy pierwszej aktualizacji tej funkcji trzeba połączyć Google ponownie, aby zatwierdzić nowe uprawnienia.</li><li>Przy zablokowanej kłódce wydarzenia można tylko przeglądać.</li><li>Po odblokowaniu kłódki można dodawać wydarzenia, klikać istniejące w celu edycji oraz je usuwać. Kliknięcie wolnego miejsca tworzy wydarzenie zaokrąglone do 15 minut.</li><li>Jeżeli wybrany kalendarz ma w Google tylko prawo odczytu, Sprawdzacz nie pokaże narzędzi edycji.</li></ul>
+      </details>
+      <details>
+        <summary>Played — log emisyjny Zetta2GO</summary>
+        <p>Played pobiera log każdej godziny osobno i zapisuje surowe dane Zetty w bazie. Bieżąca oraz poprzednia godzina są odświeżane automatycznie, a wygasła sesja HTTP jest logowana ponownie.</p>
+        <ul><li>Zielony wiersz ze znakiem ▶ oznacza wyłącznie status CURRENT lub PAUSED.</li><li>Po aktualnym elemencie nadal widać pozycje READY i WAITING CURRENT.</li><li>Reklamy i autopromocje są grupowane i można rozwinąć ich skład.</li><li>Przyciski 00–23 przewijają listę bez przeładowania strony.</li></ul>
+      </details>
+      <details>
+        <summary>Ramówka</summary>
+        <p>Audycje w ramówce i Sprawdzaczu są tymi samymi obiektami. Przesunięcie emisji w ramówce zmienia harmonogram audycji, a zmiana harmonogramu aktualizuje ramówkę. Pozostałe elementy ramówkowe są niezależne. Alt + przeciągnięcie kopiuje element. Ramówkę odblokowuje ten sam przycisk edycji i ten sam PIN co resztę aplikacji.</p>
+      </details>
+      <details>
+        <summary>Powiadomienia i trwałość danych</summary>
+        <p>Każdy próg Pushover jest wysyłany najwyżej raz dla odbiorcy, audycji, emisji i dnia. Konfiguracja oraz historia są przechowywane w SQLite w trwałym katalogu <code>/data</code>, więc restart i redeploy kontenera ich nie usuwają.</p>
+      </details>
+      <details>
+        <summary>Zakładki i osobne okna</summary>
+        <p>Zakładki w nagłówku są zwykłymi linkami. Można użyć środkowego przycisku myszy albo menu prawego przycisku „Otwórz link w nowym oknie/karcie”. Adres z końcówką <code>#ftp</code>, <code>#timetable</code> itd. otworzy od razu właściwą zakładkę.</p>
+      </details>
+    </div>
+    <div class="dialog-actions"><button class="primary-button" type="button" data-close-dialog="helpDialog">Zamknij</button></div>
+  </dialog>
+
+  <dialog id="settingsUnlockDialog" class="dialog compact-dialog">
+    <form id="settingsUnlockForm">
+      <button class="dialog-close" type="button" data-close-dialog="settingsUnlockDialog" aria-label="Zamknij">×</button>
+      <h2>Ustawienia</h2>
+      <p>Podaj hasło administratora ustawień.</p>
+      <label class="field"><span>Hasło</span><input id="settingsPassword" type="password" autocomplete="current-password" required></label>
+      <p id="settingsUnlockError" class="field-error hidden"></p>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog="settingsUnlockDialog">Anuluj</button><button class="primary-button" type="submit">Otwórz</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="calendarEventDialog" class="dialog calendar-event-dialog">
+    <form id="calendarEventForm">
+      <div class="dialog-header">
+        <div><span class="eyebrow">Grafik Google</span><h2 id="calendarEventDialogTitle">Dodaj wydarzenie</h2></div>
+        <button class="dialog-close" type="button" data-close-dialog="calendarEventDialog" aria-label="Zamknij">×</button>
+      </div>
+      <input id="calendarEventId" type="hidden">
+      <div class="form-grid">
+        <label class="field span-2"><span>Nazwa</span><input id="calendarEventTitle" type="text" maxlength="300" required></label>
+        <label class="toggle-field span-2 calendar-all-day-toggle"><input id="calendarEventAllDay" type="checkbox"><span>Cały dzień</span></label>
+        <label class="field"><span>Data rozpoczęcia</span><input id="calendarEventStartDate" type="date" required></label>
+        <label class="field calendar-time-field"><span>Godzina rozpoczęcia (24h)</span><input id="calendarEventStartTime" type="text" inputmode="numeric" placeholder="08:30" required></label>
+        <label class="field"><span>Data zakończenia</span><input id="calendarEventEndDate" type="date" required></label>
+        <label class="field calendar-time-field"><span>Godzina zakończenia (24h)</span><input id="calendarEventEndTime" type="text" inputmode="numeric" placeholder="09:30" required></label>
+        <label class="field span-2"><span>Lokalizacja (opcjonalnie)</span><input id="calendarEventLocation" type="text" maxlength="500"></label>
+        <label class="field span-2"><span>Opis (opcjonalnie)</span><textarea id="calendarEventDescription" rows="4" maxlength="8000"></textarea></label>
+      </div>
+      <a id="calendarEventGoogleLink" class="calendar-google-link hidden" href="#" target="_blank" rel="noopener">Otwórz wydarzenie w Google Calendar ↗</a>
+      <p id="calendarEventError" class="field-error hidden"></p>
+      <div class="dialog-actions">
+        <button id="deleteCalendarEvent" class="danger-button hidden" type="button">Usuń</button>
+        <span class="dialog-spacer"></span>
+        <button class="secondary-button" type="button" data-close-dialog="calendarEventDialog">Zamknij</button>
+        <button id="saveCalendarEvent" class="primary-button" type="submit">Zapisz</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDialog" class="dialog settings-dialog">
+    <form id="settingsForm">
+      <div class="dialog-header">
+        <div><span class="eyebrow">Administracja</span><h2>Ustawienia</h2></div>
+        <button class="dialog-close" type="button" data-close-dialog="settingsDialog" aria-label="Zamknij">×</button>
+      </div>
+
+      <div class="settings-section">
+        <div class="form-section-heading"><div><h3>Odbiorcy Pushover</h3><p>Każdy odbiorca może mieć własny token aplikacji, klucz użytkownika lub grupy i urządzenie.</p></div><button id="addPushoverRecipient" class="secondary-button" type="button">Dodaj odbiorcę</button></div>
+        <div id="pushoverRecipients" class="settings-card-list"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="form-section-heading"><div><h3>Powiadomienia</h3><p>Reguły są globalne. Wiadomość zostanie wysłana tylko wtedy, gdy brakuje audycji lub którejkolwiek części. Audycja musi mieć ustawioną godzinę emisji.</p></div><button id="addNotificationRule" class="secondary-button" type="button">Dodaj powiadomienie</button></div>
+        <div id="notificationRules" class="settings-card-list"></div>
+        <div id="noNotificationRules" class="mini-empty">Brak reguł — automatyczne powiadomienia są wyłączone.</div>
+      </div>
+
+      <div class="settings-section">
+        <div class="form-section-heading"><div><h3>Automatyczne porządkowanie plików</h3><p>Czas jest liczony od chwili, gdy Sprawdzacz pierwszy raz zobaczy daną wersję pliku, a nie od daty zapisanej w pliku.</p></div></div>
+        <div class="settings-card">
+          <div class="form-grid settings-fields">
+            <label class="field"><span>Archiwizuj audycje po (dni)</span><input id="archiveAfterDays" type="number" min="1" max="3650" value="30"><small class="field-note">Dotyczy audycji z zaznaczoną autoarchiwizacją.</small></label>
+            <label class="field"><span>Kasuj pliki produkcyjne po (dni)</span><input id="productionDeleteAfterDays" type="number" min="1" max="3650" value="30"><small class="field-note">Dotyczy tylko folderów z zaznaczonym autokasowaniem.</small></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="form-section-heading"><div><h3>Przeciąganie plików do programów Windows</h3><p>Mapowania tłumaczą foldery Dockera na ścieżki SMB używane podczas przeciągania plików z webowego browsera do Nuendo lub Sound Forge.</p></div></div>
+        <div class="settings-card">
+          <div class="form-grid settings-fields">
+            <label class="field span-2"><span>AUDYCJE</span><input id="windowsPathMedia" type="text" spellcheck="false" placeholder="\\serwer\udział\AUDYCJE"></label>
+            <label class="field span-2"><span>Archiwum</span><input id="windowsPathArchive" type="text" spellcheck="false" placeholder="\\serwer\archiwum\AUDYCJE"></label>
+            <label class="field span-2"><span>Emaus</span><input id="windowsPathEmaus" type="text" spellcheck="false" placeholder="\\serwer\Emaus"></label>
+            <label class="field span-2"><span>Emaus Kontakt</span><input id="windowsPathEmausContact" type="text" spellcheck="false" placeholder="\\serwer\Emaus Kontakt"></label>
+          </div>
+          <p class="field-note windows-path-note">Ikona folderu produkcji otwiera webowy browser Emaus Hub. Plik można chwycić za uchwyt ⋮⋮ i przeciągnąć do programu; nie wymaga to żadnego pliku EXE ani własnego protokołu.</p>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="form-section-heading"><div><h3>Zetta2GO — Played</h3><p>Dane logowania są zapisywane wyłącznie po stronie serwera. Zapisane hasło nigdy nie jest odsyłane do przeglądarki.</p></div></div>
+        <div class="settings-card">
+          <div class="form-grid settings-fields">
+            <label class="field span-2"><span>Zetta2GO URL</span><input id="zettaUrl" type="url" value="https://emaus-zetta-srv.swdm.local/Zetta2GO/Zetta/Go"></label>
+            <label class="field span-2"><span>Station ID</span><input id="zettaStationId" type="text" spellcheck="false" value="3658ac9a-335e-4839-ac18-2159ba1e4a16"></label>
+            <label class="field"><span>Login</span><input id="zettaUsername" type="text" autocomplete="username"></label>
+            <label class="field"><span>Hasło</span><input id="zettaPassword" type="password" autocomplete="new-password" placeholder="Wpisz hasło"></label>
+          </div>
+          <div class="delivery-status-row">
+            <span id="zettaStatus" class="delivery-status">Zetta2GO: nieskonfigurowane</span>
+            <button id="zettaTestButton" class="secondary-button" type="button">Test połączenia</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="form-section-heading"><div><h3>Google Drive, Grafik i wysyłka do autora</h3><p>Drive i Kalendarz mają niezależne logowanie, więc mogą działać na różnych kontach.</p></div></div>
+        <div class="settings-card delivery-settings">
+          <h4>Google Drive — wysyłka plików</h4>
+          <div class="form-grid settings-fields">
+            <label class="field span-2"><span>Google OAuth Client ID (typ: TVs and Limited Input devices)</span><input id="googleClientId" type="text" autocomplete="off"></label>
+            <label class="field span-2"><span>Google OAuth Client Secret</span><input id="googleClientSecret" type="password" autocomplete="new-password" placeholder="Pozostaw puste, aby nie zmieniać"></label>
+            <label class="field"><span>Nazwa folderu głównego</span><input id="driveRootName" type="text" value="Emaus Hub"></label>
+            <label class="field"><span>Usuń pliki starsze niż (dni)</span><input id="driveRetentionDays" type="number" min="1" max="365" value="30"></label>
+          </div>
+          <div class="delivery-status-row">
+            <span id="googleStatus" class="delivery-status">Google: niepołączony</span>
+            <button id="googleConnectButton" class="secondary-button" type="button">Połącz Google</button>
+            <button id="googleDisconnectButton" class="danger-button hidden" type="button">Odłącz</button>
+          </div>
+          <div id="googleDeviceFlow" class="google-device-flow hidden">
+            <strong>Kod Google: <code id="googleUserCode"></code></strong>
+            <span>Otwórz podany adres, wpisz kod i zatwierdź dostęp.</span>
+            <a id="googleVerificationLink" class="primary-button" href="https://www.google.com/device" target="_blank" rel="noopener">Otwórz Google</a>
+            <button id="googleCheckButton" class="secondary-button" type="button">Sprawdź połączenie</button>
+          </div>
+
+          <h4>Grafik — Kalendarz Google</h4>
+          <div class="form-grid settings-fields">
+            <label class="field span-2"><span>Calendar OAuth Client ID (typ: Web application)</span><input id="calendarClientId" type="text" autocomplete="off"></label>
+            <label class="field span-2"><span>Calendar OAuth Client Secret</span><input id="calendarClientSecret" type="password" autocomplete="new-password" placeholder="Pozostaw puste, aby nie zmieniać"></label>
+            <label class="field span-2"><span>Authorized redirect URI</span><input id="calendarRedirectUri" type="url" value="https://sprawdzacz-oauth.soundcode.pl/"><small class="field-note">Ten sam adres dodaj w kliencie OAuth typu Web application w Google Cloud.</small></label>
+          </div>
+          <div class="delivery-status-row">
+            <span id="calendarGoogleStatus" class="delivery-status">Kalendarz: niepołączony</span>
+            <button id="calendarConnectButton" class="secondary-button" type="button">Połącz konto Kalendarza</button>
+            <button id="calendarDisconnectButton" class="danger-button hidden" type="button">Odłącz Kalendarz</button>
+          </div>
+          <div id="calendarOauthFinish" class="google-device-flow hidden">
+            <span>Po zatwierdzeniu Google skopiuj cały adres z paska przeglądarki i wklej poniżej.</span>
+            <input id="calendarReturnedValue" type="text" autocomplete="off" placeholder="https://sprawdzacz-oauth.soundcode.pl/?code=…&state=…">
+            <button id="calendarFinishButton" class="primary-button" type="button">Dokończ łączenie</button>
+          </div>
+          <div class="form-grid settings-fields calendar-settings-fields">
+            <label class="field span-2"><span>Kalendarz wyświetlany w Grafiku</span><select id="googleCalendarId" disabled><option value="">Najpierw połącz konto Google</option></select><small class="field-note">W Google Cloud musi być włączone Google Calendar API. Do edycji wybierz kalendarz oznaczony jako zapisywalny.</small></label>
+          </div>
+          <div class="delivery-status-row">
+            <span id="googleCalendarStatus" class="delivery-status">Grafik: nieskonfigurowany</span>
+            <button id="googleCalendarsRefresh" class="secondary-button" type="button" disabled>Odśwież listę</button>
+          </div>
+
+          <h4>Wiadomość e-mail (SMTP)</h4>
+          <div class="form-grid settings-fields">
+            <label class="field"><span>Serwer SMTP</span><input id="smtpHost" type="text" placeholder="smtp.gmail.com"></label>
+            <label class="field"><span>Port</span><input id="smtpPort" type="number" min="1" max="65535" value="587"></label>
+            <label class="field"><span>Zabezpieczenie</span><select id="smtpSecurity"><option value="starttls">STARTTLS</option><option value="ssl">SSL/TLS</option><option value="none">Brak</option></select></label>
+            <label class="field"><span>Użytkownik SMTP</span><input id="smtpUsername" type="text" autocomplete="username"></label>
+            <label class="field"><span>Hasło SMTP / hasło aplikacji</span><input id="smtpPassword" type="password" autocomplete="new-password" placeholder="Pozostaw puste, aby nie zmieniać"></label>
+            <label class="field"><span>Adres nadawcy</span><input id="smtpFromEmail" type="email" placeholder="radio@example.com"></label>
+            <label class="field span-2"><span>Nazwa nadawcy</span><input id="smtpFromName" type="text" placeholder="Radio Emaus"></label>
+          </div>
+          <button id="smtpTestButton" class="secondary-button" type="button">Wyślij test SMTP do nadawcy</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="form-section-heading"><div><h3>Bezpieczeństwo</h3><p>Jeden PIN odblokowuje edycję Sprawdzacza, Audycji, FTP, Ramówki i Grafiku. Hasło ustawień pozostaje niezależne.</p></div><div class="heading-actions"><button id="changePinButton" class="secondary-button" type="button">Zmień PIN edycji</button></div></div>
+      </div>
+
+      <p id="settingsError" class="field-error hidden"></p>
+      <div class="dialog-actions">
+        <button id="lockSettingsButton" class="secondary-button" type="button">Zablokuj ustawienia</button>
+        <span class="dialog-spacer"></span>
+        <button class="secondary-button" type="button" data-close-dialog="settingsDialog">Anuluj</button>
+        <button class="primary-button" type="submit">Zapisz</button>
+      </div>
+    </form>
+  </dialog>
+
+  <aside id="audioPlayer" class="audio-player hidden" aria-label="Odtwarzacz audio">
+    <div class="audio-player-info"><strong id="audioPlayerTitle">—</strong><small id="audioPlayerSource">—</small></div>
+    <div class="audio-player-actions">
+      <button id="audioStopButton" class="player-icon-button" type="button" title="Zatrzymaj" aria-label="Zatrzymaj">■</button>
+      <button id="audioCloseButton" class="player-icon-button" type="button" title="Zamknij odtwarzacz" aria-label="Zamknij odtwarzacz">×</button>
+    </div>
+    <audio id="audioElement" controls preload="metadata"></audio>
+  </aside>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=0.10.1" defer></script>
+</body>
+</html>

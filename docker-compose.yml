@@ -1,0 +1,53 @@
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    environment:
+      TS_AUTHKEY: "WSTAW_TUTAJ_NOWY_JEDNORAZOWY_KLUCZ_TAILSCALE"
+      TS_AUTH_ONCE: "true"
+      TS_ACCEPT_DNS: "false"
+      TS_HOSTNAME: emaus-hub
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_TAILNET_TARGET_IP: 100.70.188.50
+      TS_USERSPACE: "false"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      default:
+        aliases:
+          - emaus-zetta-srv.swdm.local
+    pull_policy: always
+    restart: unless-stopped
+    volumes:
+      - /mnt/NVME/apps/emaus-hub/tailscale:/var/lib/tailscale
+
+  emaus-hub:
+    depends_on:
+      - tailscale
+    environment:
+      ARCHIVE_ROOT: /media/archiwum
+      COOKIE_SECURE: "false"
+      DATABASE_PATH: /data/sprawdzacz.db
+      DELIVERY_CONFIG_FILE: /data/delivery_config.json
+      EMAUS_CONTACT_ROOT: /media/emaus-kontakt
+      EMAUS_ROOT: /media/emaus
+      FTP_CREDENTIALS_FILE: /data/forum_ftp_credentials
+      MEDIA_ROOT: /media/audycje
+      SPY_ROOT: /media/szpieg
+      SETTINGS_PASSWORD: "RaEm^567!#"
+      TZ: Europe/Warsaw
+      ZETTA_CA_CERT_FILE: /data/emaus-root-ca.crt
+    image: ghcr.io/erykkotys/sprawdzacz-audycji:latest
+    ports:
+      - "9510:8080"
+    pull_policy: always
+    restart: unless-stopped
+    volumes:
+      - /mnt/NVME/apps/emaus-hub:/data
+      - /mnt/vdevB/.remote/dyna/dynamix/AUDYCJE:/media/audycje:rw
+      - /mnt/vdevA/archiwum/ArchiwumEmausSWDM/AUDYCJE:/media/archiwum:rw
+      - /mnt/vdevB/.remote/production/nasserver/Emaus:/media/emaus:rw
+      - "/mnt/vdevB/.remote/production/nasserver/Emaus Kontakt:/media/emaus-kontakt:rw"
+      - /mnt/vdevB/szpieg:/media/szpieg:ro

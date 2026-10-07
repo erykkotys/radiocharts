@@ -1,3 +1,10 @@
+## 1.2.25 — spójne odświeżanie Played
+
+- Web Schedule → Played odświeża teraz **cały blok live co 5 s** jako fragment Streamlita: karta TERAZ, zielony CURRENT, historia Played i dalszy Scheduled korzystają zawsze z tej samej świeżej rewizji bazy.
+- Naprawiono sytuację, w której karta „TERAZ” była już odświeżona, a playlista nadal wskazywała poprzedni element (na screenie: górny live i zielony wiersz mogły pokazywać dwie różne rzeczy).
+- Odświeżenie nie przeładowuje całej strony ani filtrów Schedule; sieciowy sync Zetta2GO nadal wykonuje worker, a fragment natychmiast podchwytuje jego nowy snapshot.
+- Android: numer wydania zsynchronizowany do 1.2.25 / `versionCode = 48`.
+
 ## 1.2.24 — odsłuch 30 s w Schedule
 
 - Naprawiono przycisk ▶ w Schedule/Porównaniu: playlisty renderowane przez `st.markdown` korzystają teraz z delegowanego handlera kliknięć w dokumencie strony zamiast zawodnego inline `onclick`.

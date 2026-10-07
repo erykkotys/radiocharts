@@ -1,0 +1,9 @@
+.git
+.github
+android
+data
+tests
+__pycache__
+*.pyc
+*.zip
+

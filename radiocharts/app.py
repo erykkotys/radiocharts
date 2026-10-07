@@ -3413,10 +3413,14 @@ def _render_local_timeline_cards(rows: list[dict], kind: str, *, anchor_prefix: 
         st.caption("▶ = odsłuch 30 s · dwuklik w podkreślony biały tytuł otwiera kartę Utwór.")
 
 
-@st.fragment(run_every=5.0)
-def _render_local_now_playing_fragment(service_date: str) -> None:
-    """Small live strip; refreshes without rerunning the whole EMAUS page."""
-    revision = local_station_revision()
+def _render_local_now_playing_fragment(service_date: str, revision: str | None = None) -> None:
+    """Render the live strip from the same revision as the Played playlist.
+
+    Since 1.2.25 the whole live Played body is a fragment. Keeping the strip
+    inside that fragment prevents the old split-brain state where TERAZ had
+    already advanced but the playlist still highlighted the previous item.
+    """
+    revision = revision or local_station_revision()
     rows = cached_local_day_events(revision, "played", service_date)
     current = next(
         (
@@ -3469,6 +3473,92 @@ def _render_local_now_playing_fragment(service_date: str) -> None:
         f'<div class="rc-now-fill" style="width:{pct:.1f}%"></div>'
         '</div></div>',
         unsafe_allow_html=True,
+    )
+
+
+def _render_local_timeline_content(
+    kind: str,
+    key_prefix: str,
+    revision: str,
+    selected_date: str,
+    selected_hour: object,
+    selected_types: tuple[str, ...],
+    etm_kinds: tuple[str, ...],
+) -> None:
+    selected_types = list(selected_types)
+    etm_kinds = set(etm_kinds)
+    full_day_rows = [dict(row) for row in cached_local_day_events(revision, kind, selected_date)]
+    if kind == "schedule":
+        full_day_rows = _local_apply_hour_boundary_gaps(full_day_rows)
+        # User-facing schedule uses the alternative interpretation by default:
+        # RESET is informational, HARD/SOFT are the actual timing anchors.
+        full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)
+        full_day_rows = _local_schedule_current_rows(revision, selected_date, full_day_rows)
+    elif kind == "played":
+        full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
+
+    # TOH is a navigation separator in both whole-day and single-hour views.
+    full_day_rows = _local_with_toh_separators(full_day_rows)
+    hour_rows = [
+        row for row in full_day_rows
+        if selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour)
+    ]
+    rows = [
+        row for row in hour_rows
+        if (not selected_types or str(row.get("event_type") or "") in selected_types)
+        or str(row.get("event_type") or "") == "toh"
+    ]
+    if "etm" in selected_types:
+        rows = _local_filter_etm_rows(rows, etm_kinds)
+
+    counts: dict[str, int] = {}
+    for row in full_day_rows:
+        typ = str(row.get("event_type") or "other")
+        counts[typ] = counts.get(typ, 0) + 1
+    render_compact_metrics([
+        ("Elementy", sum(1 for row in full_day_rows if str(row.get("event_type") or "") != "toh")),
+        ("Song", counts.get("song", 0)),
+        ("Jingle", counts.get("jingle", 0)),
+        ("Audycje", counts.get("show", 0)),
+    ])
+    if not rows:
+        st.info("Brak elementów dla wybranych filtrów.")
+        return
+
+    if selected_hour != "Cały dzień" and "gap_seconds" in pd.DataFrame(rows).columns:
+        over = [float(r.get("gap_seconds")) for r in rows if r.get("gap_seconds") is not None]
+        if over:
+            peak = max(over)
+            mins, secs = divmod(peak, 60)
+            st.caption(f"Godzina {int(selected_hour):02d}: największy zapisany nadczas 60+ = +{int(mins):02d}:{secs:04.1f}.")
+
+    if kind == "played" and selected_date == date.today().isoformat():
+        _render_local_now_playing_fragment(selected_date, revision)
+    _render_local_timeline_cards(rows, kind, anchor_prefix=f"{key_prefix}-list")
+    if kind == "played" and selected_date == date.today().isoformat():
+        st.caption("Played: zakończone elementy są lekko wyszarzone i kursywą; po aktualnie granym elemencie lista przechodzi w cutoff Scheduled, żeby zachować ciągłość dnia.")
+    else:
+        st.caption("Kolory: piosenki białe · linki/jingle/audycje żółte · ETM niebieskie · Top of the hour różowe · reklama/autopromocja czerwona i zwijana.")
+
+@st.fragment(run_every=5.0)
+def _render_local_played_timeline_fragment(
+    key_prefix: str,
+    selected_date: str,
+    selected_hour: object,
+    selected_types: tuple[str, ...],
+    etm_kinds: tuple[str, ...],
+) -> None:
+    """Refresh Played in place without a full Streamlit page reload.
+
+    The worker still owns Zetta2GO network sync. This fragment only picks up a
+    new DB revision immediately and rerenders TERAZ + playlist together, so
+    the highlighted CURRENT row, Played history and Scheduled tail cannot drift
+    apart visually while the page remains open.
+    """
+    fresh_revision = local_station_revision()
+    _render_local_timeline_content(
+        "played", key_prefix, fresh_revision, selected_date, selected_hour,
+        selected_types, etm_kinds,
     )
 
 
@@ -3553,59 +3643,17 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
             etm_kinds = set(LOCAL_ETM_PRESETS[etm_preset])
             xcol.caption(" ")
 
-    full_day_rows = [dict(row) for row in cached_local_day_events(revision, kind, selected_date)]
-    if kind == "schedule":
-        full_day_rows = _local_apply_hour_boundary_gaps(full_day_rows)
-        # User-facing schedule uses the alternative interpretation by default:
-        # RESET is informational, HARD/SOFT are the actual timing anchors.
-        full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)
-        full_day_rows = _local_schedule_current_rows(revision, selected_date, full_day_rows)
-    elif kind == "played":
-        full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
-
-    # TOH is a navigation separator in both whole-day and single-hour views.
-    full_day_rows = _local_with_toh_separators(full_day_rows)
-    hour_rows = [
-        row for row in full_day_rows
-        if selected_hour == "Cały dzień" or row.get("schedule_hour") == int(selected_hour)
-    ]
-    rows = [
-        row for row in hour_rows
-        if (not selected_types or str(row.get("event_type") or "") in selected_types)
-        or str(row.get("event_type") or "") == "toh"
-    ]
-    if "etm" in selected_types:
-        rows = _local_filter_etm_rows(rows, etm_kinds)
-
-    counts: dict[str, int] = {}
-    for row in full_day_rows:
-        typ = str(row.get("event_type") or "other")
-        counts[typ] = counts.get(typ, 0) + 1
-    render_compact_metrics([
-        ("Elementy", sum(1 for row in full_day_rows if str(row.get("event_type") or "") != "toh")),
-        ("Song", counts.get("song", 0)),
-        ("Jingle", counts.get("jingle", 0)),
-        ("Audycje", counts.get("show", 0)),
-    ])
-    if not rows:
-        st.info("Brak elementów dla wybranych filtrów.")
-        return
-
-    if selected_hour != "Cały dzień" and "gap_seconds" in pd.DataFrame(rows).columns:
-        over = [float(r.get("gap_seconds")) for r in rows if r.get("gap_seconds") is not None]
-        if over:
-            peak = max(over)
-            mins, secs = divmod(peak, 60)
-            st.caption(f"Godzina {int(selected_hour):02d}: największy zapisany nadczas 60+ = +{int(mins):02d}:{secs:04.1f}.")
-
+    selected_types_tuple = tuple(str(x) for x in selected_types)
+    etm_kinds_tuple = tuple(sorted(str(x) for x in etm_kinds))
     if kind == "played" and selected_date == date.today().isoformat():
-        _render_local_now_playing_fragment(selected_date)
-    _render_local_timeline_cards(rows, kind, anchor_prefix=f"{key_prefix}-list")
-    if kind == "played" and selected_date == date.today().isoformat():
-        st.caption("Played: zakończone elementy są lekko wyszarzone i kursywą; po aktualnie granym elemencie lista przechodzi w cutoff Scheduled, żeby zachować ciągłość dnia.")
+        _render_local_played_timeline_fragment(
+            key_prefix, selected_date, selected_hour, selected_types_tuple, etm_kinds_tuple
+        )
     else:
-        st.caption("Kolory: piosenki białe · linki/jingle/audycje żółte · ETM niebieskie · Top of the hour różowe · reklama/autopromocja czerwona i zwijana.")
-
+        _render_local_timeline_content(
+            kind, key_prefix, revision, selected_date, selected_hour,
+            selected_types_tuple, etm_kinds_tuple,
+        )
 
 def _render_local_etm_page(revision: str) -> None:
     dates = cached_local_dates(revision, "schedule")

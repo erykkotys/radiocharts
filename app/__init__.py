@@ -1,0 +1,1 @@
+"""Emaus Hub web application."""

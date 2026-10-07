@@ -1,0 +1,17 @@
+{
+  "name": "Emaus Hub",
+  "short_name": "Emaus Hub",
+  "description": "Narzędzia produkcyjne i emisyjne Radia Emaus",
+  "start_url": "/",
+  "display": "standalone",
+  "icons": [
+    {
+      "src": "/static/brand-icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "background_color": "#f4f6f8",
+  "theme_color": "#111827",
+  "lang": "pl"
+}
