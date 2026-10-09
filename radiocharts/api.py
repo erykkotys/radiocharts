@@ -11,6 +11,7 @@ from typing import Any, Iterable, Literal
 
 import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,8 @@ from radiocharts.db import (
     chart_revision,
     connect,
     get_song,
+    external_metadata_for_song_ids,
+    save_external_song_metadata,
     init_db,
     latest_chart_positions,
     list_airplay_stations,
@@ -48,6 +51,7 @@ from radiocharts.local_station import (
     test_zetta2go_connection as local_test_zetta2go_connection,
 )
 from radiocharts.metrics import compute_scores, song_history
+from radiocharts.music_metadata import resolve_spotify_url
 
 API_VERSION = "1"
 POPULARITY_CHART_WEIGHTS = {"OLIA": 35.0, "OLIS": 25.0, "RMF": 20.0, "ZET": 12.0, "ESKA": 8.0}
@@ -373,6 +377,42 @@ app = FastAPI(
     dependencies=[Depends(_require_token)],
     lifespan=lifespan,
 )
+
+
+# Streamlit runs on :8501 while this API normally runs on :8502.  The browser
+# uses this tiny resolver for immediate Spotify sharing when the background
+# metadata worker has not cached an exact track URL yet.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/api/v1/resolve/spotify")
+def resolve_spotify(
+    artist: str = Query(..., min_length=1),
+    title: str = Query(..., min_length=1),
+    song_id: int | None = Query(default=None, ge=1),
+) -> dict[str, str]:
+    mbid = ""
+    if song_id:
+        cached = external_metadata_for_song_ids([song_id]).get(int(song_id)) or {}
+        cached_url = str(cached.get("spotify_url") or "").strip()
+        if cached_url:
+            return {"url": cached_url}
+        mbid = str(cached.get("musicbrainz_recording_mbid") or "").strip()
+    try:
+        url = resolve_spotify_url(artist, title, mbid=mbid)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Spotify lookup failed: {type(exc).__name__}") from exc
+    if song_id and url:
+        track_id = url.rstrip("/").rsplit("/", 1)[-1]
+        save_external_song_metadata(
+            int(song_id), spotify_track_id=track_id, spotify_url=url, spotify_checked=True
+        )
+    return {"url": url}
 
 
 @app.get("/api/v1/health")

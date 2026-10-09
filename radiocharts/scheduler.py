@@ -9,6 +9,7 @@ from radiocharts.config import load_config
 from radiocharts.db import init_db
 from radiocharts.local_station import sync_zetta2go_live, sync_zetta2go_schedule_horizon
 from radiocharts.zetta2go import settings as zetta2go_settings
+from radiocharts.music_metadata import enrich_missing_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("radiocharts")
@@ -73,6 +74,20 @@ def zetta_schedule_job(mark_cutoff: bool = True):
         log.exception("Błąd Zetta2GO scheduled")
 
 
+
+def metadata_job():
+    try:
+        result = enrich_missing_metadata(limit=8)
+        if result.get("checked"):
+            log.info(
+                "Metadane: checked=%s release=%s spotify=%s misses=%s errors=%s",
+                result.get("checked", 0), result.get("release_dates", 0),
+                result.get("spotify_urls", 0), result.get("misses", 0), result.get("errors", 0),
+            )
+    except Exception:
+        log.exception("Błąd uzupełniania metadanych MusicBrainz/ListenBrainz")
+
+
 def main():
     init_db()
     cfg = load_config()
@@ -95,6 +110,11 @@ def main():
         CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=12, timezone=tz),
         max_instances=1,
         coalesce=True,
+    )
+    scheduler.add_job(
+        metadata_job,
+        CronTrigger(hour="1,3,5,7,9,11,13,15,17,19,21,23", minute=41, timezone=tz),
+        max_instances=1, coalesce=True, misfire_grace_time=900,
     )
 
     # Always register Zetta2GO jobs.  Each execution reads the latest settings
@@ -120,6 +140,7 @@ def main():
 
     log.info("Scheduler wystartował: codziennie %s:%02d %s", ",".join(f"{h:02d}" for h in hours), minute, tz)
     log.info("Scheduler emisji: co 2h o :12 uzupełnia brakujące zakończone bloki 2h z ostatnich 24h")
+    log.info("Metadane: co 2h o :41 do 8 brakujących rekordów (MusicBrainz + ListenBrainz)")
     if zcfg.configured:
         log.info(
             "Zetta2GO: live=%s co 1 min; scheduled=%s codziennie 23:59; horyzont=%s dni",

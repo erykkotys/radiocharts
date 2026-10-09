@@ -25,7 +25,7 @@ from radiocharts.db import (
     issue_entries, issue_entries_enriched, latest_chart_positions, latest_issues, latest_source_checks,
     source_check_day_summary, list_airplay_stations, list_issues, load_notes, normalize, song_catalog, song_catalog_revision, catalog_revision, monitoring_song_catalog, watched_song_catalog,
     parse_radio_library_tsv, radio_library_catalog, radio_library_overview, set_airplay_station_active, sync_radio_library_tsv, update_note,
-    merge_song_group, get_app_settings, set_app_settings,
+    merge_song_group, get_app_settings, set_app_settings, external_metadata_for_song_ids,
 )
 from radiocharts.job_manager import active_job, latest_job, read_job_log, start_job, stop_job
 from radiocharts.local_station import (
@@ -51,6 +51,7 @@ from radiocharts.local_station import (
 )
 from radiocharts.zetta2go import settings as zetta2go_settings, save_settings as save_zetta2go_settings
 from radiocharts.metrics import compute_scores, song_history
+from radiocharts.music_metadata import enrich_missing_metadata
 
 st.set_page_config(page_title="RadioCharts Research", page_icon="📻", layout="wide")
 
@@ -682,9 +683,15 @@ def cached_watched_base_frame(
         base[src] = base[pos_col].map(position_sort_value).astype(int) if pos_col in base.columns else 999
     pos_cols=[c for c in ["RMF_pos","ZET_pos","ESKA_pos","OLIA_pos","OLIS_pos"] if c in base.columns]
     base["avg_position"] = base[pos_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1).round(1) if pos_cols else float("nan")
-    base["release_month"] = [release_month(rel, "") for rel in base.get("release_date", pd.Series([""]*len(base)))]
+    base["release_month"] = [
+        release_month(rel, first)
+        for rel, first in zip(
+            base.get("release_date", pd.Series([""] * len(base))),
+            base.get("first_chart_date", pd.Series([""] * len(base))),
+        )
+    ]
     base["preview"] = "▶"
-    base["spotify"] = [spotify_search_url(a,t) for a,t in zip(base["artist"],base["title"])]
+    base["spotify"] = spotify_urls_for_frame(base)
     base["spotify_copy"] = base["spotify"]
     return base
 
@@ -1084,6 +1091,9 @@ def release_month(exact_release: object = None, first_chart: object = None) -> s
         m = re.match(r"^(\d{4})-(\d{2})", raw)
         if m:
             return f"{m.group(1)}/{m.group(2)}"
+        m = re.match(r"^(\d{4})$", raw)
+        if m:
+            return f"{m.group(1)}/??"
     raw = str(first_chart or "").strip()
     if raw and raw.lower() not in {"nan", "none", "nat"}:
         m = re.match(r"^(\d{4})-(\d{2})", raw)
@@ -1135,6 +1145,21 @@ def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
 def spotify_search_url(artist: str, title: str) -> str:
     query = quote(f"{artist} {title}", safe="")
     return f"https://open.spotify.com/search/{query}"
+
+
+def spotify_urls_for_frame(frame: pd.DataFrame) -> list[str]:
+    """Prefer cached direct Spotify track URLs; fall back to Spotify search."""
+    if frame is None or frame.empty:
+        return []
+    ids = pd.to_numeric(frame.get("song_id"), errors="coerce") if "song_id" in frame.columns else pd.Series([float("nan")] * len(frame))
+    lookup = external_metadata_for_song_ids([int(x) for x in ids.dropna().tolist()])
+    out: list[str] = []
+    for sid, artist, title in zip(ids.tolist(), frame.get("artist", pd.Series([""] * len(frame))).tolist(), frame.get("title", pd.Series([""] * len(frame))).tolist()):
+        direct = ""
+        if pd.notna(sid):
+            direct = str((lookup.get(int(sid)) or {}).get("spotify_url") or "").strip()
+        out.append(direct or spotify_search_url(str(artist or ""), str(title or "")))
+    return out
 
 
 def olis_awards_url() -> str:
@@ -1299,57 +1324,71 @@ function(params) {
     const title = String(row.title || '');
     if (!artist && !title) return;
 
-    // Open synchronously so the browser does not block the tab after the
-    // asynchronous JSONP lookup. We then redirect it to an exact Songlink page.
-    let tab = null;
-    try { tab = host.open('about:blank', '_blank'); } catch(e) {}
-
-    const doc = host.document || document;
-    const norm = (v) => String(v || '')
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    const nt = norm(title), na = norm(artist);
-    const cb = '__rcShareCB_' + Date.now() + '_' + Math.floor(Math.random()*1000000);
-    const script = doc.createElement('script');
-    const cleanup = () => {
-      try { delete host[cb]; } catch(e) {}
-      try { script.remove(); } catch(e) {}
-    };
-    const fallback = () => {
-      const url = String(row.spotify || '');
-      if (tab && url) { try { tab.location.replace(url); } catch(e) {} }
-      else if (tab) { try { tab.close(); } catch(e) {} }
-    };
-
-    host[cb] = function(payload) {
+    const cached = String(row.spotify || '');
+    const isDirect = cached.indexOf('https://open.spotify.com/track/') === 0;
+    const shareDirect = async (url) => {
+      if (!url) return;
       try {
-        const results = (payload && payload.results ? payload.results : []).filter(x => x && x.trackId);
-        let best = null, bestScore = -1;
-        for (const r of results) {
-          const rt = norm(r.trackName), ra = norm(r.artistName);
-          let score = 0;
-          if (rt === nt) score += 12;
-          if (nt && (rt.includes(nt) || nt.includes(rt))) score += 4;
-          const artistTokens = na.split(' ').filter(x => x.length > 2);
-          score += artistTokens.filter(t => ra.includes(t)).length * 2;
-          if (ra === na) score += 8;
-          if (score > bestScore) { best = r; bestScore = score; }
+        if (host.navigator && typeof host.navigator.share === 'function') {
+          await host.navigator.share({title: (artist && title) ? (artist + ' — ' + title) : (title || artist), url: url});
+          return;
         }
-        if (best && best.trackId) {
-          const shareUrl = 'https://song.link/i/' + encodeURIComponent(String(best.trackId));
-          if (tab) { try { tab.location.replace(shareUrl); } catch(e) {} }
-          else { try { host.open(shareUrl, '_blank', 'noopener,noreferrer'); } catch(e) {} }
-        } else {
-          fallback();
-        }
-      } finally {
-        cleanup();
+      } catch(e) {
+        // AbortError means the user dismissed the native share sheet; do not
+        // unexpectedly open anything else in that case.
+        if (e && String(e.name || '') === 'AbortError') return;
       }
+      try {
+        if (host.navigator && host.navigator.clipboard && host.navigator.clipboard.writeText) {
+          await host.navigator.clipboard.writeText(url);
+          return;
+        }
+      } catch(e) {}
+      try { host.open(url, '_blank', 'noopener,noreferrer'); } catch(e) {}
     };
-    script.onerror = function() { fallback(); cleanup(); };
-    const term = encodeURIComponent(artist + ' ' + title);
-    script.src = 'https://itunes.apple.com/search?term=' + term + '&country=PL&media=music&entity=song&limit=8&callback=' + cb;
-    doc.body.appendChild(script);
+
+    if (isDirect) {
+      shareDirect(cached);
+      return;
+    }
+
+    // Prefer our backend resolver. It uses the same ListenBrainz mapping as the
+    // metadata worker, avoids browser CORS surprises and returns a real
+    // open.spotify.com/track/... URL. If the API is protected/unavailable we
+    // still have a direct public ListenBrainz fallback below.
+    const apiUrl = host.location.protocol + '//' + host.location.hostname + ':8502/api/v1/resolve/spotify'
+      + '?artist=' + encodeURIComponent(artist) + '&title=' + encodeURIComponent(title)
+      + (row.song_id ? ('&song_id=' + encodeURIComponent(String(row.song_id))) : '');
+    const fallbackSearch = () => shareDirect(cached || ('https://open.spotify.com/search/' + encodeURIComponent((artist + ' ' + title).trim())));
+    const resolveViaListenBrainz = () => fetch('https://labs.api.listenbrainz.org/spotify-id-from-metadata/json', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify([{artist_name: artist, track_name: title, release_name: ''}])
+    }).then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(payload => {
+      let id = '';
+      if (Array.isArray(payload)) {
+        for (const item of payload) {
+          const ids = item && Array.isArray(item.spotify_track_ids) ? item.spotify_track_ids : [];
+          if (ids.length) { id = String(ids[0] || ''); break; }
+        }
+      }
+      if (id) return shareDirect('https://open.spotify.com/track/' + encodeURIComponent(id));
+      return fallbackSearch();
+    });
+
+    fetch(apiUrl).then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(payload => {
+      const url = String((payload || {}).url || '');
+      if (url.indexOf('https://open.spotify.com/track/') === 0) return shareDirect(url);
+      return resolveViaListenBrainz();
+    }).catch(() => {
+      resolveViaListenBrainz().catch(fallbackSearch);
+    });
     return;
   }
 
@@ -1964,7 +2003,7 @@ def render_song_grid(
         gb.configure_column(
             "spotify_copy", "Udostępnij", minWidth=92, width=102, sortable=False, filter=False,
             valueFormatter=SPOTIFY_SHARE_FORMATTER,
-            headerTooltip="Otwórz bezpośredni smart-link Songlink/Odesli do konkretnego utworu (Spotify, Apple Music i inne serwisy).",
+            headerTooltip="Udostępnia bezpośredni link do utworu w Spotify. Na desktopie kopiuje URL, na urządzeniach z Web Share otwiera systemowe udostępnianie.",
             cellStyle={"cursor": "pointer", "textAlign": "center", "fontWeight": "700"},
         )
     if "preview" in show.columns:
@@ -4501,7 +4540,7 @@ if view_key == "dashboard":
                     view["first_chart_date"] if "first_chart_date" in view.columns else [""] * len(view),
                 )
             ]
-            view["spotify"] = [spotify_search_url(a, t) for a, t in zip(view.artist, view.title)]
+            view["spotify"] = spotify_urls_for_frame(view)
             view["spotify_copy"] = view["spotify"]
             view["preview"] = "▶"
             view["status"] = view["status"].fillna("Nie słuchałem").astype(str)
@@ -5028,7 +5067,7 @@ elif view_key == "archive":
                 entries["downloaded"] = False
             else:
                 entries["downloaded"] = entries["downloaded"].fillna(False).astype(bool)
-            entries["spotify"] = [spotify_search_url(a, t) for a, t in zip(entries.artist, entries.title)]
+            entries["spotify"] = spotify_urls_for_frame(entries)
             entries["spotify_copy"] = entries["spotify"]
             entries["preview"] = "▶"
             for c in ["position", "previous_position", "reported_peak"]:
@@ -5217,7 +5256,7 @@ elif view_key == "airplay":
                 ranked[src] = ranked[pos_col].map(position_sort_value).astype(int) if pos_col in ranked.columns else 999
 
             ranked["preview"] = "▶"
-            ranked["spotify"] = [spotify_search_url(a, t) for a, t in zip(ranked["artist"], ranked["title"])]
+            ranked["spotify"] = spotify_urls_for_frame(ranked)
             ranked["spotify_copy"] = ranked["spotify"]
             air_cols = [
                 "song_id", "spins", "artist", "title", "release_month", "preview", "heard", "status", "downloaded", "spotify", "spotify_copy",
@@ -5340,7 +5379,7 @@ elif view_key == "library":
             pos_col = f"{src}_pos"
             lib[src] = lib[pos_col].map(position_sort_value).astype(int) if pos_col in lib.columns else 999
         lib["preview"] = "▶"
-        lib["spotify"] = [spotify_search_url(a, t) for a, t in zip(lib["artist"], lib["title"])]
+        lib["spotify"] = spotify_urls_for_frame(lib)
         lib["spotify_copy"] = lib["spotify"]
 
         render_compact_metrics([
@@ -5553,6 +5592,25 @@ elif view_key == "data":
                         f"{result.get('downloaded_marked', 0)} oznaczonych jako Downloaded."
                     )
                     st.rerun()
+
+    st.divider()
+    st.markdown("### Metadane utworów · premiery + Spotify")
+    st.caption(
+        "Brakujące daty premier uzupełniamy z MusicBrainz (najwcześniejsze wydanie nagrania), a bezpośrednie linki Spotify z publicznego indeksu ListenBrainz. "
+        "MusicBrainz ma limit 1 zapytanie/s, dlatego proces działa małymi paczkami także automatycznie w workerze."
+    )
+    meta_cols = st.columns([1.2, 1.4, 4.4])
+    meta_limit = meta_cols[0].number_input("Utwory na raz", min_value=1, max_value=50, value=10, step=1, key="metadata_enrich_limit")
+    if meta_cols[1].button("Uzupełnij teraz", use_container_width=True, key="metadata_enrich_now"):
+        with st.spinner("MusicBrainz / ListenBrainz — uzupełniam metadane…"):
+            result = enrich_missing_metadata(int(meta_limit))
+        cached_watched_base_frame.clear()
+        cached_song_catalog.clear()
+        st.success(
+            f"Sprawdzono {result.get('checked', 0)} · premiery {result.get('release_dates', 0)} · "
+            f"Spotify {result.get('spotify_urls', 0)} · brak trafienia {result.get('misses', 0)} · błędy {result.get('errors', 0)}"
+        )
+    meta_cols[2].caption("Worker uzupełnia priorytetowo Candidate/Watch, potem najnowsze brakujące rekordy. Istniejąca data premiery nigdy nie jest nadpisywana.")
 
     st.markdown("### Bieżące notowania")
     fetch_main, _ = st.columns([1.7, 5.3])
@@ -5861,7 +5919,7 @@ Worker sprawdza automatyczne źródła dwa razy dziennie — 07:30 i 20:30 czasu
     with st.expander("13. Spotify, odsłuch i własna ocena", expanded=False):
         st.markdown(
             """
-**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł; w tabelach obsługa kliknięcia jest realizowana bezpiecznie przez AG Grid, a Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania bieżącego widoku. Kolumna **Udostępnij ↗** wyszukuje dokładny utwór przez iTunes i otwiera jego smart-link Songlink/Odesli; w razie braku trafienia wraca do wyszukiwania Spotify. Na karcie **Utwór** przycisk **OLiS wyróżnienia ↗** prowadzi do oficjalnej, przeszukiwalnej bazy ZPAV/OLiS ze Złotymi, Platynowymi i Diamentowymi Płytami.
+**▶ 30s** uruchamia podgląd Apple/iTunes w przyklejonym odtwarzaczu. **Spotify ↗** otwiera wyszukiwanie wykonawca + tytuł; w tabelach obsługa kliknięcia jest realizowana bezpiecznie przez AG Grid, a Ctrl/Cmd+klik i środkowy przycisk mogą otwierać wiele kart bez opuszczania bieżącego widoku. Kolumna **Udostępnij ↗** próbuje rozwiązać dokładny utwór do bezpośredniego linku Spotify przez publiczny indeks ListenBrainz; na urządzeniach z Web Share otwiera systemowe udostępnianie, a na desktopie kopiuje link. W razie braku dokładnego mapowania wraca do wyszukiwania Spotify. Na karcie **Utwór** przycisk **OLiS wyróżnienia ↗** prowadzi do oficjalnej, przeszukiwalnej bazy ZPAV/OLiS ze Złotymi, Platynowymi i Diamentowymi Płytami.
 
 Twoje pola **Status, Downloaded i Notatka** są warstwą redakcyjną i nie zmieniają automatycznych wskaźników. Notatka jest celowo ostatnią kolumną tabel, żeby nie zabierała miejsca najważniejszym danym liczbowym.
             """

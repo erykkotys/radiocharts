@@ -38,6 +38,20 @@ CREATE TABLE IF NOT EXISTS songs (
     UNIQUE(artist_key, title_key)
 );
 
+
+CREATE TABLE IF NOT EXISTS song_external_metadata (
+    song_id INTEGER PRIMARY KEY REFERENCES songs(id) ON DELETE CASCADE,
+    musicbrainz_recording_mbid TEXT,
+    spotify_track_id TEXT,
+    spotify_url TEXT,
+    release_date_source TEXT,
+    release_date_precision TEXT,
+    release_checked_at TEXT,
+    spotify_checked_at TEXT,
+    last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_song_external_spotify_id ON song_external_metadata(spotify_track_id);
+
 CREATE TABLE IF NOT EXISTS chart_issues (
     id INTEGER PRIMARY KEY,
     source TEXT NOT NULL,
@@ -1815,6 +1829,7 @@ def init_db() -> None:
         "local_station_zetta_v1",
         "airplay_dashboard_indexes_v1",
         "airplay_song_station_totals_v1",
+        "song_external_metadata_v1",
     }
     if _INITIALIZED_DB_PATH == current_path and DB_PATH.exists():
         # Hot-path for a running web/worker process. Migrations are checked once
@@ -1892,6 +1907,7 @@ def init_db() -> None:
                         if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                             raise
                     con.executescript(SCHEMA)
+                    con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_external_metadata_v1','done')")
                     con.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('local_station_schema_v1','done')")
                     # 1.2.9: Zetta2GO snapshots share local_station_events with GSelector
                     # but need explicit provenance/status fields so READY/NOT_PLAYED rows
@@ -2567,13 +2583,15 @@ def chart_revision() -> str:
 
 
 def catalog_revision() -> str:
-    """Cheap cache key for membership of the shared song catalogue."""
+    """Cheap cache key for membership + externally enriched song metadata."""
     init_db()
     with connect() as con:
         row = con.execute(
-            "SELECT COALESCE(MAX(id),0) AS max_id,COUNT(*) AS n FROM songs"
+            """SELECT COALESCE(MAX(id),0) AS max_id,COUNT(*) AS n,
+                      COALESCE((SELECT value FROM app_meta WHERE key='song_external_metadata_revision'),'') AS external_rev
+               FROM songs"""
         ).fetchone()
-    return f"{int(row['max_id'] or 0)}|{int(row['n'] or 0)}" if row else "0|0"
+    return f"{int(row['max_id'] or 0)}|{int(row['n'] or 0)}|{row['external_rev'] or ''}" if row else "0|0|"
 
 
 def list_songs() -> list[dict]:
@@ -2654,6 +2672,8 @@ def watched_song_catalog() -> list[dict]:
                    GROUP BY e.song_id
                )
                SELECT s.id AS song_id,s.artist,s.title,s.release_date,
+                      (SELECT MIN(ci2.chart_date) FROM chart_entries ce2 JOIN chart_issues ci2 ON ci2.id=ce2.issue_id WHERE ce2.song_id=s.id) AS first_chart_date,
+                      COALESCE(x.spotify_url,'') AS spotify_url,
                       COALESCE(n.heard,0) AS heard,
                       COALESCE(n.status,'Nie słuchałem') AS status,
                       COALESCE(n.downloaded,0) AS downloaded,
@@ -2661,12 +2681,103 @@ def watched_song_catalog() -> list[dict]:
                       lp.RMF_pos,lp.ZET_pos,lp.ESKA_pos,lp.OLIA_pos,lp.OLIS_pos
                FROM songs s
                LEFT JOIN song_notes n ON n.song_id=s.id
+               LEFT JOIN song_external_metadata x ON x.song_id=s.id
                LEFT JOIN latest_pos lp ON lp.song_id=s.id
                WHERE EXISTS (SELECT 1 FROM chart_entries e WHERE e.song_id=s.id)
                   OR EXISTS (SELECT 1 FROM airplay_plays p WHERE p.song_id=s.id)
                ORDER BY s.id"""
         ).fetchall()
     return [dict(r) for r in rows]
+
+def external_metadata_for_song_ids(song_ids: Iterable[int]) -> dict[int, dict]:
+    """Return cached external metadata for a bounded set of songs."""
+    ids = sorted({int(x) for x in song_ids if x is not None})
+    if not ids:
+        return {}
+    init_db()
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as con:
+        rows = con.execute(
+            f"""SELECT song_id,musicbrainz_recording_mbid,spotify_track_id,spotify_url,
+                       release_date_source,release_date_precision,release_checked_at,spotify_checked_at,last_error
+                FROM song_external_metadata WHERE song_id IN ({placeholders})""",
+            tuple(ids),
+        ).fetchall()
+    return {int(r["song_id"]): dict(r) for r in rows}
+
+
+def songs_missing_external_metadata(limit: int = 20, retry_after_days: int = 30) -> list[dict]:
+    """Songs worth enriching, prioritising the active research queue and newest rows."""
+    init_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(retry_after_days)))).isoformat()
+    with connect() as con:
+        rows = con.execute(
+            """SELECT s.id AS song_id,s.artist,s.title,s.release_date,s.isrc,
+                      COALESCE(n.status,'Nie słuchałem') AS status,
+                      x.musicbrainz_recording_mbid,x.spotify_track_id,x.spotify_url,
+                      x.release_checked_at,x.spotify_checked_at
+               FROM songs s
+               LEFT JOIN song_notes n ON n.song_id=s.id
+               LEFT JOIN song_external_metadata x ON x.song_id=s.id
+               WHERE (COALESCE(s.release_date,'')='' OR COALESCE(x.spotify_url,'')='')
+                 AND (
+                      (COALESCE(s.release_date,'')='' AND (x.release_checked_at IS NULL OR x.release_checked_at < ?))
+                   OR (COALESCE(x.spotify_url,'')='' AND (x.spotify_checked_at IS NULL OR x.spotify_checked_at < ?))
+                 )
+               ORDER BY CASE
+                          WHEN COALESCE(n.status,'') LIKE '% Candidate' THEN 0
+                          WHEN COALESCE(n.status,'')='Watch' THEN 1
+                          WHEN COALESCE(n.status,'')='Nie słuchałem' THEN 2
+                          ELSE 3
+                        END, s.id DESC
+               LIMIT ?""",
+            (cutoff, cutoff, max(1, int(limit))),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_external_song_metadata(
+    song_id: int, *, musicbrainz_recording_mbid: str | None = None,
+    spotify_track_id: str | None = None, spotify_url: str | None = None,
+    release_date: str | None = None, release_date_source: str | None = None,
+    release_date_precision: str | None = None, release_checked: bool = False,
+    spotify_checked: bool = False, last_error: str = "",
+) -> None:
+    """Persist external metadata without overwriting an existing release date."""
+    init_db()
+    now = _utcnow()
+    with connect() as con:
+        con.execute(
+            """INSERT INTO song_external_metadata(
+                   song_id,musicbrainz_recording_mbid,spotify_track_id,spotify_url,
+                   release_date_source,release_date_precision,release_checked_at,spotify_checked_at,last_error
+               ) VALUES(?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(song_id) DO UPDATE SET
+                 musicbrainz_recording_mbid=COALESCE(excluded.musicbrainz_recording_mbid,song_external_metadata.musicbrainz_recording_mbid),
+                 spotify_track_id=COALESCE(excluded.spotify_track_id,song_external_metadata.spotify_track_id),
+                 spotify_url=COALESCE(excluded.spotify_url,song_external_metadata.spotify_url),
+                 release_date_source=COALESCE(excluded.release_date_source,song_external_metadata.release_date_source),
+                 release_date_precision=COALESCE(excluded.release_date_precision,song_external_metadata.release_date_precision),
+                 release_checked_at=COALESCE(excluded.release_checked_at,song_external_metadata.release_checked_at),
+                 spotify_checked_at=COALESCE(excluded.spotify_checked_at,song_external_metadata.spotify_checked_at),
+                 last_error=excluded.last_error""",
+            (int(song_id), musicbrainz_recording_mbid or None, spotify_track_id or None, spotify_url or None,
+             release_date_source or None, release_date_precision or None, now if release_checked else None,
+             now if spotify_checked else None, str(last_error or "")),
+        )
+        if release_date:
+            con.execute(
+                "UPDATE songs SET release_date=? WHERE id=? AND COALESCE(release_date,'')=''",
+                (str(release_date)[:10], int(song_id)),
+            )
+        # External metadata is populated by a worker process.  Bump a shared
+        # revision so Streamlit caches notice newly resolved dates/Spotify URLs
+        # without requiring a process restart.
+        con.execute(
+            "INSERT OR REPLACE INTO app_meta(key,value) VALUES('song_external_metadata_revision',?)",
+            (now,),
+        )
+
 
 def get_song(song_id: int) -> dict | None:
     """Fetch one shared song row with live user state."""

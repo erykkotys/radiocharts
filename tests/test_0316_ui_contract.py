@@ -30,5 +30,7 @@ def test_airplay_backfill_is_centralized_in_data_view():
 
 def test_spotify_share_column_is_configured():
     assert '"spotify_copy", "Udostępnij"' in APP
-    assert "https://song.link/i/" in APP
+    assert "https://open.spotify.com/track/" in APP
+    assert "spotify-id-from-metadata/json" in APP
+    assert "https://song.link/i/" not in APP
     assert "field === 'spotify_copy'" in APP

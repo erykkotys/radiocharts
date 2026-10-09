@@ -5,10 +5,10 @@ APP = (ROOT / "radiocharts" / "app.py").read_text(encoding="utf-8")
 
 
 def test_release_version_106():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.25"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.26"
     gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 48' in gradle
-    assert 'versionName = "1.2.25"' in gradle
+    assert 'versionCode = 49' in gradle
+    assert 'versionName = "1.2.26"' in gradle
 
 
 def test_status_editor_is_bounded_and_page_has_bottom_room():
@@ -33,9 +33,11 @@ def test_spotify_click_is_react_safe_and_supports_modifier_open():
     assert 'host.focus()' in APP
 
 
-def test_share_column_resolves_exact_songlink_from_itunes_track_id():
+def test_share_column_resolves_direct_spotify_track_url():
     assert '"spotify_copy", "Udostępnij"' in APP
-    assert "https://itunes.apple.com/search?term=" in APP
-    assert "x.trackId" in APP
-    assert "https://song.link/i/" in APP
-    assert "tab.location.replace(shareUrl)" in APP
+    assert "spotify-id-from-metadata/json" in APP
+    assert "spotify_track_ids" in APP
+    assert "https://open.spotify.com/track/" in APP
+    assert "navigator.share" in APP
+    assert "navigator.clipboard.writeText" in APP
+    assert "https://song.link/i/" not in APP

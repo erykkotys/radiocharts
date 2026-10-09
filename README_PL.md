@@ -1,3 +1,13 @@
+## 1.2.26 — bezpośredni Spotify i uzupełnianie dat premier
+
+- **Udostępnij** rozwiązuje teraz utwór do bezpośredniego `open.spotify.com/track/...` zamiast starego smart-linku. Najpierw używa zapisanego mapowania, a brakujące linki są uzupełniane przez publiczny indeks ListenBrainz.
+- Dla utworów bez daty premiery RadioCharts stopniowo uzupełnia **najwcześniejszą znaną datę wydania** z MusicBrainz (`first-release-date`); przy dostępności ISRC wyszukiwanie używa go jako najmocniejszego identyfikatora.
+- Worker uzupełnia małe paczki co dwie godziny, priorytetowo Candidate/Watch, bez blokowania Dashboardu. W **Dane** jest też ręczny przycisk „Uzupełnij teraz”.
+- Watched pokazuje teraz datę premiery tak samo jak Dashboard: dokładną datę z katalogu, a gdy jej jeszcze nie ma — przybliżenie `~YYYY/MM` z pierwszego pojawienia się na notowaniach.
+- Bezpośrednie linki Spotify i nowe daty automatycznie unieważniają cache widoków po zapisie przez worker.
+- Spotify może być odtwarzane przez oficjalny embed/IFrame po uzyskaniu dokładnego track ID, ale Spotify nie udostępnia surowego audio do generowania własnego waveformu. Waveform można natomiast dołożyć do istniejącego 30-sekundowego preview, które korzysta z osobnego źródła audio.
+- Android: numer wydania zsynchronizowany do 1.2.26 / `versionCode = 49`.
+
 ## 1.2.25 — spójne odświeżanie Played
 
 - Web Schedule → Played odświeża teraz **cały blok live co 5 s** jako fragment Streamlita: karta TERAZ, zielony CURRENT, historia Played i dalszy Scheduled korzystają zawsze z tej samej świeżej rewizji bazy.
