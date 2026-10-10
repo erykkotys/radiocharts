@@ -1142,6 +1142,9 @@ def with_notes(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+SPOTIFY_TRACK_PREFIX = "https://open.spotify.com/track/"
+
+
 def spotify_search_url(artist: str, title: str) -> str:
     query = quote(f"{artist} {title}", safe="")
     return f"https://open.spotify.com/search/{query}"
@@ -1158,6 +1161,8 @@ def spotify_urls_for_frame(frame: pd.DataFrame) -> list[str]:
         direct = ""
         if pd.notna(sid):
             direct = str((lookup.get(int(sid)) or {}).get("spotify_url") or "").strip()
+            if direct and not direct.startswith(SPOTIFY_TRACK_PREFIX):
+                direct = ""
         out.append(direct or spotify_search_url(str(artist or ""), str(title or "")))
     return out
 
@@ -1297,140 +1302,56 @@ function(params) {
 
 GRID_CLICK_HANDLER = JsCode("""
 function(params) {
-  const field = params && params.colDef ? params.colDef.field : null;
-  const row = params && params.data ? params.data : {};
-  const host = window.top || window;
-  const ev = (params && params.event) ? params.event : {};
+  var field = params && params.colDef ? String(params.colDef.field || '') : '';
+  var row = params && params.data ? params.data : {};
+  var host = window.top || window;
+  var ev = params && params.event ? params.event : {};
+  var url = '';
 
   if (field === 'spotify') {
-    const url = String(row.spotify || params.value || '');
+    url = String(row.spotify || params.value || '');
     if (!url) return;
-    // Never return a DOM node from a streamlit-aggrid renderer: React treats
-    // HTMLAnchorElement as an invalid child (React error #31). Handle the
-    // navigation from the cell event instead. Modifier/middle clicks always
-    // open a new tab and immediately restore focus to RadioCharts so several
-    // Spotify results can be queued without leaving the table.
-    try {
-      const tab = host.open(url, '_blank', 'noopener,noreferrer');
-      if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
-        try { host.focus(); } catch(e) {}
-      }
-    } catch(e) {}
+    try { host.open(url, '_blank', 'noopener,noreferrer'); } catch (e) {}
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) {
+      try { host.focus(); } catch (e) {}
+    }
     return;
   }
 
   if (field === 'spotify_copy') {
-    const artist = String(row.artist || '');
-    const title = String(row.title || '');
-    if (!artist && !title) return;
-
-    var cached = String(row.spotify || '');
-    var isDirect = cached.indexOf('https://open.spotify.com/track/') === 0;
-
-    // Keep this handler deliberately conservative JavaScript. streamlit-aggrid
-    // parses JsCode before any click occurs; asynchronous function syntax used
-    // here in 1.2.26 made the whole grid fail with "Invalid left-hand side in
-    // assignment" on some component builds.
-    var openFallback = function(url) {
-      try { host.open(url, '_blank', 'noopener,noreferrer'); } catch(e) {}
-    };
-    var copyOrOpen = function(url) {
-      try {
-        if (host.navigator && host.navigator.clipboard && host.navigator.clipboard.writeText) {
-          var copied = host.navigator.clipboard.writeText(url);
-          if (copied && typeof copied.then === 'function') {
-            copied.then(function() {}, function() { openFallback(url); });
-          }
-          return;
-        }
-      } catch(e) {}
-      openFallback(url);
-    };
-    var shareDirect = function(url) {
-      if (!url) return;
-      try {
-        if (host.navigator && typeof host.navigator.share === 'function') {
-          var shared = host.navigator.share({
-            title: (artist && title) ? (artist + ' — ' + title) : (title || artist),
-            url: url
-          });
-          if (shared && typeof shared.catch === 'function') {
-            shared.catch(function(e) {
-              // Dismissing the native share sheet is not an error that should
-              // trigger another action. Other failures fall back to clipboard.
-              if (e && String(e.name || '') === 'AbortError') return;
-              copyOrOpen(url);
-            });
-          }
-          return;
-        }
-      } catch(e) {
-        if (e && String(e.name || '') === 'AbortError') return;
+    url = String(row.spotify_copy || row.spotify || params.value || '');
+    if (!url) return;
+    try {
+      if (host.navigator && typeof host.navigator.share === 'function') {
+        host.navigator.share({
+          title: String(row.artist || '') + ' - ' + String(row.title || ''),
+          url: url
+        });
+        return;
       }
-      copyOrOpen(url);
-    };
-
-    if (isDirect) {
-      shareDirect(cached);
-      return;
-    }
-
-    // Prefer our backend resolver. It uses the same ListenBrainz mapping as the
-    // metadata worker, avoids browser CORS surprises and returns a real
-    // open.spotify.com/track/... URL. If the API is protected/unavailable we
-    // still have a direct public ListenBrainz fallback below.
-    var apiUrl = host.location.protocol + '//' + host.location.hostname + ':8502/api/v1/resolve/spotify'
-      + '?artist=' + encodeURIComponent(artist) + '&title=' + encodeURIComponent(title)
-      + (row.song_id ? ('&song_id=' + encodeURIComponent(String(row.song_id))) : '');
-    var fallbackSearch = function() {
-      shareDirect(cached || ('https://open.spotify.com/search/' + encodeURIComponent((artist + ' ' + title).trim())));
-    };
-    var resolveViaListenBrainz = function() {
-      return fetch('https://labs.api.listenbrainz.org/spotify-id-from-metadata/json', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify([{artist_name: artist, track_name: title, release_name: ''}])
-      }).then(function(r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      }).then(function(payload) {
-        var id = '';
-        if (Array.isArray(payload)) {
-          for (var i = 0; i < payload.length; i += 1) {
-            var item = payload[i];
-            var ids = item && Array.isArray(item.spotify_track_ids) ? item.spotify_track_ids : [];
-            if (ids.length) { id = String(ids[0] || ''); break; }
-          }
-        }
-        if (id) return shareDirect('https://open.spotify.com/track/' + encodeURIComponent(id));
-        return fallbackSearch();
-      });
-    };
-
-    fetch(apiUrl).then(function(r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    }).then(function(payload) {
-      var url = String((payload || {}).url || '');
-      if (url.indexOf('https://open.spotify.com/track/') === 0) return shareDirect(url);
-      return resolveViaListenBrainz();
-    }).catch(function() {
-      resolveViaListenBrainz().catch(fallbackSearch);
-    });
+    } catch (e) {}
+    try {
+      if (host.navigator && host.navigator.clipboard && host.navigator.clipboard.writeText) {
+        host.navigator.clipboard.writeText(url);
+        return;
+      }
+    } catch (e) {}
+    try { host.open(url, '_blank', 'noopener,noreferrer'); } catch (e) {}
     return;
   }
 
-  if (field !== 'preview') return;
-  try {
-    if (typeof host.__rcPlayPreview === 'function') {
-      host.__rcPlayPreview({
-        songId: String(row.song_id || (row.artist || '') + '|' + (row.title || '')),
-        artist: String(row.artist || ''),
-        title: String(row.title || ''),
-        spotify: String(row.spotify || '')
-      });
-    }
-  } catch(e) {}
+  if (field === 'preview') {
+    try {
+      if (typeof host.__rcPlayPreview === 'function') {
+        host.__rcPlayPreview({
+          songId: String(row.song_id || (row.artist || '') + '|' + (row.title || '')),
+          artist: String(row.artist || ''),
+          title: String(row.title || ''),
+          spotify: String(row.spotify || '')
+        });
+      }
+    } catch (e) {}
+  }
 }
 """)
 

@@ -6,6 +6,7 @@ import radiocharts.music_metadata as mm
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "radiocharts" / "app.py").read_text(encoding="utf-8")
 API = (ROOT / "radiocharts" / "api.py").read_text(encoding="utf-8")
+MUSIC_METADATA = (ROOT / "radiocharts" / "music_metadata.py").read_text(encoding="utf-8")
 
 
 def _use_db(monkeypatch, path):
@@ -14,13 +15,13 @@ def _use_db(monkeypatch, path):
 
 
 def test_release_contract_and_spotify_share_no_songlink():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.27"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.28"
     gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 50' in gradle
-    assert 'versionName = "1.2.27"' in gradle
+    assert 'versionCode = 51' in gradle
+    assert 'versionName = "1.2.28"' in gradle
     assert "https://song.link/i/" not in APP
     assert "https://open.spotify.com/track/" in APP
-    assert "spotify-id-from-metadata/json" in APP
+    assert "spotify-id-from-metadata/json" in MUSIC_METADATA
     assert "/api/v1/resolve/spotify" in API
 
 

@@ -1,6 +1,8 @@
 from pathlib import Path
 
-APP = (Path(__file__).resolve().parents[1] / "radiocharts" / "app.py").read_text(encoding="utf-8")
+ROOT = Path(__file__).resolve().parents[1]
+APP = (ROOT / "radiocharts" / "app.py").read_text(encoding="utf-8")
+MUSIC_METADATA = (ROOT / "radiocharts" / "music_metadata.py").read_text(encoding="utf-8")
 
 
 def test_song_opens_on_double_click_title_or_artist_via_hidden_grid_event():
@@ -31,6 +33,6 @@ def test_airplay_backfill_is_centralized_in_data_view():
 def test_spotify_share_column_is_configured():
     assert '"spotify_copy", "Udostępnij"' in APP
     assert "https://open.spotify.com/track/" in APP
-    assert "spotify-id-from-metadata/json" in APP
+    assert "spotify-id-from-metadata/json" in MUSIC_METADATA
     assert "https://song.link/i/" not in APP
     assert "field === 'spotify_copy'" in APP

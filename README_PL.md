@@ -1,3 +1,10 @@
+## 1.2.28 — drugi hotfix Dashboardu / parser-safe click handler
+
+- Naprawa `Component Error: Invalid left-hand side in assignment`: handler kliknięć AG Grid został uproszczony do bardzo małego, konserwatywnego JavaScriptu bez `fetch`, Promise chain, `async/await`, `const` ani `let`.
+- `Spotify`, `Udostępnij` i `▶ 30s` nadal działają z jednego handlera; `Udostępnij` korzysta z bezpośredniego linku Spotify zapisanego przez worker ListenBrainz, a przy braku mapowania z istniejącego fallbacku wyszukiwania Spotify.
+- Rozwiązywanie brakujących bezpośrednich linków pozostaje po stronie backendowego workera/API zamiast wykonywać zapytania sieciowe wewnątrz `JsCode` AG Grid.
+- Android: numer wydania zsynchronizowany do 1.2.28 / `versionCode = 51`.
+
 ## 1.2.27 — hotfix Dashboardu / Udostępnij Spotify
 
 - Naprawiono błąd komponentu Dashboardu `Invalid left-hand side in assignment` w `streamlit-aggrid`.

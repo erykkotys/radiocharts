@@ -5,10 +5,10 @@ APP = (ROOT / "radiocharts" / "app.py").read_text(encoding="utf-8")
 
 
 def test_release_version_106():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.27"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.28"
     gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 50' in gradle
-    assert 'versionName = "1.2.27"' in gradle
+    assert 'versionCode = 51' in gradle
+    assert 'versionName = "1.2.28"' in gradle
 
 
 def test_status_editor_is_bounded_and_page_has_bottom_room():
@@ -33,21 +33,23 @@ def test_spotify_click_is_react_safe_and_supports_modifier_open():
     assert 'host.focus()' in APP
 
 
-def test_share_column_resolves_direct_spotify_track_url():
+def test_share_column_uses_cached_direct_spotify_track_url():
     assert '"spotify_copy", "Udostępnij"' in APP
-    assert "spotify-id-from-metadata/json" in APP
-    assert "spotify_track_ids" in APP
     assert "https://open.spotify.com/track/" in APP
     assert "navigator.share" in APP
     assert "navigator.clipboard.writeText" in APP
     assert "https://song.link/i/" not in APP
 
 
-def test_share_handler_avoids_async_await_aggrid_parser_regression():
+def test_share_handler_is_parser_safe_and_has_no_network_logic():
     start = APP.index('GRID_CLICK_HANDLER = JsCode("""')
     end = APP.index('GRID_DOUBLE_CLICK_HANDLER = JsCode("""', start)
     handler = APP[start:end]
     assert 'async (' not in handler
     assert 'await ' not in handler
-    assert 'var shareDirect = function(url)' in handler
-    assert '.catch(function(' in handler
+    assert 'fetch(' not in handler
+    assert '.then(' not in handler
+    assert '.catch(' not in handler
+    assert 'const ' not in handler
+    assert 'let ' not in handler
+    assert 'spotify-id-from-metadata' not in handler
