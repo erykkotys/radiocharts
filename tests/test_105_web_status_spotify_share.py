@@ -5,10 +5,10 @@ APP = (ROOT / "radiocharts" / "app.py").read_text(encoding="utf-8")
 
 
 def test_release_version_106():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.26"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.27"
     gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 49' in gradle
-    assert 'versionName = "1.2.26"' in gradle
+    assert 'versionCode = 50' in gradle
+    assert 'versionName = "1.2.27"' in gradle
 
 
 def test_status_editor_is_bounded_and_page_has_bottom_room():
@@ -41,3 +41,13 @@ def test_share_column_resolves_direct_spotify_track_url():
     assert "navigator.share" in APP
     assert "navigator.clipboard.writeText" in APP
     assert "https://song.link/i/" not in APP
+
+
+def test_share_handler_avoids_async_await_aggrid_parser_regression():
+    start = APP.index('GRID_CLICK_HANDLER = JsCode("""')
+    end = APP.index('GRID_DOUBLE_CLICK_HANDLER = JsCode("""', start)
+    handler = APP[start:end]
+    assert 'async (' not in handler
+    assert 'await ' not in handler
+    assert 'var shareDirect = function(url)' in handler
+    assert '.catch(function(' in handler

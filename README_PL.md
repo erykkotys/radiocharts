@@ -1,3 +1,10 @@
+## 1.2.27 — hotfix Dashboardu / Udostępnij Spotify
+
+- Naprawiono błąd komponentu Dashboardu `Invalid left-hand side in assignment` w `streamlit-aggrid`.
+- `Udostępnij` nadal rozwiązuje bezpośredni link `open.spotify.com/track/...`, ale handler nie używa już składni funkcji asynchronicznych, która potrafiła wywrócić parser `JsCode` zanim tabela została wyświetlona.
+- Zachowane fallbacki: natywne udostępnianie → schowek → otwarcie linku; przy braku dopasowania utworu wyszukiwanie Spotify.
+- Android: numer wydania zsynchronizowany do 1.2.27 / `versionCode = 50`.
+
 ## 1.2.26 — bezpośredni Spotify i uzupełnianie dat premier
 
 - **Udostępnij** rozwiązuje teraz utwór do bezpośredniego `open.spotify.com/track/...` zamiast starego smart-linku. Najpierw używa zapisanego mapowania, a brakujące linki są uzupełniane przez publiczny indeks ListenBrainz.

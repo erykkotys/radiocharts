@@ -16,7 +16,7 @@ from radiocharts.db import (
 MUSICBRAINZ_SEARCH_URL = "https://musicbrainz.org/ws/2/recording/"
 LB_SPOTIFY_BY_MBID_URL = "https://labs.api.listenbrainz.org/spotify-id-from-mbid/json"
 LB_SPOTIFY_BY_METADATA_URL = "https://labs.api.listenbrainz.org/spotify-id-from-metadata/json"
-USER_AGENT = "RadioCharts/1.2.26 (music metadata enrichment; non-commercial local research tool)"
+USER_AGENT = "RadioCharts/1.2.27 (music metadata enrichment; non-commercial local research tool)"
 
 
 @dataclass(frozen=True)

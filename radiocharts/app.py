@@ -1324,27 +1324,50 @@ function(params) {
     const title = String(row.title || '');
     if (!artist && !title) return;
 
-    const cached = String(row.spotify || '');
-    const isDirect = cached.indexOf('https://open.spotify.com/track/') === 0;
-    const shareDirect = async (url) => {
-      if (!url) return;
-      try {
-        if (host.navigator && typeof host.navigator.share === 'function') {
-          await host.navigator.share({title: (artist && title) ? (artist + ' — ' + title) : (title || artist), url: url});
-          return;
-        }
-      } catch(e) {
-        // AbortError means the user dismissed the native share sheet; do not
-        // unexpectedly open anything else in that case.
-        if (e && String(e.name || '') === 'AbortError') return;
-      }
+    var cached = String(row.spotify || '');
+    var isDirect = cached.indexOf('https://open.spotify.com/track/') === 0;
+
+    // Keep this handler deliberately conservative JavaScript. streamlit-aggrid
+    // parses JsCode before any click occurs; asynchronous function syntax used
+    // here in 1.2.26 made the whole grid fail with "Invalid left-hand side in
+    // assignment" on some component builds.
+    var openFallback = function(url) {
+      try { host.open(url, '_blank', 'noopener,noreferrer'); } catch(e) {}
+    };
+    var copyOrOpen = function(url) {
       try {
         if (host.navigator && host.navigator.clipboard && host.navigator.clipboard.writeText) {
-          await host.navigator.clipboard.writeText(url);
+          var copied = host.navigator.clipboard.writeText(url);
+          if (copied && typeof copied.then === 'function') {
+            copied.then(function() {}, function() { openFallback(url); });
+          }
           return;
         }
       } catch(e) {}
-      try { host.open(url, '_blank', 'noopener,noreferrer'); } catch(e) {}
+      openFallback(url);
+    };
+    var shareDirect = function(url) {
+      if (!url) return;
+      try {
+        if (host.navigator && typeof host.navigator.share === 'function') {
+          var shared = host.navigator.share({
+            title: (artist && title) ? (artist + ' — ' + title) : (title || artist),
+            url: url
+          });
+          if (shared && typeof shared.catch === 'function') {
+            shared.catch(function(e) {
+              // Dismissing the native share sheet is not an error that should
+              // trigger another action. Other failures fall back to clipboard.
+              if (e && String(e.name || '') === 'AbortError') return;
+              copyOrOpen(url);
+            });
+          }
+          return;
+        }
+      } catch(e) {
+        if (e && String(e.name || '') === 'AbortError') return;
+      }
+      copyOrOpen(url);
     };
 
     if (isDirect) {
@@ -1356,37 +1379,42 @@ function(params) {
     // metadata worker, avoids browser CORS surprises and returns a real
     // open.spotify.com/track/... URL. If the API is protected/unavailable we
     // still have a direct public ListenBrainz fallback below.
-    const apiUrl = host.location.protocol + '//' + host.location.hostname + ':8502/api/v1/resolve/spotify'
+    var apiUrl = host.location.protocol + '//' + host.location.hostname + ':8502/api/v1/resolve/spotify'
       + '?artist=' + encodeURIComponent(artist) + '&title=' + encodeURIComponent(title)
       + (row.song_id ? ('&song_id=' + encodeURIComponent(String(row.song_id))) : '');
-    const fallbackSearch = () => shareDirect(cached || ('https://open.spotify.com/search/' + encodeURIComponent((artist + ' ' + title).trim())));
-    const resolveViaListenBrainz = () => fetch('https://labs.api.listenbrainz.org/spotify-id-from-metadata/json', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify([{artist_name: artist, track_name: title, release_name: ''}])
-    }).then(r => {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    }).then(payload => {
-      let id = '';
-      if (Array.isArray(payload)) {
-        for (const item of payload) {
-          const ids = item && Array.isArray(item.spotify_track_ids) ? item.spotify_track_ids : [];
-          if (ids.length) { id = String(ids[0] || ''); break; }
+    var fallbackSearch = function() {
+      shareDirect(cached || ('https://open.spotify.com/search/' + encodeURIComponent((artist + ' ' + title).trim())));
+    };
+    var resolveViaListenBrainz = function() {
+      return fetch('https://labs.api.listenbrainz.org/spotify-id-from-metadata/json', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify([{artist_name: artist, track_name: title, release_name: ''}])
+      }).then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function(payload) {
+        var id = '';
+        if (Array.isArray(payload)) {
+          for (var i = 0; i < payload.length; i += 1) {
+            var item = payload[i];
+            var ids = item && Array.isArray(item.spotify_track_ids) ? item.spotify_track_ids : [];
+            if (ids.length) { id = String(ids[0] || ''); break; }
+          }
         }
-      }
-      if (id) return shareDirect('https://open.spotify.com/track/' + encodeURIComponent(id));
-      return fallbackSearch();
-    });
+        if (id) return shareDirect('https://open.spotify.com/track/' + encodeURIComponent(id));
+        return fallbackSearch();
+      });
+    };
 
-    fetch(apiUrl).then(r => {
+    fetch(apiUrl).then(function(r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
-    }).then(payload => {
-      const url = String((payload || {}).url || '');
+    }).then(function(payload) {
+      var url = String((payload || {}).url || '');
       if (url.indexOf('https://open.spotify.com/track/') === 0) return shareDirect(url);
       return resolveViaListenBrainz();
-    }).catch(() => {
+    }).catch(function() {
       resolveViaListenBrainz().catch(fallbackSearch);
     });
     return;
