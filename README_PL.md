@@ -1,3 +1,11 @@
+## 1.2.33 — ETM: poprawne duplikaty na granicy godzin Zetta2GO
+
+- GetLog nadal jest pobierany godzinami, ale Zetta2GO potrafi zwrócić ten sam ETM na granicy dwóch okien. Poprzednie okno często niesie kontekstową kopię pełnogodzinnego markera z `Asset.gap=0`, a właściwe okno godzinowe zwraca realny gap widoczny w Zetta Full.
+- Przy zduplikowanym ETM RadioCharts wybiera teraz kopię z **własnego clock-hour markera** i umieszcza ją w kolejności właśnie w tym oknie. Dzięki temu np. 06:00/07:00/11:00/12:00 nie są zerowane przez kontekst z poprzedniej godziny.
+- ETM-y 59:59/59:xx pozostają przy poprzedniej godzinie; poprawka nie zmienia deduplikacji zwykłych elementów audio, więc nie psuje semantyki 60+ minut.
+- Dodane testy regresyjne dla 06:00 `+01:26` vs kontekstowe `+00:00` oraz dla 05:59:59.
+- Android: wersja `1.2.33`, `versionCode = 56`.
+
 ## 1.2.32 — ETM zgodny z wartością widoczną w Zetta Full
 
 - Gap wyświetlany przy markerze ETM pochodzi najpierw z natywnego `GetLog → cell[7].gap` (`Asset.gap`) — dokładnie z pola, z którego Zetta2GO/Zetta Full renderuje wartość w wierszu markera.

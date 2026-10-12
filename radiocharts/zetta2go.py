@@ -309,9 +309,62 @@ class Zetta2GoClient:
         overrun notation).
         """
         d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
-        merged_rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        # GetLog hourly windows overlap at clock boundaries.  In particular,
+        # the previous-hour response can contain the next full-hour ETM as a
+        # context row with a placeholder ``asset.gap = 0``.  The same ETM is
+        # returned again by its own hour with the real gap shown by Zetta Full.
+        # Keep candidates until all 24 calls are done and resolve duplicate ETM
+        # ids in favour of the row returned by the ETM's own clock hour.
+        selected_rows: dict[str, tuple[int, int, int, dict[str, Any]]] = {}
+        serial = 0
+        duplicate_etm_boundaries_resolved = 0
         last_payload: dict[str, Any] = {}
+
+        def row_entry_type(row: dict[str, Any]) -> int:
+            cell = row.get("cell")
+            if not isinstance(cell, list) or not cell:
+                return 0
+            try:
+                return int(cell[0] or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        def row_air_hour(row: dict[str, Any]) -> int | None:
+            cell = row.get("cell")
+            if not isinstance(cell, list) or len(cell) <= 5:
+                return None
+            raw = str(cell[5] or "").strip()
+            if not raw:
+                return None
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).hour
+            except ValueError:
+                return None
+
+        def prefer_candidate(
+            existing: tuple[int, int, int, dict[str, Any]],
+            candidate: tuple[int, int, int, dict[str, Any]],
+        ) -> bool:
+            existing_hour, _existing_index, _existing_serial, existing_row = existing
+            candidate_hour, _candidate_index, _candidate_serial, candidate_row = candidate
+            # Only ETMs need boundary replacement.  For audio/helper rows keep
+            # the established first-seen behaviour because 60+ minute schedule
+            # semantics can legitimately place an AirTime in the next wall hour.
+            if row_entry_type(existing_row) != 15 or row_entry_type(candidate_row) != 15:
+                return False
+            existing_air_hour = row_air_hour(existing_row)
+            candidate_air_hour = row_air_hour(candidate_row)
+            existing_is_home = existing_air_hour is not None and existing_air_hour == existing_hour
+            candidate_is_home = candidate_air_hour is not None and candidate_air_hour == candidate_hour
+            if existing_is_home != candidate_is_home:
+                return candidate_is_home
+            # If both copies come from equally plausible windows, prefer the one
+            # carrying an explicit native Asset.gap over a context copy without it.
+            def has_asset_gap(row: dict[str, Any]) -> bool:
+                cell = row.get("cell")
+                asset = cell[7] if isinstance(cell, list) and len(cell) > 7 and isinstance(cell[7], dict) else {}
+                return asset.get("gap") not in (None, "")
+            return has_asset_gap(candidate_row) and not has_asset_gap(existing_row)
 
         # One extra predecessor window lets RadioCharts restore the real 00:00
         # carry from the previous day's final RESET. Those rows are metadata
@@ -345,10 +398,23 @@ class Zetta2GoClient:
                     key = f"hour:{hour}:row:{index}:" + json.dumps(
                         row.get("cell"), ensure_ascii=False, sort_keys=True, default=str
                     )
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged_rows.append(row)
+                serial += 1
+                candidate = (hour, index, serial, row)
+                existing = selected_rows.get(key)
+                if existing is None:
+                    selected_rows[key] = candidate
+                elif prefer_candidate(existing, candidate):
+                    selected_rows[key] = candidate
+                    duplicate_etm_boundaries_resolved += 1
+
+        # Sorting by the selected source window is important: when a boundary
+        # ETM is replaced by the copy from its own hour, it must also move after
+        # that hour's TOH row so parse_zetta2go_log assigns the correct schedule
+        # group instead of inheriting the previous hour.
+        merged_rows = [
+            item[3]
+            for item in sorted(selected_rows.values(), key=lambda item: (item[0], item[1], item[2]))
+        ]
 
         return {
             "total": 1,
@@ -357,6 +423,7 @@ class Zetta2GoClient:
             "rows": merged_rows,
             "userdata": last_payload.get("userdata") if isinstance(last_payload, dict) else None,
             "radiocharts_hourly_fetch": True,
+            "radiocharts_boundary_etm_duplicates_resolved": duplicate_etm_boundaries_resolved,
             "radiocharts_previous_hour_rows": previous_hour_rows,
         }
 

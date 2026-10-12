@@ -87,6 +87,7 @@ def test_1219_emaus_ui_contract():
     assert "min(3, max(1, math.ceil(len(cards) / 12)))" in app
     assert 'key="our_radio_etm_ignore_resets"' not in app
     assert "def _render_local_etm_page" in app and "_render_local_etm_gap_summary(filtered)" in app
+    assert '"Live Zetta2GO"' in app and '"Scheduled / cutoff"' in app and 'our_radio_etm_source' in app
     assert "GetLog → cell[7].gap" in app and "CalculatedTimes" in app
     assert "Top of the hour" in app and "#ff79c6" in app
     assert "def _render_local_timeline_cards(rows: list[dict], kind: str, *, anchor_prefix: str)" in app

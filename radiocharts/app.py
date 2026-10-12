@@ -3481,12 +3481,14 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         )
 
 def _render_local_etm_page(revision: str) -> None:
-    dates = cached_local_dates(revision, "schedule")
+    schedule_dates = cached_local_dates(revision, "schedule")
+    played_dates = cached_local_dates(revision, "played")
+    dates = sorted(set(schedule_dates) | set(played_dates))
     if not dates:
-        st.info("Brak Scheduled — nie ma danych ETM.")
+        st.info("Brak danych Zetta2GO — nie ma danych ETM.")
         return
     default_date = _local_default_date(dates, "schedule") or date.fromisoformat(dates[-1])
-    c1, c2 = st.columns([1.0, 1.2], vertical_alignment="bottom")
+    c1, c2, c3 = st.columns([1.0, 1.2, 1.35], vertical_alignment="bottom")
     selected_date = c1.selectbox(
         "Dzień",
         dates,
@@ -3501,7 +3503,17 @@ def _render_local_etm_page(revision: str) -> None:
         key="our_radio_etm_marker_filter",
     ) or "Hard + Soft"
 
-    rows = [dict(row) for row in cached_local_day_events(revision, "schedule", selected_date)]
+    source_options: list[str] = []
+    if selected_date in played_dates:
+        source_options.append("Live Zetta2GO")
+    if selected_date in schedule_dates:
+        source_options.append("Scheduled / cutoff")
+    default_source = "Live Zetta2GO" if selected_date == date.today().isoformat() and "Live Zetta2GO" in source_options else source_options[0]
+    source_label = c3.selectbox(
+        "Źródło", source_options, index=source_options.index(default_source), key="our_radio_etm_source"
+    )
+    source_kind = "played" if source_label == "Live Zetta2GO" else "schedule"
+    rows = [dict(row) for row in cached_local_day_events(revision, source_kind, selected_date)]
     allowed = {"Hard", "Soft"} if marker_filter == "Hard + Soft" else {marker_filter}
     filtered = [
         row for row in rows
@@ -3509,8 +3521,9 @@ def _render_local_etm_page(revision: str) -> None:
     ]
     _render_local_etm_gap_summary(filtered)
     st.caption(
-        "Źródło ETM jak w wierszu Zetta Full: GetLog → cell[7].gap (Asset.gap). "
+        f"Widok: {source_label}. Źródło ETM jak w wierszu Zetta Full: GetLog → cell[7].gap (Asset.gap). "
         "Gdy Asset.gap nie istnieje, używamy wyłącznie natywnego fallbacku z cell[16] / CalculatedTimes. "
+        "Dla bieżącego dnia domyślny jest Live Zetta2GO, żeby diagnostyka pokazywała aktualny log, a nie stary cutoff. "
         "Nie ma rekonstrukcji pełnej godziny ani carry; brak wartości w Zetta = —."
     )
 

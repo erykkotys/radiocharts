@@ -471,3 +471,94 @@ def test_1232_ui_matches_native_zetta_marker_gap_without_reconstruction():
     assert "CalculatedTimes.HitETMGap" in local or "HitETMGap" in local
     assert "GapToETM" in local
     assert "OriginalGap" in local
+
+
+def test_1233_hourly_getlog_prefers_etm_copy_from_its_own_hour(monkeypatch):
+    from datetime import date as dt_date
+    from radiocharts.zetta2go import Zetta2GoClient, Zetta2GoSettings
+
+    cfg = Zetta2GoSettings(
+        base_url="https://example.invalid/Zetta2GO", station_id="station",
+        username="u", password="p", verify_tls=False, timeout=1,
+        schedule_horizon_days=14, live_enabled=True, schedule_enabled=True,
+    )
+    client = Zetta2GoClient(cfg)
+
+    def fake_range(start, end):
+        day = start.date().isoformat()
+        hour = start.hour
+        if day == "2026-10-12":
+            return _payload(_toh_row(at="2026-10-12T23:00:00.0000000", uid="prev-toh"))
+        rows = [_toh_row(at=f"2026-10-13T{hour:02d}:00:00.0000000", uid=f"toh-{hour:02d}")]
+        if hour == 5:
+            # Zetta2GO includes the next full-hour ETM as context in the
+            # previous window; this copy has the placeholder gap seen in the
+            # broken RadioCharts screenshots.
+            rows.append(_etm_row(
+                seq=99, at="2026-10-13T06:00:00.0000000+02:00",
+                uid="hard-0600", etm_type="Hard",
+                calculated={"GapToETM": 0}, asset_gap=0,
+            ))
+        if hour == 6:
+            # The ETM's own-hour response carries the real inline gap that
+            # Zetta Full displays (+01:26).
+            rows.append(_etm_row(
+                seq=1, at="2026-10-13T06:00:00.0000000+02:00",
+                uid="hard-0600", etm_type="Hard",
+                calculated={"GapToETM": 0}, asset_gap=86_000,
+            ))
+            rows.append(_etm_row(
+                seq=2, at="2026-10-13T06:30:00.0000000+02:00",
+                uid="hard-0630", etm_type="Hard",
+                calculated={"GapToETM": 0}, asset_gap=143_000,
+            ))
+        return _payload(*rows)
+
+    monkeypatch.setattr(client, "get_log_range", fake_range)
+    payload = client.get_log(dt_date(2026, 10, 13))
+    assert payload["radiocharts_boundary_etm_duplicates_resolved"] == 1
+    parsed = parse_zetta2go_log(payload, "2026-10-13", kind="schedule")
+    by_id = {row["external_id"]: row for row in parsed}
+    assert by_id["hard-0600"]["etm_delta_raw"] == "+01:26"
+    assert by_id["hard-0600"]["schedule_hour"] == 6
+    assert by_id["hard-0600"]["payload"]["zetta_gap_source"] == "Asset.gap"
+    assert by_id["hard-0630"]["etm_delta_raw"] == "+02:23"
+
+
+def test_1233_hourly_getlog_keeps_previous_hour_etm_when_duplicate_leaks_forward(monkeypatch):
+    from datetime import date as dt_date
+    from radiocharts.zetta2go import Zetta2GoClient, Zetta2GoSettings
+
+    cfg = Zetta2GoSettings(
+        base_url="https://example.invalid/Zetta2GO", station_id="station",
+        username="u", password="p", verify_tls=False, timeout=1,
+        schedule_horizon_days=14, live_enabled=True, schedule_enabled=True,
+    )
+    client = Zetta2GoClient(cfg)
+
+    def fake_range(start, end):
+        day = start.date().isoformat()
+        hour = start.hour
+        if day == "2026-10-12":
+            return _payload()
+        rows = [_toh_row(at=f"2026-10-13T{hour:02d}:00:00.0000000", uid=f"toh-{hour:02d}")]
+        if hour == 5:
+            rows.append(_etm_row(
+                seq=1, at="2026-10-13T05:59:59.0000000+02:00",
+                uid="reset-055959", etm_type="Reset", asset_gap=87_000,
+            ))
+        if hour == 6:
+            # Context copy in the following call must not replace the row from
+            # its real 05:xx window.
+            rows.append(_etm_row(
+                seq=0, at="2026-10-13T05:59:59.0000000+02:00",
+                uid="reset-055959", etm_type="Reset", asset_gap=0,
+            ))
+        return _payload(*rows)
+
+    monkeypatch.setattr(client, "get_log_range", fake_range)
+    payload = client.get_log(dt_date(2026, 10, 13))
+    parsed = parse_zetta2go_log(payload, "2026-10-13", kind="schedule")
+    reset = next(row for row in parsed if row["external_id"] == "reset-055959")
+    assert reset["etm_delta_raw"] == "+01:27"
+    assert reset["schedule_hour"] == 5
