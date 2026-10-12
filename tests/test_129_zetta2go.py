@@ -364,7 +364,7 @@ def test_zetta_etm_calculated_times_field_priority_and_fallbacks():
     assert by_id["reset-generic"]["payload"]["zetta_gap_source"] == "CalculatedTimes.gap_time"
 
 
-def test_zetta_etm_missing_calculated_gap_is_not_guessed_from_asset_or_timeline():
+def test_zetta_etm_prefers_native_asset_gap_over_calculated_times_and_timeline():
     payload = _payload(
         _toh_row(at="2026-10-04T15:00:00.0000000", uid="toh-15"),
         _asset_row(
@@ -380,10 +380,30 @@ def test_zetta_etm_missing_calculated_gap_is_not_guessed_from_asset_or_timeline(
     )
     rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     hard = next(r for r in rows if r["external_id"] == "hard-missing")
-    assert hard["payload"]["zetta_gap_ms"] is None
-    assert hard["payload"]["zetta_gap_source"] == ""
+    assert hard["payload"]["zetta_gap_ms"] == 16_000
+    assert hard["payload"]["zetta_gap_source"] == "Asset.gap"
     assert hard["payload"]["zetta_asset_gap_ms"] == 16_000
-    assert hard["etm_delta_raw"] == ""
+    assert hard["etm_delta_raw"] == "+00:16"
+
+
+def test_1232_zetta_full_inline_gap_wins_over_calculated_times():
+    payload = _payload(
+        _etm_row(
+            seq=1, at="2026-10-04T06:00:00.0000000+02:00", uid="hard-0600", etm_type="Hard",
+            calculated={"GapToETM": 0, "OriginalGap": None}, asset_gap=86_000,
+        ),
+        _etm_row(
+            seq=2, at="2026-10-04T06:29:00.0000000+02:00", uid="hit-0629", etm_type="Hit",
+            calculated={"HitETMGap": 44_100, "GapToETM": 41_000}, asset_gap=44_000,
+        ),
+    )
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
+    by_id = {row["external_id"]: row for row in rows}
+    assert by_id["hard-0600"]["payload"]["zetta_gap_ms"] == 86_000
+    assert by_id["hard-0600"]["payload"]["zetta_gap_source"] == "Asset.gap"
+    assert by_id["hard-0600"]["etm_delta_raw"] == "+01:26"
+    assert by_id["hit-0629"]["payload"]["zetta_gap_ms"] == 44_000
+    assert by_id["hit-0629"]["payload"]["zetta_gap_source"] == "Asset.gap"
 
 
 def test_zetta_etm_gap_timespan_and_numeric_string_are_normalized_without_derivation():
@@ -440,13 +460,14 @@ def test_future_waiting_rows_have_pending_ui_contract():
     assert '("Zagrane / w trakcie",totals["played_actual"])' in app
 
 
-def test_1230_ui_uses_native_calculated_times_without_reset_or_hour_reconstruction():
+def test_1232_ui_matches_native_zetta_marker_gap_without_reconstruction():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
     local = (ROOT / "radiocharts/local_station.py").read_text(encoding="utf-8")
     assert 'key="our_radio_etm_ignore_resets"' not in app
     assert "_local_apply_hour_boundary_gaps" not in app
     assert "_local_apply_ignore_reset_gaps" not in app
-    assert "GetLog → cell[16]" in app
+    assert "GetLog → cell[7].gap" in app
+    assert "Asset.gap" in app and "_zetta_marker_gap" in local
     assert "CalculatedTimes.HitETMGap" in local or "HitETMGap" in local
     assert "GapToETM" in local
     assert "OriginalGap" in local

@@ -2645,14 +2645,14 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
     max_late = fmt_seconds(max(positives)) if positives else "—"
     max_early = fmt_seconds(min(negatives)) if negatives else "—"
     if direct_zetta:
-        st.markdown("#### ETM Hard / Soft — CalculatedTimes Zetta2GO")
+        st.markdown("#### ETM Hard / Soft — natywny gap Zetta2GO / Zetta Full")
         st.caption(
             f"{len(markers)} markerów · ≠ 0: {nonzero} · brak wartości: {missing} · "
             f"max +: {max_late} · max −: {max_early}. "
-            "RadioCharts pokazuje natywny gap z GetLog → cell[16] (CalculatedTimes): "
-            "HIT preferuje HitETMGap, potem GapToETM; pozostałe ETM preferują GapToETM. "
-            "OriginalGap i starsze pola Gap/GapTime są tylko fallbackiem. Jeśli Zetta nie poda wartości, jest —; "
-            "nie liczymy carry, nie przenosimy RESET-ów i nie rekonstruujemy gapu z AirTime/runtime."
+            "RadioCharts pokazuje tę samą natywną wartość, którą Zetta Full rysuje przy markerze: "
+            "GetLog → cell[7].gap (Asset.gap). Jeśli marker nie ma gap, fallbackiem jest cell[16] / "
+            "CalculatedTimes: HIT → HitETMGap → GapToETM; pozostałe ETM → GapToETM, potem OriginalGap/generic. "
+            "Jeśli Zetta nie poda żadnej wartości, jest —; nie liczymy carry i nie rekonstruujemy gapu z AirTime/runtime."
         )
     else:
         st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
@@ -3509,9 +3509,9 @@ def _render_local_etm_page(revision: str) -> None:
     ]
     _render_local_etm_gap_summary(filtered)
     st.caption(
-        "Źródło ETM w Zetta2GO: GetLog → cell[16] / CalculatedTimes. "
-        "Nie ma już rekonstrukcji pełnej godziny, carry z poprzedniej godziny ani trybu „Ignoruj resety”. "
-        "Brak wartości w Zetta = —."
+        "Źródło ETM jak w wierszu Zetta Full: GetLog → cell[7].gap (Asset.gap). "
+        "Gdy Asset.gap nie istnieje, używamy wyłącznie natywnego fallbacku z cell[16] / CalculatedTimes. "
+        "Nie ma rekonstrukcji pełnej godziny ani carry; brak wartości w Zetta = —."
     )
 
     diag = []
@@ -3525,12 +3525,14 @@ def _render_local_etm_page(revision: str) -> None:
             "Czas": str(row.get("air_time_raw") or "")[:8],
             "ETM": _local_etm_kind(row).upper(),
             "Gap": _local_normalize_gap(str(row.get("etm_delta_raw") or "")) or "—",
-            "Źródło": str(row.get("zetta_gap_source") or "CalculatedTimes: brak"),
+            "Źródło": str(row.get("zetta_gap_source") or "Zetta: brak"),
+            "Asset.gap": row.get("payload", {}).get("zetta_asset_gap_ms") if isinstance(row.get("payload"), dict) else None,
+            "Asset.ogap": row.get("payload", {}).get("zetta_asset_original_gap_ms") if isinstance(row.get("payload"), dict) else None,
             "HitETMGap": calculated.get("HitETMGap"),
             "GapToETM": calculated.get("GapToETM"),
             "OriginalGap": calculated.get("OriginalGap"),
         })
-    with st.expander("Diagnostyka ETM — surowe CalculatedTimes", expanded=False):
+    with st.expander("Diagnostyka ETM — Asset.gap + CalculatedTimes", expanded=False):
         if diag:
             st.dataframe(pd.DataFrame(diag), hide_index=True, use_container_width=True, height=min(520, 42+32*len(diag)))
         else:

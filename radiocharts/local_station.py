@@ -614,11 +614,12 @@ def _zetta_calculated_field(calculated: dict[str, Any], *names: str) -> tuple[ob
 
 
 def _zetta_native_etm_gap(calculated: dict[str, Any], etm_type: str) -> tuple[float | None, str]:
-    """Return the ETM gap directly from GetLog ``cell[16]`` CalculatedTimes.
+    """Return a native ETM fallback from GetLog ``cell[16]`` CalculatedTimes.
 
-    HIT markers prefer HitETMGap and then GapToETM. Other ETMs prefer
-    GapToETM. OriginalGap and generic legacy field names are compatibility
-    fallbacks. Asset.gap, airtimes and runtimes are deliberately *not* used.
+    Zetta Full does *not* render the inline ETM gap from this object; it renders
+    the marker asset's ``gap`` field from ``cell[7]``. CalculatedTimes remains
+    useful as a native fallback when the marker asset does not contain ``gap``.
+    HIT markers prefer HitETMGap and then GapToETM; other ETMs prefer GapToETM.
     """
     kind = str(etm_type or "").strip().casefold()
     if kind == "hit":
@@ -641,7 +642,29 @@ def _zetta_native_etm_gap(calculated: dict[str, Any], etm_type: str) -> tuple[fl
     return None, ""
 
 
-def _zetta_original_gap_ms(calculated: dict[str, Any]) -> float | None:
+def _zetta_marker_gap(asset: dict[str, Any], calculated: dict[str, Any], etm_type: str) -> tuple[float | None, str]:
+    """Return the same native gap that Zetta Full shows on an ETM row.
+
+    The Zetta2GO log renderer uses the ETM asset's ``gap`` (GetLog cell[7])
+    for the inline value. Only when that field is absent do we fall back to the
+    native CalculatedTimes fields from cell[16]. No airtime/runtime derivation
+    is performed here.
+    """
+    if isinstance(asset, dict):
+        value = _zetta_gap_value_ms(asset.get("gap"))
+        if value is not None:
+            return value, "Asset.gap"
+    fallback, field = _zetta_native_etm_gap(calculated, etm_type)
+    if fallback is not None:
+        return fallback, f"CalculatedTimes.{field}" if field else "CalculatedTimes"
+    return None, ""
+
+
+def _zetta_original_gap_ms(calculated: dict[str, Any], asset: dict[str, Any] | None = None) -> float | None:
+    if isinstance(asset, dict):
+        value = _zetta_gap_value_ms(asset.get("ogap"))
+        if value is not None:
+            return value
     raw, _name = _zetta_calculated_field(calculated, "OriginalGap")
     return _zetta_gap_value_ms(raw)
 
@@ -740,7 +763,8 @@ def parse_zetta2go_log(
             minute = actual.minute if actual is not None else 0
             second = actual.second if actual is not None else 0
             title = f"ETM_{minute:02d}:{second:02d}_{etm_type}"
-            gap_ms, gap_field = _zetta_native_etm_gap(calculated, etm_type)
+            gap_ms, gap_source = _zetta_marker_gap(asset, calculated, etm_type)
+            gap_field = gap_source.removeprefix("CalculatedTimes.") if gap_source.startswith("CalculatedTimes.") else ""
             gap_seconds = gap_ms / 1000.0 if gap_ms is not None else None
             event_type = "etm"
             artist = ""
@@ -800,11 +824,11 @@ def parse_zetta2go_log(
             "calculated_times": calculated,
             "zetta_gap_ms": gap_ms if entry_type == 15 else None,
             "zetta_gap_native_ms": gap_ms if entry_type == 15 else None,
-            "zetta_gap_source": (f"CalculatedTimes.{gap_field}" if entry_type == 15 and gap_field else ""),
+            "zetta_gap_source": gap_source if entry_type == 15 else "",
             "zetta_gap_field": gap_field if entry_type == 15 else "",
-            "zetta_original_gap_ms": _zetta_original_gap_ms(calculated) if entry_type == 15 else None,
-            # Keep Asset.gap/ogap only for diagnostics. They are never used as
-            # a displayed ETM gap: RadioCharts follows GetLog CalculatedTimes.
+            "zetta_original_gap_ms": _zetta_original_gap_ms(calculated, asset) if entry_type == 15 else None,
+            # Keep both native representations. Zetta Full renders Asset.gap on
+            # the ETM row; CalculatedTimes is retained for fallback/diagnostics.
             "zetta_asset_gap_ms": asset.get("gap") if entry_type == 15 else None,
             "zetta_asset_original_gap_ms": asset.get("ogap") if entry_type == 15 else None,
             **(_zetta_asset_metadata(asset) if entry_type == 106 else {}),
@@ -1559,18 +1583,28 @@ def events_for_day(
             item["zetta_skip"] = bool(meta.get("skip"))
             item["zetta_fixed"] = bool(meta.get("fixed"))
             item["zetta_valid_for_playback"] = meta.get("valid_for_playback")
-            # Re-read the native ETM value from stored cell[16]/CalculatedTimes
-            # on every display. This also fixes snapshots imported by older
-            # RadioCharts versions, whose payload already contains CalculatedTimes
-            # but may have stored a guessed hour-boundary carry in zetta_gap_ms.
+            # Re-read the native ETM value on every display. Zetta Full renders
+            # GetLog cell[7].gap in the ETM row, so prefer the already preserved
+            # marker asset gap; only fall back to cell[16]/CalculatedTimes. This
+            # also repairs snapshots imported by older RadioCharts versions.
             calculated = meta.get("calculated_times") if isinstance(meta.get("calculated_times"), dict) else {}
             if item.get("event_type") == "etm":
-                native_gap_ms, native_gap_field = _zetta_native_etm_gap(calculated, str(meta.get("etm_type") or ""))
+                marker_asset = {
+                    "gap": meta.get("zetta_asset_gap_ms"),
+                    "ogap": meta.get("zetta_asset_original_gap_ms"),
+                }
+                native_gap_ms, native_gap_source = _zetta_marker_gap(
+                    marker_asset, calculated, str(meta.get("etm_type") or "")
+                )
+                native_gap_field = (
+                    native_gap_source.removeprefix("CalculatedTimes.")
+                    if native_gap_source.startswith("CalculatedTimes.") else ""
+                )
                 item["zetta_gap_ms"] = native_gap_ms
                 item["zetta_gap_native_ms"] = native_gap_ms
-                item["zetta_gap_source"] = f"CalculatedTimes.{native_gap_field}" if native_gap_field else "CalculatedTimes: brak"
+                item["zetta_gap_source"] = native_gap_source or "Zetta: brak"
                 item["zetta_gap_field"] = native_gap_field
-                item["zetta_original_gap_ms"] = _zetta_original_gap_ms(calculated)
+                item["zetta_original_gap_ms"] = _zetta_original_gap_ms(calculated, marker_asset)
             else:
                 item["zetta_gap_ms"] = None
                 item["zetta_gap_native_ms"] = None

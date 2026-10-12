@@ -1,3 +1,10 @@
+## 1.2.32 — ETM zgodny z wartością widoczną w Zetta Full
+
+- Gap wyświetlany przy markerze ETM pochodzi najpierw z natywnego `GetLog → cell[7].gap` (`Asset.gap`) — dokładnie z pola, z którego Zetta2GO/Zetta Full renderuje wartość w wierszu markera.
+- `cell[16] / CalculatedTimes` pozostaje natywnym fallbackiem, gdy `Asset.gap` nie istnieje: HIT `HitETMGap → GapToETM`, pozostałe `GapToETM`, potem `OriginalGap`/pola legacy.
+- Brak lokalnego liczenia, carry i rekonstrukcji z czasu emisji. Diagnostyka pokazuje obok siebie `Asset.gap`, `Asset.ogap` i pola `CalculatedTimes`.
+- Android: wersja `1.2.32`, `versionCode = 55`.
+
 ## 1.2.31 — poprawka renderowania Scheduled/Played/Porównania
 
 - naprawiono `NameError: runtime_override` w rendererze Scheduled/Played; zmienne `runtime_override` i `runtime_delta` są używane wyłącznie w rendererze Porównania, gdzie faktycznie należą;
