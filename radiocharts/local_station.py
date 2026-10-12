@@ -146,8 +146,11 @@ def _parse_time(raw: str) -> tuple[float | None, bool]:
     if not m:
         return None, bool(value)
     hour, minute, second = int(m.group(1)), int(m.group(2)), float(m.group(3))
-    if hour < 0 or second >= 60:
+    if hour < 0 or second >= 120:
         return None, True
+    # Some reconciled logs express an exact minute boundary as 59:60.0.
+    # Treat that as a valid clock value instead of an anomaly; the raw label is
+    # kept verbatim for display, while sorting/comparison uses normalized seconds.
     # With GSelector's "60+ minutes/hour" option a value such as 08:62:47.3
     # is deliberate: the 08 hour is 2:47.3 over.  Keep it sortable, but do
     # NOT mark the normal 60+ representation as an anomaly.  Values in the
@@ -165,7 +168,18 @@ def _schedule_hour(raw: str) -> int | None:
     if not m:
         return None
     hour = int(m.group(1))
-    return hour if 0 <= hour <= 23 else None
+    minute = int(m.group(2))
+    second = float(m.group(3))
+    if not 0 <= hour <= 23:
+        return None
+    # HH:59:60.0 is just the next-hour boundary written without carrying the
+    # seconds. Normalize only this seconds-overflow form. Deliberate 60+ minute
+    # scheduling (08:62:47 etc.) must stay assigned to the original hour.
+    if minute < 60 and second >= 60:
+        carried_hour = hour + int((minute * 60.0 + second) // 3600.0)
+        if 0 <= carried_hour <= 23:
+            return carried_hour
+    return hour
 
 
 def _gap_overrun_seconds(raw: str) -> float | None:
@@ -2143,6 +2157,19 @@ def _format_signed_delta(seconds: float | None) -> str:
     return f"{sign}{minutes}:{secs:02d}"
 
 
+ZETTA_SKIP_EDIT_CODES = {102, 202, 221, 506}
+
+
+def _zetta_row_is_skipped(row: dict[str, Any]) -> bool:
+    if bool(row.get("zetta_skip")):
+        return True
+    try:
+        edit_code = int(row.get("zetta_edit_code") or row.get("edit_code_int") or 0)
+    except (TypeError, ValueError):
+        edit_code = 0
+    return edit_code in ZETTA_SKIP_EDIT_CODES
+
+
 def _fade_info(scheduled: dict[str, Any], played: dict[str, Any]) -> tuple[bool, float | None, str]:
     """Detect only a *meaningful* early cut of a song.
 
@@ -2219,6 +2246,22 @@ def _comparison_display_pairs(
     get a ghost copy on Scheduled. Added events are inserted close to their
     real Played position where possible.
     """
+    # When order really changed, identity-aligning rows makes the right column
+    # look as if nothing moved (Miley remains opposite Miley, Robbie opposite
+    # Robbie). In that case preserve the real sequence independently on both
+    # sides; the per-side status markers explain which rows moved.
+    has_reorder = any("kolejność" in str(value).casefold() for value in [*schedule_status.values(), *played_status.values()])
+    if has_reorder:
+        size = max(len(scheduled), len(played))
+        return [
+            {
+                "status": "Kolejność",
+                "scheduled_row": scheduled[idx] if idx < len(scheduled) else None,
+                "played_row": played[idx] if idx < len(played) else None,
+            }
+            for idx in range(size)
+        ]
+
     play_pos = {token: idx for idx, token in enumerate(play_tokens)}
     emitted_added: set[tuple[Any, int]] = set()
     pairs: list[dict[str, Any]] = []
@@ -2312,9 +2355,10 @@ def _compare_hour_rows(
         sched = sched_lookup[token]
         sid = int(sched["id"])
         if token not in common:
-            schedule_status[sid] = "Niezagrane"
+            missing_status = "Wyskipowane" if _zetta_row_is_skipped(sched) else "Niezagrane"
+            schedule_status[sid] = missing_status
             rows.append({
-                "status": "Niezagrane",
+                "status": missing_status,
                 "event_type": sched["event_type"],
                 "category": sched["category"],
                 "artist": sched["artist"],
@@ -2364,9 +2408,9 @@ def _compare_hour_rows(
 
         status_note = fade_note
         if zetta_status in ZETTA_NONPLAYED_STATUS_CODES:
-            status = "Niezagrane"
+            status = "Wyskipowane" if _zetta_row_is_skipped(played_row) else "Niezagrane"
             reason = str(played_row.get("zetta_edit_name") or played_row.get("zetta_status") or "").strip()
-            status_note = reason or "Zetta oznaczyła element jako niezagrany."
+            status_note = reason or ("Element został celowo wyskipowany." if status == "Wyskipowane" else "Zetta oznaczyła element jako niezagrany.")
         elif changed:
             status = "Zmieniony + kolejność" if moved else "Zmieniony"
             reason = str(played_row.get("zetta_edit_name") or "").strip()
@@ -2439,7 +2483,7 @@ def _compare_hour_rows(
         })
 
     counts = Counter(row["status"] for row in rows)
-    matched = sum(1 for row in rows if row["status"] not in {"Niezagrane", "Dodane"})
+    matched = sum(1 for row in rows if row["status"] not in {"Niezagrane", "Wyskipowane", "Dodane"})
     reordered_count = sum(1 for row in rows if "kolejność" in row["status"].casefold())
     faded_count = sum(1 for row in rows if "ścięty" in row["status"].casefold())
     changed_count = sum(1 for row in rows if "zmieniony" in row["status"].casefold())
@@ -2448,6 +2492,20 @@ def _compare_hour_rows(
         scheduled, played, sched_tokens, play_tokens, sched_lookup, play_lookup, common,
         schedule_status, played_status,
     )
+    detail_by_scheduled = {int(row["scheduled_id"]): row for row in rows if row.get("scheduled_id") is not None}
+    detail_by_played = {int(row["played_id"]): row for row in rows if row.get("played_id") is not None}
+    for pair in display_pairs:
+        srow = pair.get("scheduled_row") if isinstance(pair.get("scheduled_row"), dict) else None
+        prow = pair.get("played_row") if isinstance(pair.get("played_row"), dict) else None
+        sid = int(srow["id"]) if srow is not None and srow.get("id") is not None else None
+        pid = int(prow["id"]) if prow is not None and prow.get("id") is not None else None
+        pair["scheduled_status"] = schedule_status.get(sid, "OK") if sid is not None else ""
+        pair["played_status"] = played_status.get(pid, "OK") if pid is not None else ""
+        detail = detail_by_played.get(pid) if pid is not None else None
+        if detail is None and sid is not None:
+            detail = detail_by_scheduled.get(sid)
+        pair["runtime_cut"] = str((detail or {}).get("runtime_cut") or "")
+        pair["runtime_cut_seconds"] = (detail or {}).get("runtime_cut_seconds")
 
     if played and all(str(row.get("source_system") or "") == "zetta2go" for row in played):
         played_actual = sum(
@@ -2465,7 +2523,7 @@ def _compare_hour_rows(
         "played": len(played),
         "played_actual": played_actual,
         "matched": matched,
-        "missed": counts.get("Niezagrane", 0),
+        "missed": counts.get("Niezagrane", 0) + counts.get("Wyskipowane", 0),
         "added": counts.get("Dodane", 0),
         "reordered": reordered_count,
         "faded": faded_count,
@@ -2531,10 +2589,48 @@ def compare_day(
         hour = row.get("schedule_hour")
         if hour is not None:
             scheduled_by_hour[int(hour)].append(row)
+
+    # Reconciled logs often express a boundary asset as 00:59:60 / 00:60:00
+    # while cutoff Scheduled has the same asset at 01:00:00. Comparing 24 hour
+    # buckets independently used to count that one event twice (Dodane +
+    # Niezagrane). If the identity is unique and points to an adjacent Scheduled
+    # hour, compare it in the Scheduled hour instead. This changes comparison
+    # grouping only; the raw time and stored scheduling semantics stay untouched.
+    native_zetta_day = bool(scheduled_rows and played_rows) and all(
+        str(row.get("source_system") or "") == "zetta2go" for row in [*scheduled_rows, *played_rows]
+    )
+    scheduled_identity_hours: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    for row in scheduled_rows:
+        hour = row.get("schedule_hour")
+        if hour is None:
+            continue
+        scheduled_identity_hours[_identity_key(row, native_zetta_pair=native_zetta_day)].append(int(hour))
+
     for row in played_rows:
         hour = row.get("schedule_hour")
-        if hour is not None:
-            played_by_hour[int(hour)].append(row)
+        if hour is None:
+            continue
+        target_hour = int(hour)
+        candidates = scheduled_identity_hours.get(_identity_key(row, native_zetta_pair=native_zetta_day), [])
+        unique = sorted(set(candidates))
+        if target_hour not in unique:
+            adjacent = [candidate for candidate in unique if abs(candidate - target_hour) == 1]
+            if len(adjacent) == 1:
+                candidate = adjacent[0]
+                raw = str(row.get("air_time_raw") or "")
+                match = re.fullmatch(r"(\d{1,2}):(\d+):(\d{1,2}(?:\.\d+)?)", raw)
+                boundary_alias = False
+                if match:
+                    minute = int(match.group(2))
+                    second = float(match.group(3))
+                    offset = minute * 60.0 + second
+                    if candidate == target_hour + 1:
+                        boundary_alias = abs(offset - 3600.0) <= 5.0
+                    elif candidate == target_hour - 1:
+                        boundary_alias = offset <= 5.0
+                if boundary_alias:
+                    target_hour = candidate
+        played_by_hour[target_hour].append(row)
 
     hourly = [
         _compare_hour_rows(

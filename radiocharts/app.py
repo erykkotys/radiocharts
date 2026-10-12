@@ -118,7 +118,9 @@ st.markdown(
       :root { --rc-song:#f4f4f5; --rc-link:#f4cf57; --rc-etm:#69d6ff; --rc-toh:#ff79c6; --rc-traffic:#ff5d5d; }
       .rc-etm-grid { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(230px,300px); justify-content:start; gap:.34rem .52rem; margin:.28rem 0 .62rem; overflow-x:auto; }
       .rc-etm-chip { display:grid; grid-template-columns:54px 1fr 78px auto; gap:.38rem; align-items:center; border:1px solid #46505f; background:#11161d; border-radius:7px; padding:.42rem .52rem; min-width:0; font-size:.82rem; }
-      .rc-etm-zero { opacity:.50; }
+      .rc-etm-zero { opacity:1; }
+      .rc-etm-gap.rc-etm-under { color:#ff5d5d; }
+      .rc-etm-gap.rc-etm-over { color:#f4cf57; }
       .rc-etm-time { color:#c6cfdb; font-variant-numeric:tabular-nums; font-weight:650; }
       .rc-etm-kind { color:var(--rc-etm); font-weight:800; overflow:hidden; text-overflow:ellipsis; }
       .rc-etm-gap { color:#f4f4f5; font-weight:780; font-variant-numeric:tabular-nums; text-align:right; }
@@ -134,6 +136,7 @@ st.markdown(
       .rc-local-row.rc-now { background:#10231a; box-shadow:inset 3px 0 #45c878; }
       .rc-local-row.rc-played-past { opacity:.64; font-style:italic; }
       .rc-local-row.rc-future-schedule { background:#0b1016; }
+      .rc-local-row.rc-skipped, .rc-local-row.rc-not-played { opacity:.46; font-style:italic; }
       .rc-local-row.rc-toh { grid-template-columns:26px 105px minmax(0,1fr); color:var(--rc-toh); background:#1b1020; border-top:1px solid #6d3159; border-bottom:1px solid #6d3159; font-weight:800; scroll-margin-top:48px; }
       .rc-local-row.rc-tone-song { color:var(--rc-song); }
       .rc-local-row.rc-tone-link { color:var(--rc-link); }
@@ -150,6 +153,7 @@ st.markdown(
       .rc-local-title { font-weight:650; white-space:normal; overflow-wrap:anywhere; }
       .rc-local-meta { margin-top:.08rem; color:#9fa8b5; font-size:.67rem; white-space:normal; overflow-wrap:anywhere; }
       .rc-local-runtime { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+      .rc-log-runtime-delta { display:block; color:#ff5d5d; font-size:.68rem; font-weight:800; margin-top:.04rem; }
       .rc-local-played { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; color:#9fe0b2; }
       .rc-local-song-link { color:var(--rc-song) !important; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:2px; cursor:pointer; }
       .rc-local-song-link:hover { color:#fff !important; text-decoration-style:solid; }
@@ -817,7 +821,7 @@ def cached_local_dates(revision: str, kind: str) -> list[str]:
 
 @st.cache_resource(show_spinner=False, max_entries=96)
 def cached_local_day_events(revision: str, kind: str, service_date: str) -> list[dict]:
-    return local_events_for_day(kind, service_date)
+    return local_events_for_day(kind, service_date, include_nonplayed=(kind == "played"))
 
 
 @st.cache_resource(show_spinner=False, max_entries=48)
@@ -2929,8 +2933,12 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
         hhmm = raw_time[:5] if len(raw_time) >= 5 else raw_time
         kind = _local_etm_kind(row).upper()
         gap = _local_normalize_gap(str(row.get("etm_delta_raw") or "")) or "—"
-        muted = value is not None and abs(value) < .05
-        css = "rc-etm-chip rc-etm-zero" if muted else "rc-etm-chip"
+        css = "rc-etm-chip"
+        gap_css = "rc-etm-gap"
+        if value is not None and value <= -60.0:
+            gap_css += " rc-etm-under"
+        elif value is not None and value >= 180.0:
+            gap_css += " rc-etm-over"
         resets, traffic = diagnostic_by_id.get(int(row.get("id") or id(row)), (0, 0))
         warnings = []
         if not direct_zetta:
@@ -2946,7 +2954,7 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
         cards.append(
             f'<div class="{css}"><span class="rc-etm-time">{html.escape(hhmm)}</span>'
             f'<span class="rc-etm-kind">{html.escape(kind)}</span>'
-            f'<span class="rc-etm-gap">{html.escape(gap)}</span>{warning}</div>'
+            f'<span class="{gap_css}">{html.escape(gap)}</span>{warning}</div>'
         )
     # Column-major layout: 00 under 01 under 02... and only then the next
     # column.  Up to three compact columns keeps a full day readable.
@@ -2968,6 +2976,61 @@ def _local_default_date(values: list[str], kind: str) -> date | None:
         future = [d for d in parsed if d >= today]
         return min(future) if future else max(parsed)
     return max(parsed)
+
+
+def _local_set_date_picker(widget_key: str, target_iso: str) -> None:
+    st.session_state[widget_key] = date.fromisoformat(target_iso)
+
+
+def _local_schedule_date_nav(dates: list[str], key_prefix: str, default_date: date) -> str:
+    available = sorted({date.fromisoformat(raw) for raw in dates})
+    if not available:
+        return default_date.isoformat()
+    widget_key = f"{key_prefix}_date_picker"
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = default_date
+    current = st.session_state.get(widget_key, default_date)
+    if isinstance(current, datetime):
+        current = current.date()
+    elif isinstance(current, str):
+        try:
+            current = date.fromisoformat(current)
+        except ValueError:
+            current = default_date
+    if not isinstance(current, date):
+        current = default_date
+    if current < available[0] or current > available[-1]:
+        current = default_date
+        st.session_state[widget_key] = current
+
+    previous = next((candidate for candidate in reversed(available) if candidate < current), None)
+    following = next((candidate for candidate in available if candidate > current), None)
+    today = date.today()
+    today_enabled = available[0] <= today <= available[-1]
+
+    prev_col, date_col, today_col, next_col = st.columns([.24, 1.18, .48, .24], vertical_alignment="bottom")
+    prev_col.button(
+        "←", key=f"{key_prefix}_date_prev", disabled=previous is None,
+        on_click=_local_set_date_picker if previous is not None else None,
+        args=(widget_key, previous.isoformat()) if previous is not None else (),
+        help="Poprzedni dostępny dzień",
+    )
+    selected = date_col.date_input(
+        "Dzień", min_value=available[0], max_value=available[-1],
+        key=widget_key, format="DD.MM.YYYY",
+    )
+    today_col.button(
+        "Dzisiaj", key=f"{key_prefix}_date_today", disabled=not today_enabled,
+        on_click=_local_set_date_picker if today_enabled else None,
+        args=(widget_key, today.isoformat()) if today_enabled else (),
+    )
+    next_col.button(
+        "→", key=f"{key_prefix}_date_next", disabled=following is None,
+        on_click=_local_set_date_picker if following is not None else None,
+        args=(widget_key, following.isoformat()) if following is not None else (),
+        help="Następny dostępny dzień",
+    )
+    return selected.isoformat()
 
 
 def _local_timeline_frame(rows: list[dict]) -> pd.DataFrame:
@@ -3071,9 +3134,24 @@ def _render_local_timeline_grid(frame: pd.DataFrame, columns: list[str], *, key:
 
 
 
+LOCAL_ZETTA_SKIP_EDIT_CODES = {102, 202, 221, 506}
+
+
+def _local_row_is_skipped(row: dict) -> bool:
+    if bool(row.get("zetta_skip")):
+        return True
+    try:
+        edit_code = int(row.get("zetta_edit_code") or row.get("edit_code_int") or 0)
+    except (TypeError, ValueError):
+        edit_code = 0
+    return edit_code in LOCAL_ZETTA_SKIP_EDIT_CODES
+
+
 def _local_play_status_icon(row: dict, kind: str) -> tuple[str, str, str]:
     event_type = str(row.get("event_type") or "")
     phase = str(row.get("_display_phase") or "")
+    if _local_row_is_skipped(row):
+        return "✕", "#ff5d5d", "Wyskipowane"
     if event_type == "toh":
         return "◆", "#ff79c6", "Top of the hour"
     if event_type == "etm":
@@ -3137,20 +3215,29 @@ def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "sche
         if value:
             meta_bits.append(f"{label} {value}")
     phase = str(row.get("_display_phase") or "")
-    if phase == "future_schedule":
+    skipped = _local_row_is_skipped(row)
+    if skipped:
+        meta_bits.append("Wyskipowane")
+        edit_name = str(row.get("zetta_edit_name") or "").strip()
+        if edit_name:
+            meta_bits.append(edit_name)
+    elif phase == "future_schedule":
         meta_bits.append("Scheduled — jeszcze nie zagrano")
     elif phase == "current_schedule":
         meta_bits.append("Scheduled · TERAZ")
     elif kind == "played":
         status_name = str(row.get("zetta_status") or "").strip()
         if status_name:
-            meta_bits.append(status_name)
+            meta_bits.append("Niezagrane" if status_name in {"NOT_PLAYED", "EVENT_ERROR"} else status_name)
         edit_name = str(row.get("zetta_edit_name") or "").strip()
         if edit_name and int(row.get("zetta_edit_code") or 0) not in {0, 217}:
             meta_bits.append(edit_name)
     meta = " · ".join(meta_bits)
 
-    runtime = str(row.get("runtime_raw") or "")
+    runtime = str(runtime_override or row.get("runtime_raw") or "")
+    runtime_html = html.escape(runtime)
+    if runtime_delta:
+        runtime_html += f'<span class="rc-log-runtime-delta">{html.escape(runtime_delta)}</span>'
     played_raw = str(row.get("played_raw") or "") if kind == "played" and phase != "future_schedule" else ""
     try:
         status_code = int(row.get("zetta_status_code") or 0)
@@ -3162,7 +3249,11 @@ def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "sche
     current = (kind == "played" and phase != "future_schedule" and status_code in {2, 9}) or phase == "current_schedule"
 
     classes = ["rc-local-row", _local_event_tone_class(row)]
-    if current:
+    if skipped:
+        classes.append("rc-skipped")
+    elif kind == "played" and status_code in {4, 5}:
+        classes.append("rc-not-played")
+    elif current:
         classes.append("rc-now")
     elif phase == "played_past":
         classes.append("rc-played-past")
@@ -3338,8 +3429,32 @@ def _local_played_continuity_rows(revision: str, service_date: str, played_rows:
     try: ps=float(pivot.get("sort_seconds"))
     except (TypeError,ValueError): ps=None
     if ps is not None:
-        out=[r for r in out if str(r.get("event_type") or "") not in {"etm","toh"} or (r.get("sort_seconds") is not None and float(r.get("sort_seconds"))<=ps+.05)]
+        filtered=[]
+        for r in out:
+            event_type = str(r.get("event_type") or "")
+            try:
+                row_status = int(r.get("zetta_status_code") or 0)
+            except (TypeError, ValueError):
+                row_status = 0
+            if event_type in {"etm", "toh"}:
+                if r.get("sort_seconds") is not None and float(r.get("sort_seconds")) > ps + .05:
+                    continue
+            elif row_status in {1, 10} and r.get("sort_seconds") is not None and float(r.get("sort_seconds")) > ps + .05:
+                # Future READY/WAITING comes from the live GetLog too, but the
+                # Scheduled tail below is the authoritative future view.
+                continue
+            filtered.append(r)
+        out=filtered
     for row in scheduled[pivot_index+1:]:
+        if any(
+            _local_events_match(existing, row)
+            for existing in out
+            if str(existing.get("event_type") or "") not in {"etm", "toh", "command"}
+        ):
+            # A future row can already be present in Played as NOT_PLAYED /
+            # skipped. Keep that authoritative status instead of duplicating the
+            # same item again from the Scheduled tail.
+            continue
         row["_display_phase"] = "future_schedule"
         out.append(row)
     return out
@@ -3524,7 +3639,7 @@ def _render_local_timeline_content(
         _render_local_now_playing_fragment(selected_date, revision)
     _render_local_timeline_cards(rows, kind, anchor_prefix=f"{key_prefix}-list")
     if kind == "played" and selected_date == date.today().isoformat():
-        st.caption("Played: zakończone elementy są lekko wyszarzone i kursywą; po aktualnie granym elemencie lista przechodzi w cutoff Scheduled, żeby zachować ciągłość dnia.")
+        st.caption("Played: zakończone elementy są lekko wyszarzone i kursywą; wyskipowane i niezagrane pozostają widoczne z czerwonym ✕; po aktualnie granym elemencie lista przechodzi w cutoff Scheduled.")
     else:
         st.caption("Kolory: piosenki białe · linki/jingle/audycje żółte · ETM niebieskie · Top of the hour różowe · reklama/autopromocja czerwona i zwijana.")
 
@@ -3558,14 +3673,18 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         return
 
     default_date = _local_default_date(dates, kind) or date.fromisoformat(dates[-1])
-    dcol, hcol, pcol = st.columns([.82, .82, 1.55], vertical_alignment="bottom")
-    selected_date = dcol.selectbox(
-        "Dzień",
-        dates,
-        index=dates.index(default_date.isoformat()) if default_date.isoformat() in dates else len(dates) - 1,
-        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
-        key=f"{key_prefix}_date",
-    )
+    if kind == "schedule":
+        selected_date = _local_schedule_date_nav(dates, key_prefix, default_date)
+        hcol, pcol = st.columns([.82, 1.55], vertical_alignment="bottom")
+    else:
+        dcol, hcol, pcol = st.columns([.82, .82, 1.55], vertical_alignment="bottom")
+        selected_date = dcol.selectbox(
+            "Dzień",
+            dates,
+            index=dates.index(default_date.isoformat()) if default_date.isoformat() in dates else len(dates) - 1,
+            format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
+            key=f"{key_prefix}_date",
+        )
     hour_options: list[object] = ["Cały dzień", *range(24)]
     selected_hour = hcol.selectbox(
         "Godzina",
@@ -3713,6 +3832,8 @@ def _render_local_etm_page(revision: str) -> None:
 
 def _local_status_symbol(status: str) -> tuple[str, str, str]:
     lowered = str(status or "OK").casefold()
+    if status == "Wyskipowane":
+        return "✕", "rc-status-bad", "Wyskipowane celowo"
     if status == "Niezagrane":
         return "✕", "rc-status-bad", "Nie zagrano / usunięte"
     if status == "Dodane":
@@ -3736,6 +3857,8 @@ def _local_log_row_html(
     *,
     ghost: bool = False,
     ghost_note: str = "",
+    runtime_override: str = "",
+    runtime_delta: str = "",
 ) -> str:
     event_type = str(row.get("event_type") or "other")
     category = str(row.get("category_code") or row.get("category") or "")
@@ -3797,7 +3920,7 @@ def _local_log_row_html(
         f'<div class="rc-log-cat">{html.escape(short_cat)}</div>'
         f'<div class="rc-log-main"><div class="rc-log-title">{title_html}</div>'
         f'<div class="rc-log-meta">{html.escape(meta)}</div></div>'
-        f'<div class="rc-log-runtime">{html.escape(runtime)}</div>'
+        f'<div class="rc-log-runtime">{runtime_html}</div>'
         f'<div class="rc-log-flags">{badge}</div></div>'
     )
 
@@ -3806,15 +3929,25 @@ def _local_compare_pair_html(pair: dict, *, anchor_prefix: str = "our-radio-comp
     status = str(pair.get("status") or "OK")
     scheduled = pair.get("scheduled_row")
     played = pair.get("played_row")
+    scheduled_status = str(pair.get("scheduled_status") or status or "OK")
+    played_status = str(pair.get("played_status") or status or "OK")
+    runtime_cut = str(pair.get("runtime_cut") or "")
+    planned_runtime = str((scheduled or {}).get("runtime_raw") or "") if isinstance(scheduled, dict) else ""
     if scheduled is None and played is not None:
-        left = _local_log_row_html(played, status, ghost=True, ghost_note="brak w Scheduled — element dodany")
-        right = _local_log_row_html(played, status)
+        left = _local_log_row_html(played, played_status, ghost=True, ghost_note="brak w Scheduled — element dodany")
+        right = _local_log_row_html(played, played_status)
     elif played is None and scheduled is not None:
-        left = _local_log_row_html(scheduled, status)
-        right = _local_log_row_html(scheduled, status, ghost=True, ghost_note="nie zagrano — pozycja z Scheduled")
+        left = _local_log_row_html(scheduled, scheduled_status)
+        right = _local_log_row_html(scheduled, scheduled_status, ghost=True, ghost_note="nie zagrano — pozycja z Scheduled")
     elif scheduled is not None and played is not None:
-        left = _local_log_row_html(scheduled, status)
-        right = _local_log_row_html(played, status, ghost=(status == "Oczekuje"), ghost_note="jeszcze nie zagrano — oczekuje w Zetta" if status == "Oczekuje" else "")
+        left = _local_log_row_html(scheduled, scheduled_status)
+        right = _local_log_row_html(
+            played, played_status,
+            ghost=(played_status == "Oczekuje"),
+            ghost_note="jeszcze nie zagrano — oczekuje w Zetta" if played_status == "Oczekuje" else "",
+            runtime_override=planned_runtime if runtime_cut else "",
+            runtime_delta=runtime_cut,
+        )
     else:
         return ""
     is_now = False
@@ -3875,7 +4008,7 @@ def _render_local_comparison(revision: str) -> None:
       .rc-compare-head{position:sticky;top:0;z-index:4}.rc-compare-head>div{padding:.48rem .62rem;background:#11161d;border-bottom:1px solid #313844;font-weight:700}
       .rc-log-row{display:grid;grid-template-columns:28px 118px 52px minmax(0,1fr) 62px;gap:.42rem;align-items:start;padding:.31rem .48rem;border-bottom:1px solid #1b222c;background:#090d12;font-size:.80rem;min-width:0;height:100%}
       .rc-log-row:hover{background:#0f151d}.rc-log-status{display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:850}.rc-status-ok{color:#45c878}.rc-status-bad{color:#ff5d5d}.rc-status-move{color:#f4b942}.rc-status-cut{color:#ff8c5a}
-      .rc-log-time{font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:650}.rc-log-cat{font-weight:760;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-log-main{min-width:0}.rc-log-title{font-weight:650;overflow-wrap:anywhere}.rc-log-meta{font-size:.67rem;opacity:.66;overflow-wrap:anywhere}.rc-log-runtime{text-align:right;white-space:nowrap}.rc-log-flags{grid-column:4/6}.rc-log-ghost{opacity:.27;filter:grayscale(.85)}.rc-log-empty{padding:1rem;color:#858c96}
+      .rc-log-time{font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:650}.rc-log-cat{font-weight:760;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-log-main{min-width:0}.rc-log-title{font-weight:650;overflow-wrap:anywhere}.rc-log-meta{font-size:.67rem;opacity:.66;overflow-wrap:anywhere}.rc-log-runtime{text-align:right;white-space:nowrap}.rc-log-runtime-delta{display:block;color:#ff5d5d;font-size:.68rem;font-weight:800}.rc-log-flags{grid-column:4/6}.rc-log-ghost{opacity:.27;filter:grayscale(.85)}.rc-log-empty{padding:1rem;color:#858c96}
     </style>""", unsafe_allow_html=True)
     selected_date=st.selectbox("Dzień do porównania",overlap,index=len(overlap)-1,format_func=lambda raw:date.fromisoformat(raw).strftime("%d.%m.%Y"),key="our_radio_compare_date")
     day_cmp=cached_local_compare_day(revision,selected_date)

@@ -1,3 +1,14 @@
+## 1.2.29 — Schedule/ETM/Porównanie: dzień, skipy, fade i kolejność
+
+- Scheduled: nawigacja dnia strzałkami poprzedni/następny, data z kalendarza oraz przycisk **Dzisiaj**.
+- ETM: zero nie jest już wyszarzane; niedoczas od `-01:00` jest czerwony, a nadczas od `+03:00` żółty.
+- Scheduled/Played/Porównanie: elementy wyskipowane i niezagrane pozostają widoczne; skip jest opisany osobno jako **Wyskipowane**.
+- Porównanie: graniczne zapisy `HH:59:60` / `HH:60:00` nie są liczone podwójnie jako Dodane + Niezagrane.
+- Porównanie: przy realnej zmianie kolejności lewa kolumna zachowuje kolejność Scheduled, a prawa kolejność Played.
+- Porównanie: przy znaczącym fade/ucięciu pod runtime pokazuje się czerwone `-m:ss`.
+- Android/API: Played również dostaje w danych wiersze non-played/skipped; Scheduled tail nie duplikuje już takiego wpisu.
+- Android: wersja `1.2.29`, `versionCode = 52`.
+
 ## 1.2.28 — drugi hotfix Dashboardu / parser-safe click handler
 
 - Naprawa `Component Error: Invalid left-hand side in assignment`: handler kliknięć AG Grid został uproszczony do bardzo małego, konserwatywnego JavaScriptu bez `fetch`, Promise chain, `async/await`, `const` ani `let`.

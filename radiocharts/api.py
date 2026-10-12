@@ -561,7 +561,7 @@ def _mobile_local_event_match(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 
 def _mobile_played_continuity(service_date: date, hour: int | None) -> list[dict[str, Any]]:
-    played = [dict(row) for row in local_events_for_day("played", service_date)]
+    played = [dict(row) for row in local_events_for_day("played", service_date, include_nonplayed=True)]
     current = next((r for r in played if int(r.get("zetta_status_code") or 0) in {2,9} and str(r.get("event_type") or "") not in {"etm","toh","command"}), None)
     try:
         current_sort = float(current.get("sort_seconds")) if current is not None else None
@@ -617,6 +617,12 @@ def _mobile_played_continuity(service_date: date, hour: int | None) -> list[dict
                         kept.append(row)
                     played = kept
                 for row in scheduled[pivot_index + 1:]:
+                    if any(
+                        _mobile_local_event_match(existing, row)
+                        for existing in played
+                        if str(existing.get("event_type") or "") not in {"etm", "toh", "command"}
+                    ):
+                        continue
                     row["display_phase"] = "future_schedule"
                     played.append(row)
     if hour is not None:
@@ -653,7 +659,7 @@ def local_radio_events(
     if kind == "played" and continuity:
         rows = _mobile_played_continuity(service_date, hour)
     else:
-        rows = [dict(row) for row in local_events_for_day(kind, service_date, hour=hour)]
+        rows = [dict(row) for row in local_events_for_day(kind, service_date, hour=hour, include_nonplayed=(kind == "played"))]
     if ignore_resets:
         _apply_mobile_ignore_resets(rows)
     return [{k: _clean(v) for k, v in row.items()} for row in rows]
@@ -673,6 +679,10 @@ def local_radio_compare(
             payload[key] = [
                 {
                     "status": str(pair.get("status") or ""),
+                    "scheduled_status": str(pair.get("scheduled_status") or ""),
+                    "played_status": str(pair.get("played_status") or ""),
+                    "runtime_cut": str(pair.get("runtime_cut") or ""),
+                    "runtime_cut_seconds": _clean(pair.get("runtime_cut_seconds")),
                     "scheduled_row": ({kk: _clean(vv) for kk, vv in pair["scheduled_row"].items()} if isinstance(pair.get("scheduled_row"), dict) else None),
                     "played_row": ({kk: _clean(vv) for kk, vv in pair["played_row"].items()} if isinstance(pair.get("played_row"), dict) else None),
                 }
