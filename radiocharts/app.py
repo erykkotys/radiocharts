@@ -2956,10 +2956,8 @@ def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "sche
             meta_bits.append(edit_name)
     meta = " · ".join(meta_bits)
 
-    runtime = str(runtime_override or row.get("runtime_raw") or "")
+    runtime = str(row.get("runtime_raw") or "")
     runtime_html = html.escape(runtime)
-    if runtime_delta:
-        runtime_html += f'<span class="rc-log-runtime-delta">{html.escape(runtime_delta)}</span>'
     played_raw = str(row.get("played_raw") or "") if kind == "played" and phase != "future_schedule" else ""
     try:
         status_code = int(row.get("zetta_status_code") or 0)
@@ -3579,7 +3577,10 @@ def _local_log_row_html(
     raw_time = str(row.get("air_time_raw") or "")
     gap = str(row.get("gap_raw") or "")
     time_label = raw_time + (f"  ({gap} gap)" if gap else "")
-    runtime = str(row.get("runtime_raw") or "")
+    runtime = str(runtime_override or row.get("runtime_raw") or "")
+    runtime_html = html.escape(runtime)
+    if runtime_delta:
+        runtime_html += f'<span class="rc-log-runtime-delta">{html.escape(runtime_delta)}</span>'
     type_label = LOCAL_EVENT_LABELS.get(event_type, event_type)
     meta = f"{type_label} · {category}"
     if event_type == "etm":

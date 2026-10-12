@@ -1,4 +1,10 @@
-## 1.2.30 — natywne gapy ETM z Zetta2GO CalculatedTimes
+## 1.2.31 — poprawka renderowania Scheduled/Played/Porównania
+
+- naprawiono `NameError: runtime_override` w rendererze Scheduled/Played; zmienne `runtime_override` i `runtime_delta` są używane wyłącznie w rendererze Porównania, gdzie faktycznie należą;
+- naprawiono jednocześnie brak inicjalizacji `runtime_html` w rendererze Porównania, dzięki czemu skrócenie FADE (`-m:ss`) może być poprawnie pokazane pod pełnym runtime;
+- dodano test regresyjny pilnujący rozdzielenia obu rendererów.
+
+## 1.2.31 — natywne gapy ETM z Zetta2GO CalculatedTimes
 
 - ETM Zetta2GO nie są już rekonstruowane z AirTime/runtime, poprzedniej godziny ani RESET carry.
 - Źródłem jest bezpośrednio `GetLog → cell[16] = CalculatedTimes`.
@@ -7,7 +13,7 @@
 - Jeśli Zetta nie poda natywnej wartości, Scheduled/Played/Porównanie i karta ETM pokazują `—` zamiast zgadywanego gapu.
 - Usunięty został tryb „Ignoruj resety” i rekonstrukcja pełnej godziny, żeby RadioCharts pokazywał dokładnie to samo źródło czasu co Emaus Hub.
 - Dla starszych zapisanych snapshotów RadioCharts ponownie odczytuje przechowane `calculated_times`, więc stare wyliczone carry nie jest już prezentowane jako ETM.
-- Android: wersja `1.2.30`, `versionCode = 53`.
+- Android: wersja `1.2.31`, `versionCode = 54`.
 
 ## 1.2.29 — Schedule/ETM/Porównanie: dzień, skipy, fade i kolejność
 
