@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import radiocharts.db as db
 from radiocharts.local_station import (
@@ -64,13 +65,33 @@ def _asset_row(
     }
 
 
-def _etm_row(*, seq: int, at: str, uid: str, etm_type: str = "Hard", status: int = 1, gap: int | None = 0):
+def _etm_row(
+    *,
+    seq: int,
+    at: str,
+    uid: str,
+    etm_type: str = "Hard",
+    status: int = 1,
+    gap: int | float | str | None = 0,
+    hit_gap: int | float | str | None = None,
+    original_gap: int | float | str | None = None,
+    calculated: dict | None = None,
+    asset_gap: int | float | None = None,
+):
+    calculated_times = calculated if calculated is not None else {
+        "AirTime": at,
+        "NextETM": "7:00:00 AM",
+        "HitETMGap": hit_gap,
+        "GapToETM": gap,
+        "OriginalGap": original_gap,
+    }
     return {
         "id": uid,
         "cell": [
-            "15", seq, "0", True, "", at, "", {"ETMType": etm_type, "time": "6:30:00 AM", "gap": gap, "ogap": None},
+            "15", seq, "0", True, "", at, "",
+            {"ETMType": etm_type, "time": "6:30:00 AM", "gap": asset_gap, "ogap": None},
             "", str(status), "1", False, False, 1, "", 0,
-            {"AirTime": at, "NextETM": "7:00:00 AM", "GapToETM": 0},
+            calculated_times,
             "group", 0, "", 0, None, True, False,
         ],
     }
@@ -193,7 +214,7 @@ def test_zetta_full_day_merged_hours_reset_toh_grouping():
 
 
 
-def test_zetta_full_hour_gap_carries_previous_reset_and_preserves_native_nonzero():
+def test_zetta_hour_boundary_uses_only_calculated_times_and_never_carries_previous_hour():
     previous = _payload(
         _toh_row(at="2026-10-03T23:00:00.0000000", uid="toh-prev"),
         _etm_row(seq=90, at="2026-10-03T23:59:59.0000000", uid="reset-prev", etm_type="Reset", gap=14000),
@@ -215,15 +236,49 @@ def test_zetta_full_hour_gap_carries_previous_reset_and_preserves_native_nonzero
     payload["radiocharts_previous_hour_rows"] = previous["rows"]
     rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     by_id = {r["external_id"]: r for r in rows}
-    assert by_id["soft-00"]["etm_delta_raw"] == "+00:13"
-    assert by_id["soft-00"]["payload"]["zetta_gap_source"] == "previous_hour_reset"
-    assert by_id["hard-06"]["etm_delta_raw"] == "-00:11"
-    assert by_id["hard-06"]["payload"]["zetta_gap_source"] == "previous_hour_reset"
-    # If Zetta ever supplies a real full-hour gap itself, do not replace it.
+
+    # No carry from 23:59 RESET, no reconstruction from 07:58 runtime.
+    assert by_id["soft-00"]["etm_delta_raw"] == "+00:00"
+    assert by_id["hard-06"]["etm_delta_raw"] == "+00:00"
+    assert by_id["hard-08"]["etm_delta_raw"] == "+00:00"
+    # A native CalculatedTimes value is shown exactly as supplied.
     assert by_id["hard-07"]["etm_delta_raw"] == "+00:04.2"
-    assert "zetta_gap_source" not in by_id["hard-07"]["payload"]
-    assert by_id["hard-08"]["etm_delta_raw"] == "+00:14"
-    assert by_id["hard-08"]["payload"]["zetta_gap_source"] == "previous_hour_tail"
+    assert by_id["hard-07"]["payload"]["zetta_gap_source"] == "CalculatedTimes.GapToETM"
+
+
+def test_1230_legacy_stored_guess_is_overridden_by_native_calculated_times(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "zetta-native-read.db")
+    payload = _payload(
+        _etm_row(
+            seq=1, at="2026-10-04T06:30:00.0000000+02:00", uid="legacy-etm",
+            etm_type="Hard", gap=1234,
+        )
+    )
+    import_zetta2go_snapshot(payload, service_date="2026-10-04", kind="schedule")
+
+    # Simulate an older RadioCharts snapshot: CalculatedTimes was already stored,
+    # but the cached/display gap was later replaced by a guessed carry value.
+    with db.connect() as con:
+        row = con.execute(
+            "SELECT id,payload_json FROM local_station_events WHERE external_id=?",
+            ("legacy-etm",),
+        ).fetchone()
+        stored = json.loads(row["payload_json"])
+        stored["zetta_gap_ms"] = 999999
+        stored["zetta_gap_native_ms"] = 999999
+        stored["zetta_gap_source"] = "previous_hour_tail"
+        con.execute(
+            "UPDATE local_station_events SET payload_json=? WHERE id=?",
+            (json.dumps(stored), row["id"]),
+        )
+
+    rows = events_for_day("schedule", "2026-10-04")
+    assert len(rows) == 1
+    etm = rows[0]
+    assert etm["zetta_gap_ms"] == 1234
+    assert etm["zetta_gap_native_ms"] == 1234
+    assert etm["zetta_gap_source"] == "CalculatedTimes.GapToETM"
+    assert etm["etm_delta_raw"] == "+00:01.2"
 
 
 def test_zetta_client_get_log_fetches_24_hour_windows(monkeypatch):
@@ -271,111 +326,83 @@ def test_zetta_client_get_log_fetches_24_hour_windows(monkeypatch):
     assert next(r for r in parsed if r["title"] == "Hour 01")["air_time_raw"] == "01:05:00.0"
 
 
-def test_zetta_ignore_resets_accumulates_until_next_hard_soft_anchor():
+def test_zetta_etm_calculated_times_field_priority_and_fallbacks():
     payload = _payload(
-        _toh_row(at="2026-10-04T08:00:00.0000000", uid="toh-08"),
-        _etm_row(seq=1, at="2026-10-04T08:00:00.0000000", uid="hard-0800", etm_type="Hard", gap=0),
-        _etm_row(seq=2, at="2026-10-04T08:15:00.0000000", uid="reset-0815", etm_type="Reset", gap=34000),
-        _etm_row(seq=3, at="2026-10-04T08:25:00.0000000", uid="reset-0825", etm_type="Reset", gap=-10000),
-        _etm_row(seq=4, at="2026-10-04T08:30:00.0000000", uid="hard-0830", etm_type="Hard", gap=20000),
-        _etm_row(seq=5, at="2026-10-04T08:45:00.0000000", uid="reset-0845", etm_type="Reset", gap=5000),
-        _etm_row(seq=6, at="2026-10-04T08:59:59.0000000", uid="reset-0859", etm_type="Reset", gap=10000),
-        _toh_row(at="2026-10-04T09:00:00.0000000", uid="toh-09"),
-        _etm_row(seq=7, at="2026-10-04T09:00:00.0000000", uid="hard-0900", etm_type="Hard", gap=0),
-        _etm_row(seq=8, at="2026-10-04T09:30:00.0000000", uid="soft-0930", etm_type="Soft", gap=-3000),
-    )
-    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
-    by_id = {r["external_id"]: r for r in rows}
-
-    # 08:15 +34 and 08:25 -10 do not force playout. The next HARD therefore
-    # sees native +20 plus both RESET deltas = +44 seconds.
-    assert by_id["hard-0830"]["payload"]["zetta_gap_ignore_resets_ms"] == 44000
-    assert by_id["hard-0830"]["payload"]["zetta_gap_ignore_resets_reset_count"] == 2
-
-    # Native 09:00 is reconstructed from the final 08:59:59 RESET: +10s at
-    # 59:59 becomes +9s at the exact boundary. In ignore-reset mode that final
-    # RESET is already in the +9, so only the earlier +5s RESET is added.
-    assert by_id["hard-0900"]["payload"]["zetta_gap_ms"] == 9000
-    assert by_id["hard-0900"]["payload"]["zetta_gap_source"] == "previous_hour_reset"
-    assert by_id["hard-0900"]["payload"]["zetta_gap_ignore_resets_ms"] == 14000
-    assert by_id["hard-0900"]["payload"]["zetta_gap_ignore_resets_reset_count"] == 2
-
-    # HARD resets the alternative carry; with no RESET afterwards SOFT keeps
-    # its native value and then acts as the next exact anchor too.
-    assert by_id["soft-0930"]["payload"]["zetta_gap_ignore_resets_ms"] == -3000
-
-
-def test_zetta_ignore_resets_carries_previous_day_resets_into_midnight():
-    previous = _payload(
-        _toh_row(at="2026-10-03T23:00:00.0000000", uid="toh-prev"),
-        _etm_row(seq=1, at="2026-10-03T23:30:00.0000000", uid="hard-prev", etm_type="Hard", gap=0),
-        _etm_row(seq=2, at="2026-10-03T23:45:00.0000000", uid="reset-prev-a", etm_type="Reset", gap=20000),
-        _etm_row(seq=3, at="2026-10-03T23:59:59.0000000", uid="reset-prev-b", etm_type="Reset", gap=10000),
-    )
-    payload = _payload(
-        _toh_row(at="2026-10-04T00:00:00.0000000", uid="toh-00"),
-        _etm_row(seq=1, at="2026-10-04T00:00:00.0000000", uid="soft-00", etm_type="Soft", gap=0),
-    )
-    payload["radiocharts_previous_hour_rows"] = previous["rows"]
-    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
-    marker = next(r for r in rows if r["external_id"] == "soft-00")
-    assert marker["payload"]["zetta_gap_ms"] == 9000
-    assert marker["payload"]["zetta_gap_ignore_resets_ms"] == 29000
-    assert marker["payload"]["zetta_gap_ignore_resets_reset_count"] == 2
-
-
-
-def test_zetta_ignore_resets_uses_native_reset_gap_not_next_playable_distance():
-    payload = _payload(
-        _toh_row(at="2026-10-04T08:00:00.0000000", uid="toh-08-runtime"),
-        _etm_row(seq=1, at="2026-10-04T08:00:00.0000000", uid="hard-runtime-0800", etm_type="Hard", gap=0),
-        _etm_row(seq=2, at="2026-10-04T08:15:00.0000000", uid="reset-runtime", etm_type="Reset", gap=34_000),
-        _asset_row(
-            seq=3,
-            at="2026-10-04T08:25:34.0000000",
-            uid="song-runtime",
-            asset_id="asset-runtime",
-            title="Long item after reset",
-            runtime_ms=60_000,
+        _etm_row(
+            seq=1, at="2026-10-04T20:59:00.0000000+02:00", uid="hit-both", etm_type="Hit",
+            gap=2_547_688, hit_gap=2_581_609,
         ),
-        _etm_row(seq=4, at="2026-10-04T08:30:00.0000000", uid="hard-runtime-0830", etm_type="Hard", gap=20_000),
+        _etm_row(
+            seq=2, at="2026-10-04T21:05:00.0000000+02:00", uid="hit-fallback", etm_type="Hit",
+            gap=-114, hit_gap=None,
+        ),
+        _etm_row(
+            seq=3, at="2026-10-04T21:10:00.0000000+02:00", uid="hard-gap", etm_type="Hard",
+            gap=-114, hit_gap=999999,
+        ),
+        _etm_row(
+            seq=4, at="2026-10-04T21:15:00.0000000+02:00", uid="soft-original", etm_type="Soft",
+            calculated={"AirTime": "x", "GapToETM": None, "OriginalGap": 12_345},
+        ),
+        _etm_row(
+            seq=5, at="2026-10-04T21:20:00.0000000+02:00", uid="reset-generic", etm_type="Reset",
+            calculated={"gap_time": "-00:01.500"},
+        ),
     )
     rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     by_id = {r["external_id"]: r for r in rows}
-    hard = by_id["hard-runtime-0830"]
-    # The 10:34 distance to the next playable is not a RESET gap.  Use only
-    # Zetta's +34 s RESET gap, then add the native +20 s at the HARD anchor.
-    assert hard["payload"]["zetta_gap_ignore_resets_ms"] == 54_000
 
-def test_zetta_hour_boundary_ignores_rows_that_start_after_sixty_minutes():
+    assert by_id["hit-both"]["payload"]["zetta_gap_ms"] == 2_581_609
+    assert by_id["hit-both"]["payload"]["zetta_gap_source"] == "CalculatedTimes.HitETMGap"
+    assert by_id["hit-fallback"]["payload"]["zetta_gap_ms"] == -114
+    assert by_id["hit-fallback"]["payload"]["zetta_gap_source"] == "CalculatedTimes.GapToETM"
+    assert by_id["hard-gap"]["payload"]["zetta_gap_ms"] == -114
+    assert by_id["hard-gap"]["payload"]["zetta_gap_source"] == "CalculatedTimes.GapToETM"
+    assert by_id["soft-original"]["payload"]["zetta_gap_ms"] == 12_345
+    assert by_id["soft-original"]["payload"]["zetta_gap_source"] == "CalculatedTimes.OriginalGap"
+    assert by_id["reset-generic"]["payload"]["zetta_gap_ms"] == -1_500
+    assert by_id["reset-generic"]["payload"]["zetta_gap_source"] == "CalculatedTimes.gap_time"
+
+
+def test_zetta_etm_missing_calculated_gap_is_not_guessed_from_asset_or_timeline():
     payload = _payload(
         _toh_row(at="2026-10-04T15:00:00.0000000", uid="toh-15"),
-        _etm_row(seq=1, at="2026-10-04T15:30:00.0000000", uid="hard-1530", etm_type="Hard", gap=0),
         _asset_row(
-            seq=2,
-            at="2026-10-04T15:59:56.0000000",
-            uid="crossing",
-            asset_id="asset-crossing",
-            title="Crossing item",
-            runtime_ms=20_000,
-        ),
-        _asset_row(
-            seq=3,
-            at="2026-10-04T16:00:24.0000000",
-            uid="queued-after-boundary",
-            asset_id="asset-queued",
-            title="Queued after boundary",
-            runtime_ms=1_000_000,
+            seq=1, at="2026-10-04T15:59:56.0000000", uid="crossing",
+            asset_id="asset-crossing", title="Crossing item", runtime_ms=20_000,
         ),
         _toh_row(at="2026-10-04T16:00:00.0000000", uid="toh-16"),
-        _etm_row(seq=4, at="2026-10-04T16:00:00.0000000", uid="hard-1600", etm_type="Hard", gap=0),
+        _etm_row(
+            seq=2, at="2026-10-04T16:00:00.0000000", uid="hard-missing", etm_type="Hard",
+            calculated={"AirTime": "2026-10-04T16:00:00", "GapToETM": None, "OriginalGap": None},
+            asset_gap=16_000,
+        ),
+    )
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
+    hard = next(r for r in rows if r["external_id"] == "hard-missing")
+    assert hard["payload"]["zetta_gap_ms"] is None
+    assert hard["payload"]["zetta_gap_source"] == ""
+    assert hard["payload"]["zetta_asset_gap_ms"] == 16_000
+    assert hard["etm_delta_raw"] == ""
+
+
+def test_zetta_etm_gap_timespan_and_numeric_string_are_normalized_without_derivation():
+    payload = _payload(
+        _etm_row(
+            seq=1, at="2026-10-04T10:00:00.0000000", uid="timespan", etm_type="Hard",
+            calculated={"GapTime": "+00:00:03.250"},
+        ),
+        _etm_row(
+            seq=2, at="2026-10-04T10:30:00.0000000", uid="numeric", etm_type="Soft",
+            calculated={"Gap": "-2500"},
+        ),
     )
     rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     by_id = {r["external_id"]: r for r in rows}
-    hard = by_id["hard-1600"]
-    assert hard["payload"]["zetta_gap_ms"] == 16_000
-    assert hard["payload"]["zetta_gap_source"] == "previous_hour_tail"
-
+    assert by_id["timespan"]["payload"]["zetta_gap_ms"] == 3250
+    assert by_id["timespan"]["etm_delta_raw"] == "+00:03.2"
+    assert by_id["numeric"]["payload"]["zetta_gap_ms"] == -2500
+    assert by_id["numeric"]["etm_delta_raw"] == "-00:02.5"
 
 
 def test_cross_system_gselector_cutoff_matches_zetta_played_by_text(tmp_path, monkeypatch):
@@ -413,8 +440,13 @@ def test_future_waiting_rows_have_pending_ui_contract():
     assert '("Zagrane / w trakcie",totals["played_actual"])' in app
 
 
-def test_1213_ui_has_ignore_resets_switch_and_recalculates_before_hour_filter():
+def test_1230_ui_uses_native_calculated_times_without_reset_or_hour_reconstruction():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
-    assert '"Ignoruj resety"' in app
-    assert 'full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)' in app
-    assert 'gap RESET zwrócony przez Zetta2GO' in app
+    local = (ROOT / "radiocharts/local_station.py").read_text(encoding="utf-8")
+    assert 'key="our_radio_etm_ignore_resets"' not in app
+    assert "_local_apply_hour_boundary_gaps" not in app
+    assert "_local_apply_ignore_reset_gaps" not in app
+    assert "GetLog → cell[16]" in app
+    assert "CalculatedTimes.HitETMGap" in local or "HitETMGap" in local
+    assert "GapToETM" in local
+    assert "OriginalGap" in local

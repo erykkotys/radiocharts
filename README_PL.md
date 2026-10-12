@@ -1,3 +1,14 @@
+## 1.2.30 — natywne gapy ETM z Zetta2GO CalculatedTimes
+
+- ETM Zetta2GO nie są już rekonstruowane z AirTime/runtime, poprzedniej godziny ani RESET carry.
+- Źródłem jest bezpośrednio `GetLog → cell[16] = CalculatedTimes`.
+- HIT: priorytet `HitETMGap`, potem `GapToETM`; pozostałe ETM: priorytet `GapToETM`.
+- Fallback kompatybilności: `OriginalGap`, `ETMGap`, `Gap`, `GapTime`, `GapMilliseconds`, `GapMs` (również warianty zapisu nazw).
+- Jeśli Zetta nie poda natywnej wartości, Scheduled/Played/Porównanie i karta ETM pokazują `—` zamiast zgadywanego gapu.
+- Usunięty został tryb „Ignoruj resety” i rekonstrukcja pełnej godziny, żeby RadioCharts pokazywał dokładnie to samo źródło czasu co Emaus Hub.
+- Dla starszych zapisanych snapshotów RadioCharts ponownie odczytuje przechowane `calculated_times`, więc stare wyliczone carry nie jest już prezentowane jako ETM.
+- Android: wersja `1.2.30`, `versionCode = 53`.
+
 ## 1.2.29 — Schedule/ETM/Porównanie: dzień, skipy, fade i kolejność
 
 - Scheduled: nawigacja dnia strzałkami poprzedni/następny, data z kalendarza oraz przycisk **Dzisiaj**.

@@ -2595,239 +2595,6 @@ def _local_normalize_gap(raw: str) -> str:
     return value
 
 
-def _local_gap_ms_to_raw(value: object) -> str:
-    try:
-        gap_seconds = float(value) / 1000.0
-    except (TypeError, ValueError):
-        return ""
-    sign = "+" if gap_seconds >= 0 else "-"
-    value_abs = abs(gap_seconds)
-    minutes = int(value_abs // 60)
-    seconds = value_abs - minutes * 60
-    return f"{sign}{minutes:02d}:{seconds:04.1f}".rstrip("0").rstrip(".")
-
-
-def _local_row_clock_seconds(row: dict) -> float | None:
-    raw = str(row.get("air_time_raw") or "").strip()
-    m = re.fullmatch(r"(\d{1,2}):(\d+):(\d{1,2}(?:\.\d+)?)", raw)
-    if not m:
-        return None
-    hour = int(m.group(1))
-    minute = int(m.group(2))
-    second = float(m.group(3))
-    if second >= 60 or minute >= 180:
-        return None
-    return hour * 3600.0 + minute * 60.0 + second
-
-
-
-def _local_apply_hour_boundary_gaps(rows: list[dict]) -> list[dict]:
-    """Rebuild full-hour Hard/Soft gap without counting queued 60+ rows.
-
-    Zetta2GO loads one log hour at a time and commonly reports 00:00/HH:00 ETMs
-    as zero.  For the UI we restore the carry from the previous scheduling hour.
-
-    Crucially, only an element that *started before* the boundary may define the
-    tail crossing that boundary. Rows whose start is already 60+ minutes are
-    queued overrun rows; counting them is what produced false +17/+30/+50 min
-    values in 1.2.12-1.2.15.
-    """
-    out = [dict(row) for row in rows]
-    by_hour: dict[int, list[dict]] = {}
-    for row in out:
-        try:
-            hour = int(row.get("schedule_hour"))
-        except (TypeError, ValueError):
-            continue
-        by_hour.setdefault(hour, []).append(row)
-
-    def offset_in_hour(row: dict, hour: int) -> float | None:
-        clock = _local_row_clock_seconds(row)
-        if clock is None:
-            return None
-        return clock - hour * 3600.0
-
-    # Repair immutable snapshots created before 1.2.20. The old midnight
-    # carry parser could count queued next-day rows returned by the 23h GetLog
-    # request, yielding values such as +56 minutes at 00:00. Native Zetta TOH
-    # is normally 0, so for this specific old derived source prefer the stored
-    # native value when the derived carry is clearly implausible.
-    for marker in by_hour.get(0, []):
-        if str(marker.get("event_type") or "") != "etm" or _local_etm_kind(marker) not in {"Hard", "Soft"}:
-            continue
-        if str(marker.get("zetta_gap_source") or "") not in {"previous_hour_tail", "previous_hour_reset"}:
-            continue
-        try:
-            gap_ms = float(marker.get("zetta_gap_ms")) if marker.get("zetta_gap_ms") is not None else 0.0
-            native_ms = float(marker.get("zetta_gap_native_ms")) if marker.get("zetta_gap_native_ms") is not None else None
-        except (TypeError, ValueError):
-            continue
-        if abs(gap_ms) >= 10 * 60 * 1000 and native_ms is not None:
-            marker["zetta_gap_ms"] = native_ms
-            marker["zetta_gap_source"] = "native_midnight_guard"
-            marker["etm_delta_raw"] = _local_gap_ms_to_raw(native_ms)
-
-    def first_playable_after(group: list[dict], index: int, reset_clock: float) -> float | None:
-        for candidate in group[index + 1:]:
-            if str(candidate.get("event_type") or "") == "etm":
-                kind = _local_etm_kind(candidate)
-                if kind in {"Hard", "Soft", "Reset"}:
-                    return None
-                continue
-            if bool(candidate.get("zetta_skip")):
-                continue
-            clock = _local_row_clock_seconds(candidate)
-            if clock is None:
-                continue
-            return (clock - reset_clock) * 1000.0
-        return None
-
-    for hour in range(1, 24):
-        current = by_hour.get(hour, [])
-        marker = next(
-            (
-                row for row in current
-                if str(row.get("source_system") or "") == "zetta2go"
-                and str(row.get("event_type") or "") == "etm"
-                and _local_etm_kind(row) in {"Hard", "Soft"}
-                and (lambda off: off is not None and abs(off) <= 0.05)(offset_in_hour(row, hour))
-            ),
-            None,
-        )
-        if marker is None:
-            continue
-
-        prev_hour = hour - 1
-        previous = by_hour.get(prev_hour, [])
-        if not previous:
-            continue
-
-        last_control = 0.0
-        boundary_reset: tuple[int, dict, float] | None = None
-        for idx, row in enumerate(previous):
-            if str(row.get("event_type") or "") != "etm":
-                continue
-            kind = _local_etm_kind(row)
-            off = offset_in_hour(row, prev_hour)
-            if off is None:
-                continue
-            if kind in {"Hard", "Soft"} and 0 <= off < 3600.0:
-                last_control = max(last_control, off)
-            if kind == "Reset" and 3590.0 <= off <= 3600.0:
-                boundary_reset = (idx, row, off)
-
-        derived_ms: float | None = None
-        source = ""
-        if boundary_reset is not None:
-            idx, reset_row, reset_off = boundary_reset
-            reset_clock = _local_row_clock_seconds(reset_row)
-            local_ms = first_playable_after(previous, idx, reset_clock) if reset_clock is not None else None
-            if local_ms is None:
-                value = reset_row.get("zetta_reset_local_gap_ms")
-                if value is None:
-                    value = reset_row.get("zetta_gap_native_ms")
-                if value is None:
-                    value = reset_row.get("zetta_gap_ms")
-                try:
-                    local_ms = float(value) if value is not None else None
-                except (TypeError, ValueError):
-                    local_ms = None
-            if local_ms is not None:
-                derived_ms = local_ms - (3600.0 - reset_off) * 1000.0
-                source = "previous_hour_reset"
-        else:
-            ends: list[float] = []
-            for candidate in previous:
-                if str(candidate.get("event_type") or "") == "etm" or bool(candidate.get("zetta_skip")):
-                    continue
-                off = offset_in_hour(candidate, prev_hour)
-                if off is None or not (last_control <= off < 3600.0):
-                    continue
-                try:
-                    runtime = float(candidate.get("runtime_seconds") or 0.0)
-                except (TypeError, ValueError):
-                    runtime = 0.0
-                if runtime > 0:
-                    ends.append(off + runtime)
-            if ends:
-                derived_ms = (max(ends) - 3600.0) * 1000.0
-                source = "previous_hour_tail"
-
-        if derived_ms is None:
-            continue
-        marker["zetta_gap_ms"] = derived_ms
-        marker["zetta_gap_source"] = source
-        marker["etm_delta_raw"] = _local_gap_ms_to_raw(derived_ms)
-
-    return out
-
-
-
-def _local_apply_ignore_reset_gaps(rows: list[dict]) -> list[dict]:
-    """Return a display copy where RESET does not zero the ETM gap.
-
-    Zetta's own RESET gap is the authoritative delta.  RESET changes the gap
-    calculation baseline but does not force playout to the marker clock, so the
-    deltas are accumulated until the next Hard/Soft anchor.  If a RESET has no
-    gap in GetLog, it is ignored rather than reconstructed from row airtimes;
-    that fallback could produce false +30/+50 minute values on backtimed logs.
-    """
-    out: list[dict] = []
-    carry_ms = 0.0
-    last_reset_ms: float | None = None
-    reset_count = 0
-    missing_reset_count = 0
-
-    for original in rows:
-        row = dict(original)
-        out.append(row)
-        if str(row.get("source_system") or "") != "zetta2go":
-            continue
-        if str(row.get("event_type") or "") != "etm":
-            continue
-
-        kind = _local_etm_kind(row)
-        if kind == "Reset":
-            try:
-                gap_ms = float(row.get("zetta_gap_ms")) if row.get("zetta_gap_ms") is not None else None
-            except (TypeError, ValueError):
-                gap_ms = None
-            if gap_ms is None:
-                missing_reset_count += 1
-            else:
-                carry_ms += gap_ms
-                last_reset_ms = gap_ms
-                reset_count += 1
-            continue
-
-        if kind not in {"Hard", "Soft"}:
-            # HIT remains informational and does not reset the alternative view.
-            continue
-
-        try:
-            base_ms = float(row.get("zetta_gap_ms")) if row.get("zetta_gap_ms") is not None else None
-        except (TypeError, ValueError):
-            base_ms = None
-
-        if base_ms is not None:
-            correction = carry_ms
-            if str(row.get("zetta_gap_source") or "") == "previous_hour_reset" and last_reset_ms is not None:
-                correction -= last_reset_ms
-            effective_ms = base_ms + correction
-            row["zetta_gap_ignore_resets_ms"] = effective_ms
-            row["zetta_gap_ignore_resets_carry_ms"] = correction
-            row["zetta_gap_ignore_resets_reset_count"] = reset_count
-            row["zetta_gap_ignore_resets_missing_reset_count"] = missing_reset_count
-            row["etm_delta_raw"] = _local_gap_ms_to_raw(effective_ms)
-            row["zetta_gap_display_mode"] = "ignore_resets"
-
-        carry_ms = 0.0
-        last_reset_ms = None
-        reset_count = 0
-        missing_reset_count = 0
-
-    return out
-
 def _local_filter_etm_rows(rows: list[dict], kinds: set[str]) -> list[dict]:
     if not kinds:
         return [r for r in rows if str(r.get("event_type") or "") != "etm"]
@@ -2837,7 +2604,7 @@ def _local_filter_etm_rows(rows: list[dict], kinds: set[str]) -> list[dict]:
     ]
 
 
-def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = False) -> None:
+def _render_local_etm_gap_summary(rows: list[dict]) -> None:
     markers = [
         row for row in rows
         if str(row.get("event_type") or "") == "etm" and _local_etm_kind(row) in {"Hard", "Soft"}
@@ -2860,29 +2627,9 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
     parsed = [(row, gap_seconds(str(row.get("etm_delta_raw") or ""))) for row in markers]
     direct_zetta = all(str(row.get("source_system") or "") == "zetta2go" for row in markers)
     nonzero = sum(1 for _row, value in parsed if value is not None and abs(value) >= .05)
+    missing = sum(1 for _row, value in parsed if value is None)
     positives = [value for _row, value in parsed if value is not None and value > 0]
     negatives = [value for _row, value in parsed if value is not None and value < 0]
-
-    # The GSelector export does not contain the runtime of traffic/spot blocks
-    # loaded later by Zetta. It can therefore never reproduce Zetta's ETM Gap
-    # exactly. Mark Hard/Soft segments where this is especially relevant instead
-    # of silently presenting the GSelector number as a Zetta-equivalent value.
-    diagnostic_by_id: dict[int, tuple[int, int]] = {}
-    previous_control_index = 0
-    for idx, row in enumerate(rows):
-        if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) not in {"Hard", "Soft"}:
-            continue
-        segment = rows[previous_control_index:idx]
-        reset_count = sum(
-            1 for item in segment
-            if str(item.get("event_type") or "") == "etm" and _local_etm_kind(item) == "Reset"
-        )
-        unknown_traffic = sum(
-            1 for item in segment
-            if str(item.get("event_type") or "") == "traffic" and item.get("runtime_seconds") is None
-        )
-        diagnostic_by_id[int(row.get("id") or id(row))] = (reset_count, unknown_traffic)
-        previous_control_index = idx + 1
 
     def fmt_seconds(value: float | None) -> str:
         if value is None:
@@ -2898,33 +2645,20 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
     max_late = fmt_seconds(max(positives)) if positives else "—"
     max_early = fmt_seconds(min(negatives)) if negatives else "—"
     if direct_zetta:
-        st.markdown("#### ETM Hard / Soft — gapy Zetta")
-        if ignore_resets:
-            reset_markers = sum(int(row.get("zetta_gap_ignore_resets_reset_count") or 0) for row, _value in parsed)
-            missing_resets = sum(int(row.get("zetta_gap_ignore_resets_missing_reset_count") or 0) for row, _value in parsed)
-            missing_note = f" · bez gapu w GetLog: {missing_resets}" if missing_resets else ""
-            st.caption(
-                f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
-                f"Ignoruj resety: ON · doliczono {reset_markers} RESET-ów{missing_note}. Carry bierze bezpośrednio "
-                "gap RESET zwrócony przez Zetta2GO; RESET bez gapu nie jest zgadywany z AirTime/runtime. HARD i SOFT "
-                "są traktowane jako dokładne kotwice czasu."
-            )
-        else:
-            carried_reset = sum(1 for row, _value in parsed if str(row.get("zetta_gap_source") or "") == "previous_hour_reset")
-            carried_tail = sum(1 for row, _value in parsed if str(row.get("zetta_gap_source") or "") == "previous_hour_tail")
-            st.caption(
-                f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
-                "Gapy śródgodzinne pochodzą bezpośrednio z Zetta2GO/GetLog. Przy pełnej godzinie Zetta2GO zeruje TOH, "
-                f"więc RadioCharts przenosi końcowy RESET poprzedniej godziny ({carried_reset}) albo, gdy go nie ma, "
-                f"liczy tylko element rozpoczęty przed 60:00 po ostatnim Hard/Soft ({carried_tail}); pozycje startujące "
-                "już jako 60+ nie zawyżają gapu."
-            )
+        st.markdown("#### ETM Hard / Soft — CalculatedTimes Zetta2GO")
+        st.caption(
+            f"{len(markers)} markerów · ≠ 0: {nonzero} · brak wartości: {missing} · "
+            f"max +: {max_late} · max −: {max_early}. "
+            "RadioCharts pokazuje natywny gap z GetLog → cell[16] (CalculatedTimes): "
+            "HIT preferuje HitETMGap, potem GapToETM; pozostałe ETM preferują GapToETM. "
+            "OriginalGap i starsze pola Gap/GapTime są tylko fallbackiem. Jeśli Zetta nie poda wartości, jest —; "
+            "nie liczymy carry, nie przenosimy RESET-ów i nie rekonstruujemy gapu z AirTime/runtime."
+        )
     else:
         st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
         st.caption(
             f"{len(markers)} markerów · ≠ 0: {nonzero} · max +: {max_late} · max −: {max_early}. "
-            "To są wartości +/- zapisane w eksporcie GSelectora, nie gap Zetty. Zetta może mieć inny wynik po załadowaniu "
-            "realnych bloków reklamowych; ⚠ oznacza segment z RESET-em lub blokiem traffic bez runtime."
+            "To są wartości +/- zapisane bezpośrednio w eksporcie GSelectora."
         )
 
     cards = []
@@ -2933,31 +2667,18 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
         hhmm = raw_time[:5] if len(raw_time) >= 5 else raw_time
         kind = _local_etm_kind(row).upper()
         gap = _local_normalize_gap(str(row.get("etm_delta_raw") or "")) or "—"
-        css = "rc-etm-chip"
         gap_css = "rc-etm-gap"
         if value is not None and value <= -60.0:
             gap_css += " rc-etm-under"
         elif value is not None and value >= 180.0:
             gap_css += " rc-etm-over"
-        resets, traffic = diagnostic_by_id.get(int(row.get("id") or id(row)), (0, 0))
-        warnings = []
-        if not direct_zetta:
-            if resets:
-                warnings.append(f"RESET: {resets}")
-            if traffic:
-                warnings.append(f"traffic bez runtime: {traffic}")
-        warning = ""
-        if warnings:
-            warning = (
-                f'<span class="rc-etm-risk" title="{html.escape("; ".join(warnings))}">⚠</span>'
-            )
+        source = str(row.get("zetta_gap_source") or "") if direct_zetta else ""
+        source_title = f' title="{html.escape(source)}"' if source else ""
         cards.append(
-            f'<div class="{css}"><span class="rc-etm-time">{html.escape(hhmm)}</span>'
+            f'<div class="rc-etm-chip"><span class="rc-etm-time">{html.escape(hhmm)}</span>'
             f'<span class="rc-etm-kind">{html.escape(kind)}</span>'
-            f'<span class="{gap_css}">{html.escape(gap)}</span>{warning}</div>'
+            f'<span class="{gap_css}"{source_title}>{html.escape(gap)}</span></div>'
         )
-    # Column-major layout: 00 under 01 under 02... and only then the next
-    # column.  Up to three compact columns keeps a full day readable.
     column_count = min(3, max(1, math.ceil(len(cards) / 12)))
     rows_per_column = max(1, math.ceil(len(cards) / column_count))
     st.markdown(
@@ -2965,7 +2686,6 @@ def _render_local_etm_gap_summary(rows: list[dict], *, ignore_resets: bool = Fal
         + "".join(cards) + "</div>",
         unsafe_allow_html=True,
     )
-
 
 def _local_default_date(values: list[str], kind: str) -> date | None:
     if not values:
@@ -3210,6 +2930,8 @@ def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "sche
         gap = _local_normalize_gap(str(row.get("etm_delta_raw") or ""))
         if gap:
             meta_bits.append(f"gap {gap}")
+        elif str(row.get("source_system") or "") == "zetta2go":
+            meta_bits.append("gap —")
     for label, key in (("Mood", "mood"), ("Opener", "opener"), ("T.Open", "texture_open"), ("T.Close", "texture_close")):
         value = str(row.get(key) or "").strip()
         if value:
@@ -3418,7 +3140,6 @@ def _local_played_continuity_rows(revision: str, service_date: str, played_rows:
     pivot=current or (playable_past[-1] if playable_past else None)
     if pivot is None: return out
     scheduled=[dict(r) for r in cached_local_day_events(revision,"schedule",service_date)]
-    scheduled=_local_apply_ignore_reset_gaps(_local_apply_hour_boundary_gaps(scheduled))
     pivot_index=next((i for i,r in enumerate(scheduled) if _local_events_match(pivot,r)),None)
     if pivot_index is None:
         try: ps=float(pivot.get("sort_seconds"))
@@ -3592,10 +3313,9 @@ def _render_local_timeline_content(
     etm_kinds = set(etm_kinds)
     full_day_rows = [dict(row) for row in cached_local_day_events(revision, kind, selected_date)]
     if kind == "schedule":
-        full_day_rows = _local_apply_hour_boundary_gaps(full_day_rows)
-        # User-facing schedule uses the alternative interpretation by default:
-        # RESET is informational, HARD/SOFT are the actual timing anchors.
-        full_day_rows = _local_apply_ignore_reset_gaps(full_day_rows)
+        # Zetta ETM gaps are already normalized from GetLog cell[16] /
+        # CalculatedTimes by local_station. Never rebuild them from neighbouring
+        # rows, RESET carry or hour-boundary airtimes in the UI.
         full_day_rows = _local_schedule_current_rows(revision, selected_date, full_day_rows)
     elif kind == "played":
         full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
@@ -3768,7 +3488,7 @@ def _render_local_etm_page(revision: str) -> None:
         st.info("Brak Scheduled — nie ma danych ETM.")
         return
     default_date = _local_default_date(dates, "schedule") or date.fromisoformat(dates[-1])
-    c1, c2, c3 = st.columns([1.0, .9, 1.2], vertical_alignment="bottom")
+    c1, c2 = st.columns([1.0, 1.2], vertical_alignment="bottom")
     selected_date = c1.selectbox(
         "Dzień",
         dates,
@@ -3776,13 +3496,7 @@ def _render_local_etm_page(revision: str) -> None:
         format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
         key="our_radio_etm_date",
     )
-    ignore_resets = c2.toggle(
-        "Ignoruj resety",
-        value=True,
-        key="our_radio_etm_ignore_resets",
-        help="RESET jest informacyjny; jego gap przechodzi do kolejnego HARD/SOFT. HARD/SOFT są kotwicami czasu.",
-    )
-    marker_filter = c3.segmented_control(
+    marker_filter = c2.segmented_control(
         "Markery",
         ["Hard + Soft", "Hard", "Soft"],
         default="Hard + Soft",
@@ -3790,45 +3504,39 @@ def _render_local_etm_page(revision: str) -> None:
     ) or "Hard + Soft"
 
     rows = [dict(row) for row in cached_local_day_events(revision, "schedule", selected_date)]
-    rows = _local_apply_hour_boundary_gaps(rows)
-    if ignore_resets:
-        rows = _local_apply_ignore_reset_gaps(rows)
     allowed = {"Hard", "Soft"} if marker_filter == "Hard + Soft" else {marker_filter}
     filtered = [
         row for row in rows
         if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) in allowed
     ]
-    _render_local_etm_gap_summary(filtered, ignore_resets=ignore_resets)
-    st.caption("Mapa obejmuje zawsze cały dzień. 00:00 jest dodatkowo chronione przed starym błędem, w którym 60+ pozycje z poprzedniej doby mogły sztucznie dać kilkadziesiąt minut gapu.")
+    _render_local_etm_gap_summary(filtered)
+    st.caption(
+        "Źródło ETM w Zetta2GO: GetLog → cell[16] / CalculatedTimes. "
+        "Nie ma już rekonstrukcji pełnej godziny, carry z poprzedniej godziny ani trybu „Ignoruj resety”. "
+        "Brak wartości w Zetta = —."
+    )
 
-    # Make the remaining small disagreements auditable instead of hiding the
-    # arithmetic. Native = value returned by Zetta; carry = RESET contribution;
-    # wynik = what the Ignore RESET view displays.
-    diag=[]
+    diag = []
     for row in filtered:
-        if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) not in {"Hard","Soft"}:
+        if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) not in {"Hard", "Soft"}:
             continue
-        native = row.get("zetta_gap_native_ms")
-        if native is None and str(row.get("zetta_gap_source") or "").startswith("native"):
-            native = row.get("zetta_gap_ms")
-        if native is None and row.get("zetta_gap_source") in {None,"","native"}:
-            native = row.get("zetta_gap_ms")
-        effective = row.get("zetta_gap_ignore_resets_ms") if ignore_resets else row.get("zetta_gap_ms")
-        carry = row.get("zetta_gap_ignore_resets_carry_ms") if ignore_resets else 0
+        calculated = row.get("payload", {}).get("calculated_times") if isinstance(row.get("payload"), dict) else {}
+        if not isinstance(calculated, dict):
+            calculated = {}
         diag.append({
             "Czas": str(row.get("air_time_raw") or "")[:8],
             "ETM": _local_etm_kind(row).upper(),
-            "Zetta": _local_gap_ms_to_raw(native) if native is not None else "—",
-            "Carry RESET": _local_gap_ms_to_raw(carry) if carry not in (None,0,0.0) else "+00:00",
-            "Wynik": _local_gap_ms_to_raw(effective) if effective is not None else str(row.get("etm_delta_raw") or "—"),
-            "Źródło": str(row.get("zetta_gap_source") or "native"),
-            "RESET-y": int(row.get("zetta_gap_ignore_resets_reset_count") or 0),
+            "Gap": _local_normalize_gap(str(row.get("etm_delta_raw") or "")) or "—",
+            "Źródło": str(row.get("zetta_gap_source") or "CalculatedTimes: brak"),
+            "HitETMGap": calculated.get("HitETMGap"),
+            "GapToETM": calculated.get("GapToETM"),
+            "OriginalGap": calculated.get("OriginalGap"),
         })
-    with st.expander("Diagnostyka ETM — skąd bierze się różnica", expanded=False):
+    with st.expander("Diagnostyka ETM — surowe CalculatedTimes", expanded=False):
         if diag:
             st.dataframe(pd.DataFrame(diag), hide_index=True, use_container_width=True, height=min(520, 42+32*len(diag)))
-            st.caption("Jeśli Zetta i Wynik różnią się, różnica powinna być dokładnie pokazana w Carry RESET. Dzięki temu można wskazać konkretny RESET, który powoduje rozjazd, zamiast zgadywać po całym dniu.")
-
+        else:
+            st.caption("Brak markerów do pokazania.")
 
 def _local_status_symbol(status: str) -> tuple[str, str, str]:
     lowered = str(status or "OK").casefold()
@@ -3874,6 +3582,12 @@ def _local_log_row_html(
     runtime = str(row.get("runtime_raw") or "")
     type_label = LOCAL_EVENT_LABELS.get(event_type, event_type)
     meta = f"{type_label} · {category}"
+    if event_type == "etm":
+        native_gap = _local_normalize_gap(str(row.get("etm_delta_raw") or ""))
+        if native_gap:
+            meta += f" · gap {native_gap}"
+        elif str(row.get("source_system") or "") == "zetta2go":
+            meta += " · gap —"
     if ghost_note:
         meta += f" · {ghost_note}"
 

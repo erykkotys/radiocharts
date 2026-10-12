@@ -19,9 +19,11 @@ def test_1220_web_has_shared_emaus_tabs_colors_and_collapsible_traffic():
     assert "--rc-traffic:#ff5d5d" in APP
 
 
-def test_1220_etm_is_whole_day_three_column_and_ignore_resets_default():
+def test_1230_etm_is_whole_day_three_column_and_uses_native_calculated_times():
     assert "def _render_local_etm_page" in APP
-    assert 'value=True,\n        key="our_radio_etm_ignore_resets"' in APP
+    assert 'key="our_radio_etm_ignore_resets"' not in APP
+    assert "GetLog → cell[16]" in APP
+    assert "CalculatedTimes" in APP
     assert "column_count = min(3" in APP
     assert "grid-template-rows:repeat" in APP
 
@@ -33,10 +35,12 @@ def test_1220_custom_element_presets_are_persisted():
     assert "set_app_settings" in APP
 
 
-def test_1220_midnight_carry_rejects_next_day_queued_rows_and_repairs_old_snapshots():
-    assert "if actual.hour != 23:" in LOCAL
-    assert '"native_midnight_guard"' in LOCAL
-    assert "abs(inherited) >= 10 * 60 * 1000" in LOCAL
+def test_1230_midnight_and_hour_boundary_carry_reconstruction_is_removed():
+    assert "_raw_zetta_previous_hour_carry" not in LOCAL
+    assert "_apply_zetta_hour_boundary_gap_carry" not in LOCAL
+    assert '"native_midnight_guard"' not in LOCAL
+    assert "_zetta_native_etm_gap" in LOCAL
+    assert "CalculatedTimes: brak" in LOCAL
 
 
 def test_1220_played_continuity_and_inline_progress_exist_web_and_android():

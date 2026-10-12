@@ -88,11 +88,13 @@ def test_1222_existing_song_matcher_uses_shared_identity_alias_layer():
     assert "db.get_or_create_song(con, artist, title)" in LOCAL
 
 
-def test_1222_etm_diagnostics_preserve_native_gap_and_show_carry():
-    assert '"zetta_gap_native_ms": asset.get("gap")' in LOCAL
-    assert "Diagnostyka ETM — skąd bierze się różnica" in APP
-    assert '"Carry RESET"' in APP
-    assert '"Zetta"' in APP and '"Wynik"' in APP
-    # No arbitrary clipping: legitimate evening overtimes must stay visible.
+def test_1230_etm_diagnostics_show_raw_calculated_times_without_carry():
+    assert '"calculated_times": calculated' in LOCAL
+    assert '"zetta_gap_native_ms": gap_ms' in LOCAL
+    assert '"zetta_asset_gap_ms": asset.get("gap")' in LOCAL
+    assert "Diagnostyka ETM — surowe CalculatedTimes" in APP
+    assert '"HitETMGap"' in APP and '"GapToETM"' in APP and '"OriginalGap"' in APP
+    assert '"Carry RESET"' not in APP
+    # No arbitrary clipping: legitimate native values must stay visible.
     etm_block = APP[APP.index("def _render_local_etm_page"):APP.index("def _local_status_symbol")]
     assert ".clip(" not in etm_block

@@ -238,7 +238,7 @@ def test_v124_etm_gap_presets_and_daily_summary_contract(tmp_path, monkeypatch):
     assert '"Reset + Hit": {"Reset", "Hit"}' in APP
     assert '"Programowe (bez ETM/komend)"' in APP
     assert 'ETM Hard / Soft — gapy planu GSelector' in APP
-    assert 'nie gap Zetty' in APP
+    assert 'To są wartości +/- zapisane bezpośrednio w eksporcie GSelectora.' in APP
     assert 'frame.loc[etm_mask, "Gap"]' in APP
 
 
