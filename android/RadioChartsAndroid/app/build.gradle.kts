@@ -23,8 +23,8 @@ android {
         applicationId = "pl.radiocharts.mobile"
         minSdk = 28
         targetSdk = 35
-        versionCode = 56
-        versionName = "1.2.33"
+        versionCode = 57
+        versionName = "1.2.34"
     }
 
     signingConfigs {

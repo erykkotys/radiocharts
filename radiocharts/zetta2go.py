@@ -303,18 +303,20 @@ class Zetta2GoClient:
 
         The Zetta2GO log grid itself requests one clock hour at a time.  A single
         midnight-to-23:59 ``GetLog`` request looks valid but the server only
-        returns the first part of the day on this installation.  Fetching the 24
-        hourly windows mirrors the web UI and, importantly, gives the parser a
-        TOH row for every scheduling hour (needed for legitimate 60+ minute
-        overrun notation).
+        returns the first part of the day on this installation.  We therefore
+        fetch 24 target-hour windows.  Each request includes one hour of lead-in
+        context so the first ETM of the target hour is not returned as a context-
+        free boundary marker with a zero/empty native gap.  Rows are still
+        deduplicated into one broadcast day and assigned to their own target hour.
         """
         d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
-        # GetLog hourly windows overlap at clock boundaries.  In particular,
-        # the previous-hour response can contain the next full-hour ETM as a
-        # context row with a placeholder ``asset.gap = 0``.  The same ETM is
-        # returned again by its own hour with the real gap shown by Zetta Full.
-        # Keep candidates until all 24 calls are done and resolve duplicate ETM
-        # ids in favour of the row returned by the ETM's own clock hour.
+        # GetLog values for ETMs are context-sensitive at request boundaries.
+        # When a request begins exactly at 06:00, for example, the 06:00 ETM can
+        # be returned as the first row with a zero/empty native gap even though
+        # Zetta Full shows a non-zero value. Half-hour ETMs in the same response
+        # are correct because preceding log rows are present. Give every target
+        # hour one full hour of lead-in context and still resolve duplicate ETM
+        # ids in favour of the row returned for the ETM's own target hour.
         selected_rows: dict[str, tuple[int, int, int, dict[str, Any]]] = {}
         serial = 0
         duplicate_etm_boundaries_resolved = 0
@@ -338,6 +340,18 @@ class Zetta2GoClient:
                 return None
             try:
                 return datetime.fromisoformat(raw.replace("Z", "+00:00")).hour
+            except ValueError:
+                return None
+
+        def row_air_date(row: dict[str, Any]) -> date | None:
+            cell = row.get("cell")
+            if not isinstance(cell, list) or len(cell) <= 5:
+                return None
+            raw = str(cell[5] or "").strip()
+            if not raw:
+                return None
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
             except ValueError:
                 return None
 
@@ -378,7 +392,10 @@ class Zetta2GoClient:
             previous_hour_rows = []
 
         for hour in range(24):
-            start = datetime.combine(d, dt_time(hour, 0, 0))
+            target_start = datetime.combine(d, dt_time(hour, 0, 0))
+            # Native ETM gap fields need preceding log context.  Keep the target
+            # hour as the ownership key, but ask GetLog for one hour before it.
+            start = target_start - timedelta(hours=1)
             end = datetime.combine(d, dt_time(hour, 59, 59, 900000))
             payload = self.get_log_range(start, end)
             last_payload = payload
@@ -387,6 +404,12 @@ class Zetta2GoClient:
                 continue
             for index, row in enumerate(rows):
                 if not isinstance(row, dict):
+                    continue
+                # The hour-0 request reaches into the previous calendar day.
+                # Keep the lead-in only as server-side calculation context; do
+                # not merge those previous-day rows into the requested service day.
+                air_date = row_air_date(row)
+                if air_date is not None and air_date != d:
                     continue
                 row_id = str(row.get("id") or "").strip()
                 if row_id:

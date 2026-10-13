@@ -1,3 +1,11 @@
+## 1.2.34 — ETM: GetLog z kontekstem poprzedniej godziny
+
+- Naprawa wzorca widocznego w Zetta Full: pełnogodzinne ETM-y były zerowane, podczas gdy markery `:30` miały poprawne wartości. Przyczyną było rozpoczynanie każdego zapytania GetLog dokładnie od `HH:00`, więc pierwszy marker godziny nie miał poprzedzających wierszy kontekstu.
+- Każde 24 zapytania nadal ma własną godzinę docelową, ale `fromDateTime` jest cofnięte o 1 godzinę. Dzięki temu Zetta2GO sama zwraca natywne `Asset.gap`/CalculatedTimes w takim samym kontekście, w jakim widzi je log; RadioCharts nadal niczego nie wylicza z runtime/AirTime.
+- Deduplikacja nadal przypisuje ETM do jego własnej godziny docelowej. Lead-in z poprzedniego dnia dla `00:00` służy wyłącznie jako kontekst i nie jest zapisywany jako część bieżącego dnia.
+- Dodano test regresyjny pilnujący godzinnych okien z 1 h lead-in oraz odrzucania poprzedniodniowych wierszy.
+- Android: wersja `1.2.34`, `versionCode = 57`.
+
 ## 1.2.33 — ETM: poprawne duplikaty na granicy godzin Zetta2GO
 
 - GetLog nadal jest pobierany godzinami, ale Zetta2GO potrafi zwrócić ten sam ETM na granicy dwóch okien. Poprzednie okno często niesie kontekstową kopię pełnogodzinnego markera z `Asset.gap=0`, a właściwe okno godzinowe zwraca realny gap widoczny w Zetta Full.
