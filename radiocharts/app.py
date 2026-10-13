@@ -3590,8 +3590,9 @@ def _local_log_row_html(
     title = str(row.get("title") or "").strip()
     content = f"{artist} — {title}" if event_type == "song" and artist else (title or category)
     raw_time = str(row.get("air_time_raw") or "")
-    gap = str(row.get("gap_raw") or "")
-    time_label = raw_time + (f"  ({gap} gap)" if gap else "")
+    # Do not append GSelector/Zetta 60+ minute overrun as "gap" here.
+    # ETM gap is a separate native Zetta value and is shown in ETM metadata.
+    time_label = raw_time
     runtime = str(runtime_override or row.get("runtime_raw") or "")
     runtime_html = html.escape(runtime)
     if runtime_delta:

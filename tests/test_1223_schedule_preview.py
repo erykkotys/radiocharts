@@ -12,7 +12,7 @@ def test_schedule_preview_uses_delegated_click_handler():
 
 
 def test_release_1223():
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '1.2.34'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '1.2.35'
     gradle = (ROOT / 'android' / 'RadioChartsAndroid' / 'app' / 'build.gradle.kts').read_text(encoding='utf-8')
-    assert 'versionCode = 57' in gradle
-    assert 'versionName = "1.2.34"' in gradle
+    assert 'versionCode = 58' in gradle
+    assert 'versionName = "1.2.35"' in gradle

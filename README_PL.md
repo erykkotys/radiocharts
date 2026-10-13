@@ -1,10 +1,11 @@
-## 1.2.34 — ETM: GetLog z kontekstem poprzedniej godziny
+## 1.2.35 — naprawa regresji logu po kontekście ETM
 
-- Naprawa wzorca widocznego w Zetta Full: pełnogodzinne ETM-y były zerowane, podczas gdy markery `:30` miały poprawne wartości. Przyczyną było rozpoczynanie każdego zapytania GetLog dokładnie od `HH:00`, więc pierwszy marker godziny nie miał poprzedzających wierszy kontekstu.
-- Każde 24 zapytania nadal ma własną godzinę docelową, ale `fromDateTime` jest cofnięte o 1 godzinę. Dzięki temu Zetta2GO sama zwraca natywne `Asset.gap`/CalculatedTimes w takim samym kontekście, w jakim widzi je log; RadioCharts nadal niczego nie wylicza z runtime/AirTime.
-- Deduplikacja nadal przypisuje ETM do jego własnej godziny docelowej. Lead-in z poprzedniego dnia dla `00:00` służy wyłącznie jako kontekst i nie jest zapisywany jako część bieżącego dnia.
-- Dodano test regresyjny pilnujący godzinnych okien z 1 h lead-in oraz odrzucania poprzedniodniowych wierszy.
-- Android: wersja `1.2.34`, `versionCode = 57`.
+- Naprawiono regresję z 1.2.34, która mieszała do docelowej godziny także wiersze z godzinnego lead-inu. To powodowało wpisy typu `10:60:38`, `11:79:02` oraz lawinę fałszywych `Niezagrane` / `Dodane` w Porównaniu.
+- `GetLog` nadal dostaje 1 godzinę poprzedzającego kontekstu, żeby Zetta sama policzyła natywne gapy pełnogodzinnych ETM-ów, ale RadioCharts zapisuje z odpowiedzi **wyłącznie grupę należącą do docelowego TOH**. Poprzednia grupa jest tylko kontekstem obliczeniowym i nie trafia do Scheduled/Played.
+- ETM na granicy godziny jest przypisywany do własnej godziny zegarowej; zwykłe audio z prawdziwą semantyką 60+ może nadal należeć do poprzedniej godziny bez przeciekania do następnej.
+- W Porównaniu usunięto dopisywanie `(+xx:xx gap)` do zwykłego Air Time. Natywny gap ETM pozostaje osobną informacją z Zetty, dzięki czemu nie mieszamy dwóch różnych pojęć.
+- Dodano test regresyjny odtwarzający dwugodzinny payload z poprzednią grupą, overrunem i pełnogodzinnym ETM.
+- Android: wersja `1.2.35`, `versionCode = 58`.
 
 ## 1.2.33 — ETM: poprawne duplikaty na granicy godzin Zetta2GO
 

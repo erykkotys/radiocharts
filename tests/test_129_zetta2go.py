@@ -520,7 +520,8 @@ def test_1233_hourly_getlog_prefers_etm_copy_from_its_own_hour(monkeypatch):
 
     monkeypatch.setattr(client, "get_log_range", fake_range)
     payload = client.get_log(dt_date(2026, 10, 13))
-    assert payload["radiocharts_boundary_etm_duplicates_resolved"] == 1
+    assert payload["radiocharts_boundary_etm_duplicates_resolved"] == 0
+    assert payload["radiocharts_target_toh_groups"] == 24
     parsed = parse_zetta2go_log(payload, "2026-10-13", kind="schedule")
     by_id = {row["external_id"]: row for row in parsed}
     assert by_id["hard-0600"]["etm_delta_raw"] == "+01:26"
@@ -613,3 +614,75 @@ def test_1234_hour_zero_leadin_does_not_merge_previous_day_rows(monkeypatch):
     parsed = parse_zetta2go_log(payload, "2026-10-13", kind="schedule")
     soft = next(row for row in parsed if row["external_id"] == "soft-0000")
     assert soft["etm_delta_raw"] == "+00:37"
+
+
+def test_1235_leadin_context_does_not_leak_previous_scheduling_group(monkeypatch):
+    from datetime import date as dt_date
+    from radiocharts.zetta2go import Zetta2GoClient, Zetta2GoSettings
+
+    cfg = Zetta2GoSettings(
+        base_url="https://example.invalid/Zetta2GO", station_id="station",
+        username="u", password="p", verify_tls=False, timeout=1,
+        schedule_horizon_days=14, live_enabled=True, schedule_enabled=True,
+    )
+    client = Zetta2GoClient(cfg)
+
+    def fake_range(start, end):
+        if end.date().isoformat() == "2026-10-12":
+            return _payload(_toh_row(at="2026-10-12T23:00:00.0000000", uid="prev-meta-toh"))
+        hour = end.hour
+        prev = (hour - 1) % 24
+        rows = []
+        # Simulate the real two-hour response: previous scheduling group first,
+        # including an overrun whose wall clock has already crossed the hour.
+        if hour > 0:
+            rows.extend([
+                _toh_row(at=f"2026-10-13T{prev:02d}:00:00.0000000", uid=f"ctx-toh-{prev:02d}-{hour:02d}"),
+                _asset_row(
+                    seq=90,
+                    at=f"2026-10-13T{hour:02d}:00:38.0000000",
+                    uid=f"ctx-overrun-{prev:02d}-{hour:02d}",
+                    asset_id=f"ctx-asset-{prev:02d}-{hour:02d}",
+                    title=f"Context {prev:02d}",
+                ),
+            ])
+        rows.extend([
+            _toh_row(at=f"2026-10-13T{hour:02d}:00:00.0000000", uid=f"toh-{hour:02d}"),
+            _asset_row(
+                seq=1,
+                at=f"2026-10-13T{hour:02d}:05:00.0000000",
+                uid=f"evt-{hour:02d}",
+                asset_id=f"asset-{hour:02d}",
+                title=f"Target {hour:02d}",
+            ),
+        ])
+        if hour == 6:
+            rows.insert(-1, _etm_row(
+                seq=0,
+                at="2026-10-13T06:00:00.0000000+02:00",
+                uid="hard-0600-native",
+                etm_type="Hard",
+                calculated={"GapToETM": 0},
+                asset_gap=86_000,
+            ))
+        return _payload(*rows)
+
+    monkeypatch.setattr(client, "get_log_range", fake_range)
+    payload = client.get_log(dt_date(2026, 10, 13))
+    ids = {str(row.get("id") or "") for row in payload["rows"]}
+    assert not any(value.startswith("ctx-overrun-") for value in ids)
+    assert {f"evt-{hour:02d}" for hour in range(24)}.issubset(ids)
+    assert payload["radiocharts_target_toh_groups"] == 24
+    assert payload["radiocharts_context_rows_dropped"] > 0
+
+    parsed = parse_zetta2go_log(payload, "2026-10-13", kind="schedule")
+    by_id = {row["external_id"]: row for row in parsed}
+    assert by_id["hard-0600-native"]["etm_delta_raw"] == "+01:26"
+    assert by_id["hard-0600-native"]["schedule_hour"] == 6
+    assert all(not row["title"].startswith("Context ") for row in parsed)
+
+
+def test_1235_comparison_does_not_label_60plus_airtime_as_etm_gap():
+    app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
+    assert 'time_label = raw_time + (f"  ({gap} gap)" if gap else "")' not in app
+    assert "time_label = raw_time" in app

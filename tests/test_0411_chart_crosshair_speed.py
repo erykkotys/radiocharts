@@ -43,6 +43,6 @@ def test_first_chart_date_queries_do_not_group_entire_chart_archive():
 
 def test_versions_0411():
     gradle=(ROOT/'android/RadioChartsAndroid/app/build.gradle.kts').read_text(encoding='utf-8')
-    assert 'versionCode = 57' in gradle
-    assert 'versionName = "1.2.34"' in gradle
-    assert (ROOT/'VERSION').read_text(encoding='utf-8').strip() == '1.2.34'
+    assert 'versionCode = 58' in gradle
+    assert 'versionName = "1.2.35"' in gradle
+    assert (ROOT/'VERSION').read_text(encoding='utf-8').strip() == '1.2.35'
