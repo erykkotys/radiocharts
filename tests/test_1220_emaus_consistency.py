@@ -22,7 +22,7 @@ def test_1220_web_has_shared_emaus_tabs_colors_and_collapsible_traffic():
 def test_1232_etm_is_whole_day_three_column_and_matches_native_zetta_row_gap():
     assert "def _render_local_etm_page" in APP
     assert 'key="our_radio_etm_ignore_resets"' not in APP
-    assert "GetLog → cell[7].gap" in APP
+    assert "GetLog → cell[16] / CalculatedTimes" in APP
     assert "Asset.gap" in APP
     assert "CalculatedTimes" in APP
     assert "column_count = min(3" in APP

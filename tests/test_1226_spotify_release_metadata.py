@@ -15,10 +15,10 @@ def _use_db(monkeypatch, path):
 
 
 def test_release_contract_and_spotify_share_no_songlink():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.35"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.36"
     gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 58' in gradle
-    assert 'versionName = "1.2.35"' in gradle
+    assert 'versionCode = 59' in gradle
+    assert 'versionName = "1.2.36"' in gradle
     assert "https://song.link/i/" not in APP
     assert "https://open.spotify.com/track/" in APP
     assert "spotify-id-from-metadata/json" in MUSIC_METADATA

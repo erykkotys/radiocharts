@@ -614,12 +614,11 @@ def _zetta_calculated_field(calculated: dict[str, Any], *names: str) -> tuple[ob
 
 
 def _zetta_native_etm_gap(calculated: dict[str, Any], etm_type: str) -> tuple[float | None, str]:
-    """Return a native ETM fallback from GetLog ``cell[16]`` CalculatedTimes.
+    """Return the native ETM value from GetLog ``cell[16]`` CalculatedTimes.
 
-    Zetta Full does *not* render the inline ETM gap from this object; it renders
-    the marker asset's ``gap`` field from ``cell[7]``. CalculatedTimes remains
-    useful as a native fallback when the marker asset does not contain ``gap``.
-    HIT markers prefer HitETMGap and then GapToETM; other ETMs prefer GapToETM.
+    This is the same field family used by Emaus Hub. HIT markers prefer
+    HitETMGap and then GapToETM; other ETMs prefer GapToETM. Missing native
+    values remain missing; nothing is inferred from the surrounding timeline.
     """
     kind = str(etm_type or "").strip().casefold()
     if kind == "hit":
@@ -643,17 +642,13 @@ def _zetta_native_etm_gap(calculated: dict[str, Any], etm_type: str) -> tuple[fl
 
 
 def _zetta_marker_gap(asset: dict[str, Any], calculated: dict[str, Any], etm_type: str) -> tuple[float | None, str]:
-    """Return the same native gap that Zetta Full shows on an ETM row.
+    """Return only Zetta2GO's native ``cell[16]`` CalculatedTimes ETM value.
 
-    The Zetta2GO log renderer uses the ETM asset's ``gap`` (GetLog cell[7])
-    for the inline value. Only when that field is absent do we fall back to the
-    native CalculatedTimes fields from cell[16]. No airtime/runtime derivation
-    is performed here.
+    This deliberately mirrors Emaus Hub.  ``Asset.gap``/``Asset.ogap`` from
+    ``cell[7]`` are retained in the payload for diagnostics only; RadioCharts
+    must not prefer them and must never derive a gap from airtimes, runtimes or
+    neighbouring events.
     """
-    if isinstance(asset, dict):
-        value = _zetta_gap_value_ms(asset.get("gap"))
-        if value is not None:
-            return value, "Asset.gap"
     fallback, field = _zetta_native_etm_gap(calculated, etm_type)
     if fallback is not None:
         return fallback, f"CalculatedTimes.{field}" if field else "CalculatedTimes"
@@ -661,10 +656,6 @@ def _zetta_marker_gap(asset: dict[str, Any], calculated: dict[str, Any], etm_typ
 
 
 def _zetta_original_gap_ms(calculated: dict[str, Any], asset: dict[str, Any] | None = None) -> float | None:
-    if isinstance(asset, dict):
-        value = _zetta_gap_value_ms(asset.get("ogap"))
-        if value is not None:
-            return value
     raw, _name = _zetta_calculated_field(calculated, "OriginalGap")
     return _zetta_gap_value_ms(raw)
 
@@ -827,8 +818,8 @@ def parse_zetta2go_log(
             "zetta_gap_source": gap_source if entry_type == 15 else "",
             "zetta_gap_field": gap_field if entry_type == 15 else "",
             "zetta_original_gap_ms": _zetta_original_gap_ms(calculated, asset) if entry_type == 15 else None,
-            # Keep both native representations. Zetta Full renders Asset.gap on
-            # the ETM row; CalculatedTimes is retained for fallback/diagnostics.
+            # Keep cell[7] values only for diagnostics. Displayed ETM gaps come
+            # exclusively from cell[16] / CalculatedTimes, like Emaus Hub.
             "zetta_asset_gap_ms": asset.get("gap") if entry_type == 15 else None,
             "zetta_asset_original_gap_ms": asset.get("ogap") if entry_type == 15 else None,
             **(_zetta_asset_metadata(asset) if entry_type == 106 else {}),
@@ -1583,10 +1574,9 @@ def events_for_day(
             item["zetta_skip"] = bool(meta.get("skip"))
             item["zetta_fixed"] = bool(meta.get("fixed"))
             item["zetta_valid_for_playback"] = meta.get("valid_for_playback")
-            # Re-read the native ETM value on every display. Zetta Full renders
-            # GetLog cell[7].gap in the ETM row, so prefer the already preserved
-            # marker asset gap; only fall back to cell[16]/CalculatedTimes. This
-            # also repairs snapshots imported by older RadioCharts versions.
+            # Re-read the native ETM value on every display from GetLog
+            # cell[16] / CalculatedTimes.  cell[7] gap/ogap are diagnostics only.
+            # This also repairs snapshots imported by older RadioCharts versions.
             calculated = meta.get("calculated_times") if isinstance(meta.get("calculated_times"), dict) else {}
             if item.get("event_type") == "etm":
                 marker_asset = {
@@ -1750,26 +1740,31 @@ def song_stats(
     return out
 
 
-def _identity_key(row: dict[str, Any], *, native_zetta_pair: bool = False) -> tuple[str, ...]:
+def _identity_key(
+    row: dict[str, Any],
+    *,
+    shared_zetta_external_ids: set[str] | None = None,
+) -> tuple[str, ...]:
     """Stable identity used inside one hourly reconciliation block.
 
-    Zetta log-event GUIDs are perfect only when *both* comparison sides come
-    from Zetta2GO.  For historical cutoffs imported from GSelector the GUID
-    namespace does not exist on the Scheduled side, so matching must fall back
-    to the symmetric artist/title identity.  The old code chose the GUID for
-    every Zetta row independently, which made a GSelector-vs-Zetta day look like
-    every single item had been deleted and re-added.
+    A Zetta log-event GUID is the strongest identity *only when that same GUID
+    exists on both snapshots*.  In practice the first item of an hour and some
+    rebuilt log rows can receive a different GUID between cutoff and live even
+    though artist/title/asset are unchanged.  Treating every Zetta GUID as
+    mandatory produced the absurd ``Niezagrane`` + ``Dodane`` pair for the same
+    visible song.
+
+    We therefore use a shared GUID when available (so a replacement with the
+    same log-event id can still be reported as ``Zmieniony``), and otherwise
+    fall back symmetrically to the semantic identity used cross-system.
     """
     typ = str(row.get("event_type") or "other")
-    if native_zetta_pair and str(row.get("source_system") or "") == "zetta2go":
-        ext = str(row.get("external_id") or "").strip()
-        if ext:
-            return (typ, "zetta-event", ext.casefold())
+    if str(row.get("source_system") or "") == "zetta2go":
+        ext = str(row.get("external_id") or "").strip().casefold()
+        if ext and ext in (shared_zetta_external_ids or set()):
+            return (typ, "zetta-event", ext)
 
     if typ == "song":
-        # Text identity is intentionally used for cross-system reconciliation.
-        # GSelector song IDs and Zetta GUIDs are unrelated namespaces, while the
-        # normalized credit/title pair is shared by both exports.
         return (
             typ,
             "text",
@@ -1778,8 +1773,6 @@ def _identity_key(row: dict[str, Any], *, native_zetta_pair: bool = False) -> tu
         )
     if typ == "etm":
         title = db.normalize(str(row.get("title") or ""))
-        # Imported Zetta ETM titles are synthesized to the same MM:SS/type form
-        # as GSelector. External IDs intentionally do not participate here.
         return (typ, "text", title)
     title = db.normalize(str(row.get("title") or ""))
     if title:
@@ -1789,17 +1782,31 @@ def _identity_key(row: dict[str, Any], *, native_zetta_pair: bool = False) -> tu
     return (typ, "fallback", category, ext)
 
 
+def _shared_zetta_external_ids(
+    scheduled: list[dict[str, Any]],
+    played: list[dict[str, Any]],
+) -> set[str]:
+    def ids(rows: list[dict[str, Any]]) -> set[str]:
+        return {
+            str(row.get("external_id") or "").strip().casefold()
+            for row in rows
+            if str(row.get("source_system") or "") == "zetta2go"
+            and str(row.get("external_id") or "").strip()
+        }
+    return ids(scheduled) & ids(played)
+
+
 def _occurrence_tokens(
     rows: list[dict[str, Any]],
     *,
-    native_zetta_pair: bool = False,
+    shared_zetta_external_ids: set[str] | None = None,
 ) -> tuple[list[tuple[Any, ...]], dict[tuple[Any, ...], dict[str, Any]]]:
     """Make duplicate-safe tokens: the second play of a song is a separate event."""
     seen: Counter[tuple[str, ...]] = Counter()
     tokens: list[tuple[Any, ...]] = []
     lookup: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
-        key = _identity_key(row, native_zetta_pair=native_zetta_pair)
+        key = _identity_key(row, shared_zetta_external_ids=shared_zetta_external_ids)
         seen[key] += 1
         token: tuple[Any, ...] = (*key, "occ", int(seen[key]))
         tokens.append(token)
@@ -1987,16 +1994,17 @@ def _compare_hour_rows(
     scheduled = [row for row in scheduled_all if relevant(row)]
     played = [row for row in played_all if relevant(row)]
 
-    # Exact Zetta log-event GUIDs are meaningful only for Zetta-vs-Zetta.
-    # Historical Scheduled data may still come from GSelector, while Played is
-    # already sourced from Zetta2GO; in that mixed case use symmetric text
-    # identity instead of declaring the whole hour deleted+added.
-    native_zetta_pair = bool(scheduled and played) and all(
-        str(row.get("source_system") or "") == "zetta2go"
-        for row in [*scheduled, *played]
+    # Use a Zetta log-event GUID only when the same GUID exists on both sides.
+    # Otherwise fall back to semantic identity.  This avoids false
+    # missing+added pairs for the same visible first item of an hour when Zetta
+    # rebuilt that row and changed its GUID between cutoff and live.
+    shared_external_ids = _shared_zetta_external_ids(scheduled, played)
+    sched_tokens, sched_lookup = _occurrence_tokens(
+        scheduled, shared_zetta_external_ids=shared_external_ids
     )
-    sched_tokens, sched_lookup = _occurrence_tokens(scheduled, native_zetta_pair=native_zetta_pair)
-    play_tokens, play_lookup = _occurrence_tokens(played, native_zetta_pair=native_zetta_pair)
+    play_tokens, play_lookup = _occurrence_tokens(
+        played, shared_zetta_external_ids=shared_external_ids
+    )
     common = set(sched_tokens) & set(play_tokens)
 
     # Added/missing events are removed before ranking, so they do not make all
@@ -2256,22 +2264,24 @@ def compare_day(
     # Niezagrane). If the identity is unique and points to an adjacent Scheduled
     # hour, compare it in the Scheduled hour instead. This changes comparison
     # grouping only; the raw time and stored scheduling semantics stay untouched.
-    native_zetta_day = bool(scheduled_rows and played_rows) and all(
-        str(row.get("source_system") or "") == "zetta2go" for row in [*scheduled_rows, *played_rows]
-    )
+    shared_external_ids = _shared_zetta_external_ids(scheduled_rows, played_rows)
     scheduled_identity_hours: dict[tuple[str, ...], list[int]] = defaultdict(list)
     for row in scheduled_rows:
         hour = row.get("schedule_hour")
         if hour is None:
             continue
-        scheduled_identity_hours[_identity_key(row, native_zetta_pair=native_zetta_day)].append(int(hour))
+        scheduled_identity_hours[_identity_key(
+            row, shared_zetta_external_ids=shared_external_ids
+        )].append(int(hour))
 
     for row in played_rows:
         hour = row.get("schedule_hour")
         if hour is None:
             continue
         target_hour = int(hour)
-        candidates = scheduled_identity_hours.get(_identity_key(row, native_zetta_pair=native_zetta_day), [])
+        candidates = scheduled_identity_hours.get(_identity_key(
+            row, shared_zetta_external_ids=shared_external_ids
+        ), [])
         unique = sorted(set(candidates))
         if target_hour not in unique:
             adjacent = [candidate for candidate in unique if abs(candidate - target_hour) == 1]

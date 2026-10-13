@@ -4,7 +4,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timezone
 from typing import Any
 from urllib.parse import urljoin
 
@@ -299,138 +299,32 @@ class Zetta2GoClient:
         return data
 
     def get_log(self, service_date: date | str) -> dict[str, Any]:
-        """Fetch one complete broadcast day from Zetta2GO.
+        """Fetch one complete broadcast day with one native Zetta2GO GetLog call.
 
-        Zetta2GO needs preceding log context to calculate the inline value on an
-        ETM that sits exactly on an hour boundary.  Asking for that context is
-        safe only if the lead-in rows are *not* merged into the target hour: the
-        log can legitimately contain 60+ minute rows that still belong to the
-        previous scheduling hour.  Merging the whole two-hour response made
-        those rows leak into the next hour and destroyed Scheduled/Played
-        reconciliation.
+        RadioCharts must not stitch 24 partially overlapping GetLog responses.
+        Zetta calculates ``CalculatedTimes`` in the context of the requested log
+        range; changing that range hour by hour can change the ETM values and it
+        also creates duplicate scheduling groups at hour boundaries.  That was
+        the source of the 1.2.33-1.2.35 regressions (wrong ETM gaps, 06:xx rows
+        appearing after the 12:xx CURRENT item, and false Scheduled/Played
+        differences).
 
-        Therefore every target hour is still fetched with one hour of lead-in,
-        but from that response RadioCharts keeps only the rows in the target
-        TOH (Top-of-Hour) group.  The preceding group exists solely so Zetta can
-        calculate native ETM fields.  No local gap/carry reconstruction is done.
+        The Emaus Hub path that proved reliable uses the native day log.  Keep
+        the response exactly in Zetta order and let ``parse_zetta2go_log`` use
+        TOH rows to preserve 60+ scheduling-hour semantics.  No lead-in rows,
+        no deduplication, no local gap reconstruction.
         """
         d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
-        merged_rows: list[dict[str, Any]] = []
-        last_payload: dict[str, Any] = {}
-        dropped_context_rows = 0
-        target_groups_found = 0
-
-        def row_entry_type(row: dict[str, Any]) -> int:
-            cell = row.get("cell")
-            if not isinstance(cell, list) or not cell:
-                return 0
-            try:
-                return int(cell[0] or 0)
-            except (TypeError, ValueError):
-                return 0
-
-        def row_air_datetime(row: dict[str, Any]) -> datetime | None:
-            cell = row.get("cell")
-            if not isinstance(cell, list) or len(cell) <= 5:
-                return None
-            raw = str(cell[5] or "").strip()
-            if not raw:
-                return None
-            try:
-                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-
-        def target_group_rows(rows: list[dict[str, Any]], hour: int) -> list[dict[str, Any]]:
-            """Keep only the requested scheduling-hour group from a lead-in response.
-
-            A TOH row (entry type 3) changes the current logical scheduling hour.
-            This is deliberately different from filtering by wall-clock AirTime:
-            rows such as 10:60:38 can still belong to the 10 scheduling hour.
-            """
-            selected: list[dict[str, Any]] = []
-            current_group_hour: int | None = None
-            current_group_date: date | None = None
-            saw_target_toh = False
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                dt = row_air_datetime(row)
-                if row_entry_type(row) == 3 and dt is not None:
-                    current_group_hour = dt.hour
-                    current_group_date = dt.date()
-                    if current_group_date == d and current_group_hour == hour:
-                        saw_target_toh = True
-                if current_group_date == d and current_group_hour == hour:
-                    # A boundary ETM can leak into the previous scheduling
-                    # group without a following TOH row in the truncated
-                    # response. Unlike ordinary 60+ audio rows, an ETM belongs
-                    # to its own wall-clock hour, so never claim a next-hour ETM
-                    # for the previous target group.
-                    if row_entry_type(row) == 15 and dt is not None and dt.hour != hour:
-                        continue
-                    selected.append(row)
-            if selected:
-                return selected
-
-            # Defensive fallback for installations/responses that omit TOH helper
-            # rows.  Use wall-clock hour only when we cannot identify a TOH group.
-            # This fallback must never run when a target TOH was actually seen.
-            if not saw_target_toh:
-                return [
-                    row for row in rows
-                    if isinstance(row, dict)
-                    and (dt := row_air_datetime(row)) is not None
-                    and dt.date() == d and dt.hour == hour
-                ]
-            return []
-
-        # Preserve the predecessor metadata used by diagnostics/backward
-        # compatibility. It is never merged into the requested day.
-        prev_day = d - timedelta(days=1)
-        prev_start = datetime.combine(prev_day, dt_time(23, 0, 0))
-        prev_end = datetime.combine(prev_day, dt_time(23, 59, 59, 900000))
-        prev_payload = self.get_log_range(prev_start, prev_end)
-        previous_hour_rows = prev_payload.get("rows") if isinstance(prev_payload, dict) else []
-        if not isinstance(previous_hour_rows, list):
-            previous_hour_rows = []
-
-        seen_ids: set[str] = set()
-        for hour in range(24):
-            target_start = datetime.combine(d, dt_time(hour, 0, 0))
-            start = target_start - timedelta(hours=1)
-            end = datetime.combine(d, dt_time(hour, 59, 59, 900000))
-            payload = self.get_log_range(start, end)
-            last_payload = payload
-            rows = payload.get("rows") if isinstance(payload, dict) else None
-            if not isinstance(rows, list):
-                continue
-            selected = target_group_rows(rows, hour)
-            dropped_context_rows += max(0, len(rows) - len(selected))
-            if any(row_entry_type(row) == 3 for row in selected):
-                target_groups_found += 1
-            for row in selected:
-                row_id = str(row.get("id") or "").strip()
-                if row_id and row_id in seen_ids:
-                    continue
-                if row_id:
-                    seen_ids.add(row_id)
-                merged_rows.append(row)
-
-        return {
-            "total": 1,
-            "page": 1,
-            "records": len(merged_rows),
-            "rows": merged_rows,
-            "userdata": last_payload.get("userdata") if isinstance(last_payload, dict) else None,
-            "radiocharts_hourly_fetch": True,
-            "radiocharts_target_toh_groups": target_groups_found,
-            "radiocharts_context_rows_dropped": dropped_context_rows,
-            # Kept for compatibility with existing diagnostics/tests. Boundary
-            # duplicates are no longer merged at all; context groups are dropped.
-            "radiocharts_boundary_etm_duplicates_resolved": 0,
-            "radiocharts_previous_hour_rows": previous_hour_rows,
-        }
+        start = datetime.combine(d, dt_time(0, 0, 0))
+        end = datetime.combine(d, dt_time(23, 59, 59, 900000))
+        payload = self.get_log_range(start, end)
+        rows = payload.get("rows") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError("Zetta2GO GetLog nie zwrócił tablicy rows dla pełnego dnia.")
+        result = dict(payload)
+        result["records"] = len(rows)
+        result["radiocharts_full_day_fetch"] = True
+        return result
 
     def close(self) -> None:
         self.session.close()

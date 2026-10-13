@@ -1,3 +1,13 @@
+## 1.2.36 — stabilizacja Scheduled / Played / Porównania i powrót do natywnego GetLog
+
+- Wycofano godzinne, nakładające się pobieranie GetLog z lead-inem z wersji 1.2.33–1.2.35. RadioCharts pobiera dzień jednym natywnym zapytaniem `00:00:00–23:59:59.9`, zachowując kolejność zwróconą przez Zettę. To usuwa mieszanie grup godzinowych i przypadki, w których po bieżącym 12:xx pojawiały się wiersze 06:xx.
+- ETM znów działa dokładnie jak ustalone dla Emaus Hub: źródłem jest wyłącznie `GetLog → cell[16] = CalculatedTimes`. HIT: `HitETMGap → GapToETM`; pozostałe: `GapToETM → OriginalGap/generic`. `Asset.gap`/`Asset.ogap` są tylko diagnostyką i nie wpływają na wynik. Brak wartości = `—`; brak lokalnego zgadywania.
+- Naprawiono dopasowanie aktualnie granego, gdy ten sam tytuł/link występuje wiele razy w ciągu dnia. CURRENT jest teraz wiązany z najbliższym czasowo wystąpieniem (z preferencją tego samego ID/godziny), zamiast z pierwszym takim tytułem rano.
+- Naprawiono budowanie ogona Played: po CURRENT przechodzimy do Scheduled od właściwego wystąpienia, a nie od pierwszego powtarzającego się elementu. Powtarzalne jingle/linki z wcześniejszych godzin nie blokują już późniejszych wystąpień.
+- Porównanie używa GUID tylko wtedy, gdy ten sam GUID istnieje po obu stronach. Gdy Zetta odbuduje wiersz i zmieni GUID, ale utwór/element jest ten sam, następuje fallback do tożsamości semantycznej zamiast fałszywej pary `Niezagrane + Dodane`. Wspólny GUID nadal pozwala wykryć prawdziwą podmianę assetu jako `Zmieniony`.
+- Widoki Scheduled/Played są przed renderowaniem porządkowane po logicznej godzinie planowej i czasie wewnątrz godziny, co zabezpiecza przed skokami typu 12:xx → 06:xx.
+- Testy: 275/275. Android: wersja `1.2.36`, `versionCode = 59`.
+
 ## 1.2.35 — naprawa regresji logu po kontekście ETM
 
 - Naprawiono regresję z 1.2.34, która mieszała do docelowej godziny także wiersze z godzinnego lead-inu. To powodowało wpisy typu `10:60:38`, `11:79:02` oraz lawinę fałszywych `Niezagrane` / `Dodane` w Porównaniu.

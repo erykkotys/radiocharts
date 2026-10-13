@@ -92,7 +92,7 @@ def test_1230_etm_diagnostics_show_raw_calculated_times_without_carry():
     assert '"calculated_times": calculated' in LOCAL
     assert '"zetta_gap_native_ms": gap_ms' in LOCAL
     assert '"zetta_asset_gap_ms": asset.get("gap")' in LOCAL
-    assert "Diagnostyka ETM — Asset.gap + CalculatedTimes" in APP
+    assert "Diagnostyka ETM — CalculatedTimes + surowe pola" in APP
     assert '"HitETMGap"' in APP and '"GapToETM"' in APP and '"OriginalGap"' in APP
     assert '"Carry RESET"' not in APP
     # No arbitrary clipping: legitimate native values must stay visible.

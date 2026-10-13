@@ -2649,9 +2649,8 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
         st.caption(
             f"{len(markers)} markerów · ≠ 0: {nonzero} · brak wartości: {missing} · "
             f"max +: {max_late} · max −: {max_early}. "
-            "RadioCharts pokazuje tę samą natywną wartość, którą Zetta Full rysuje przy markerze: "
-            "GetLog → cell[7].gap (Asset.gap). Jeśli marker nie ma gap, fallbackiem jest cell[16] / "
-            "CalculatedTimes: HIT → HitETMGap → GapToETM; pozostałe ETM → GapToETM, potem OriginalGap/generic. "
+            "RadioCharts pokazuje wyłącznie natywną wartość z GetLog → cell[16] / CalculatedTimes, tak jak Emaus Hub. "
+            "HIT → HitETMGap → GapToETM; pozostałe ETM → GapToETM, potem OriginalGap/generic. "
             "Jeśli Zetta nie poda żadnej wartości, jest —; nie liczymy carry i nie rekonstruujemy gapu z AirTime/runtime."
         )
     else:
@@ -3074,11 +3073,7 @@ def _local_with_toh_separators(rows: list[dict]) -> list[dict]:
     return out
 
 
-def _local_events_match(a: dict, b: dict) -> bool:
-    a_ext = str(a.get("external_id") or "").strip()
-    b_ext = str(b.get("external_id") or "").strip()
-    if a_ext and b_ext and a_ext == b_ext:
-        return True
+def _local_events_semantically_match(a: dict, b: dict) -> bool:
     if str(a.get("event_type") or "") != str(b.get("event_type") or ""):
         return False
     if a.get("song_id") is not None and b.get("song_id") is not None:
@@ -3092,6 +3087,97 @@ def _local_events_match(a: dict, b: dict) -> bool:
         and normalize(str(a.get("title") or "")) == normalize(str(b.get("title") or ""))
         and bool(str(a.get("title") or "").strip())
     )
+
+
+def _local_events_match(a: dict, b: dict) -> bool:
+    a_ext = str(a.get("external_id") or "").strip()
+    b_ext = str(b.get("external_id") or "").strip()
+    if a_ext and b_ext and a_ext == b_ext:
+        return True
+    return _local_events_semantically_match(a, b)
+
+
+def _local_row_seconds(row: dict) -> float | None:
+    try:
+        value = row.get("sort_seconds")
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _local_best_occurrence_index(target: dict, candidates: list[dict]) -> int | None:
+    """Find the same *occurrence*, not merely the first repeated title of the day.
+
+    Recurrent radio elements such as ``INFORMACJE ...`` can appear many times.
+    The old code matched CURRENT against the first semantic hit (often 06:xx),
+    which made a 12:xx CURRENT row splice the Scheduled tail from 06:xx.  Exact
+    Zetta event id wins; otherwise choose the closest semantic occurrence in
+    time, preferring the same scheduling hour and asset/song identity.
+    """
+    if not candidates:
+        return None
+    target_ext = str(target.get("external_id") or "").strip()
+    target_sec = _local_row_seconds(target)
+    target_hour = target.get("schedule_hour")
+    target_asset = str(target.get("asset_id") or target.get("zetta_asset_id") or "").strip()
+
+    exact = [
+        (i, row) for i, row in enumerate(candidates)
+        if target_ext and str(row.get("external_id") or "").strip() == target_ext
+    ]
+    pool = exact or [
+        (i, row) for i, row in enumerate(candidates)
+        if _local_events_semantically_match(target, row)
+    ]
+    if not pool:
+        return None
+
+    def score(pair: tuple[int, dict]) -> tuple[float, float, float, int]:
+        i, row = pair
+        row_sec = _local_row_seconds(row)
+        same_hour_penalty = 0.0 if target_hour is not None and row.get("schedule_hour") == target_hour else 1.0
+        row_asset = str(row.get("asset_id") or row.get("zetta_asset_id") or "").strip()
+        asset_penalty = 0.0 if target_asset and row_asset and target_asset == row_asset else 1.0
+        distance = abs(row_sec - target_sec) if row_sec is not None and target_sec is not None else 1e9
+        return (same_hour_penalty, asset_penalty, distance, i)
+
+    return min(pool, key=score)[0]
+
+
+def _local_same_occurrence(a: dict, b: dict, *, tolerance_seconds: float = 180.0) -> bool:
+    a_ext = str(a.get("external_id") or "").strip()
+    b_ext = str(b.get("external_id") or "").strip()
+    if a_ext and b_ext and a_ext == b_ext:
+        return True
+    if not _local_events_semantically_match(a, b):
+        return False
+    a_sec = _local_row_seconds(a)
+    b_sec = _local_row_seconds(b)
+    if a_sec is None or b_sec is None:
+        return False
+    return a.get("schedule_hour") == b.get("schedule_hour") and abs(a_sec - b_sec) <= tolerance_seconds
+
+
+def _local_display_order_key(row: dict) -> tuple[int, float, int, int]:
+    """Stable logical broadcast order across Played history + Scheduled tail."""
+    try:
+        hour = int(row.get("schedule_hour"))
+    except (TypeError, ValueError):
+        hour = 99
+    raw = str(row.get("air_time_raw") or "")
+    match = re.fullmatch(r"\d{1,2}:(\d+):(\d{1,2}(?:\.\d+)?)", raw)
+    if match:
+        within = int(match.group(1)) * 60.0 + float(match.group(2))
+    else:
+        sec = _local_row_seconds(row)
+        within = (sec - hour * 3600.0) if sec is not None and hour != 99 else 1e9
+    typ = str(row.get("event_type") or "")
+    type_rank = 0 if typ == "toh" else 1 if typ == "etm" else 2
+    try:
+        sequence = int(row.get("sequence_no") or 0)
+    except (TypeError, ValueError):
+        sequence = 0
+    return (hour, within, type_rank, sequence)
 
 
 def _local_current_played_row(revision: str, service_date: str) -> dict | None:
@@ -3111,11 +3197,10 @@ def _local_schedule_current_rows(revision: str, service_date: str, rows: list[di
     current=_local_current_played_row(revision, service_date)
     if not current:
         return out
-    for row in out:
-        if _local_events_match(current, row):
-            row["_display_phase"]="current_schedule"
-            row["_live_row"]=current
-            break
+    current_index = _local_best_occurrence_index(current, out)
+    if current_index is not None:
+        out[current_index]["_display_phase"] = "current_schedule"
+        out[current_index]["_live_row"] = current
     return out
 
 
@@ -3138,7 +3223,7 @@ def _local_played_continuity_rows(revision: str, service_date: str, played_rows:
     pivot=current or (playable_past[-1] if playable_past else None)
     if pivot is None: return out
     scheduled=[dict(r) for r in cached_local_day_events(revision,"schedule",service_date)]
-    pivot_index=next((i for i,r in enumerate(scheduled) if _local_events_match(pivot,r)),None)
+    pivot_index = _local_best_occurrence_index(pivot, scheduled)
     if pivot_index is None:
         try: ps=float(pivot.get("sort_seconds"))
         except (TypeError,ValueError): ps=None
@@ -3164,18 +3249,21 @@ def _local_played_continuity_rows(revision: str, service_date: str, played_rows:
                 continue
             filtered.append(r)
         out=filtered
+    authoritative_live = [
+        existing for existing in out
+        if str(existing.get("event_type") or "") not in {"toh", "command"}
+        and int(existing.get("zetta_status_code") or 0) in {4, 5}
+    ]
     for row in scheduled[pivot_index+1:]:
-        if any(
-            _local_events_match(existing, row)
-            for existing in out
-            if str(existing.get("event_type") or "") not in {"etm", "toh", "command"}
-        ):
+        if any(_local_same_occurrence(existing, row) for existing in authoritative_live):
             # A future row can already be present in Played as NOT_PLAYED /
-            # skipped. Keep that authoritative status instead of duplicating the
-            # same item again from the Scheduled tail.
+            # skipped. Keep that authoritative occurrence instead of duplicating
+            # it from the Scheduled tail. Repeated titles elsewhere in the day
+            # no longer suppress the real future occurrence.
             continue
         row["_display_phase"] = "future_schedule"
         out.append(row)
+    out.sort(key=_local_display_order_key)
     return out
 
 
@@ -3317,6 +3405,11 @@ def _render_local_timeline_content(
         full_day_rows = _local_schedule_current_rows(revision, selected_date, full_day_rows)
     elif kind == "played":
         full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
+
+    # Never trust stitched/import sequence order for the visual day.  Sort by
+    # logical scheduling hour + within-hour time so CURRENT at 12:xx cannot be
+    # followed by stale 06:xx rows.
+    full_day_rows.sort(key=_local_display_order_key)
 
     # TOH is a navigation separator in both whole-day and single-hour views.
     full_day_rows = _local_with_toh_separators(full_day_rows)
@@ -3521,8 +3614,8 @@ def _render_local_etm_page(revision: str) -> None:
     ]
     _render_local_etm_gap_summary(filtered)
     st.caption(
-        f"Widok: {source_label}. Źródło ETM jak w wierszu Zetta Full: GetLog → cell[7].gap (Asset.gap). "
-        "Gdy Asset.gap nie istnieje, używamy wyłącznie natywnego fallbacku z cell[16] / CalculatedTimes. "
+        f"Widok: {source_label}. Źródło ETM: Zetta2GO GetLog → cell[16] / CalculatedTimes, dokładnie jak w Emaus Hub. "
+        "HIT: HitETMGap → GapToETM; pozostałe: GapToETM → OriginalGap/generic. "
         "Dla bieżącego dnia domyślny jest Live Zetta2GO, żeby diagnostyka pokazywała aktualny log, a nie stary cutoff. "
         "Nie ma rekonstrukcji pełnej godziny ani carry; brak wartości w Zetta = —."
     )
@@ -3545,7 +3638,7 @@ def _render_local_etm_page(revision: str) -> None:
             "GapToETM": calculated.get("GapToETM"),
             "OriginalGap": calculated.get("OriginalGap"),
         })
-    with st.expander("Diagnostyka ETM — Asset.gap + CalculatedTimes", expanded=False):
+    with st.expander("Diagnostyka ETM — CalculatedTimes + surowe pola", expanded=False):
         if diag:
             st.dataframe(pd.DataFrame(diag), hide_index=True, use_container_width=True, height=min(520, 42+32*len(diag)))
         else:
