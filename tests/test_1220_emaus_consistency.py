@@ -48,12 +48,12 @@ def test_1230_midnight_and_hour_boundary_carry_reconstruction_is_removed():
 
 def test_1220_played_continuity_and_inline_progress_exist_web_and_android():
     assert "def _local_played_continuity_rows" in APP
-    assert 'row["_display_phase"] = "future_schedule"' in APP
+    assert 'row["_display_phase"] = "future_live"' in APP
     assert "rc-row-progress" in APP
     assert "rc-played-past" in APP
     assert "def _mobile_played_continuity" in API
-    assert 'row["display_phase"] = "future_schedule"' in API
-    assert '"future_schedule"' in ANDROID
+    assert 'row["display_phase"] = "future_live"' in API
+    assert '"future_live"' in ANDROID
     assert "LocalRadioTrafficBlock" in ANDROID
 
 

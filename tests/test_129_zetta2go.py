@@ -207,8 +207,8 @@ def test_zetta_full_day_merged_hours_reset_toh_grouping():
     rows = parse_zetta2go_log(payload, "2026-10-04", kind="schedule")
     by_title = {r["title"]: r for r in rows}
     assert by_title["Late 00"]["air_time_raw"] == "00:58:00.0"
-    assert by_title["Overrun 00"]["air_time_raw"] == "00:60:10.0"
-    assert by_title["Overrun 00"]["schedule_hour"] == 0
+    assert by_title["Overrun 00"]["air_time_raw"] == "01:00:10.0"
+    assert by_title["Overrun 00"]["schedule_hour"] == 1
     assert by_title["Normal 01"]["air_time_raw"] == "01:08:40.2"
     assert by_title["Normal 01"]["schedule_hour"] == 1
 
@@ -281,7 +281,7 @@ def test_1230_legacy_stored_guess_is_overridden_by_native_calculated_times(tmp_p
     assert etm["etm_delta_raw"] == "+00:01.2"
 
 
-def test_1236_zetta_client_get_log_fetches_one_native_full_day(monkeypatch):
+def test_1237_zetta_client_get_log_fetches_native_hour_windows(monkeypatch):
     from datetime import date as dt_date
     from radiocharts.zetta2go import Zetta2GoClient, Zetta2GoSettings
 
@@ -292,25 +292,21 @@ def test_1236_zetta_client_get_log_fetches_one_native_full_day(monkeypatch):
     )
     client = Zetta2GoClient(cfg)
     calls = []
-    payload_in = _payload(
-        _toh_row(at="2026-10-04T00:00:00.0000000", uid="toh-00"),
-        _asset_row(seq=1, at="2026-10-04T00:05:00.0000000", uid="evt-00", asset_id="a0", title="Hour 00"),
-        _toh_row(at="2026-10-04T12:00:00.0000000", uid="toh-12"),
-        _asset_row(seq=2, at="2026-10-04T12:05:00.0000000", uid="evt-12", asset_id="a12", title="Hour 12"),
-    )
 
     def fake_range(start, end):
         calls.append((start, end))
-        return payload_in
+        hour = start.hour
+        at = f"2026-10-04T{hour:02d}:00:00.0000000"
+        return _payload(_toh_row(at=at, uid=f"toh-{hour:02d}"))
 
     monkeypatch.setattr(client, "get_log_range", fake_range)
     payload = client.get_log(dt_date(2026, 10, 4))
-    assert len(calls) == 1
+    assert len(calls) == 24
     assert calls[0][0].isoformat() == "2026-10-04T00:00:00"
-    assert calls[0][1].isoformat() == "2026-10-04T23:59:59.900000"
-    assert payload["radiocharts_full_day_fetch"] is True
-    assert payload["records"] == 4
-    assert payload["rows"] == payload_in["rows"]
+    assert calls[-1][0].isoformat() == "2026-10-04T23:00:00"
+    assert payload["radiocharts_hourly_fetch"] is True
+    assert payload["records"] == 24
+    assert len(payload["radiocharts_hour_meta"]) == 24
 
 def test_zetta_etm_calculated_times_field_priority_and_fallbacks():
     payload = _payload(
@@ -455,38 +451,34 @@ def test_1232_ui_matches_native_zetta_marker_gap_without_reconstruction():
     assert "OriginalGap" in local
 
 
-def test_1233_hourly_getlog_prefers_etm_copy_from_its_own_hour_removed_by_1236():
-    # 1.2.36 deliberately removed hourly/lead-in stitching.
+def test_1237_hourly_getlog_contract_matches_zetta_grid():
     from radiocharts.zetta2go import Zetta2GoClient
     source = __import__("inspect").getsource(Zetta2GoClient.get_log)
-    assert "one native Zetta2GO GetLog call" in source
-    assert "for hour in range(24)" not in source
-    assert "timedelta(hours=1)" not in source
+    assert "for hour in range(24)" in source
+    assert "actual.hour != hour" in source
+    assert "radiocharts_hourly_fetch" in source
+    assert "previous hour" not in source.casefold()
 
-def test_1233_hourly_getlog_keeps_previous_hour_etm_when_duplicate_leaks_forward_removed_by_1236():
-    # 1.2.36 deliberately removed hourly/lead-in stitching.
-    from radiocharts.zetta2go import Zetta2GoClient
-    source = __import__("inspect").getsource(Zetta2GoClient.get_log)
-    assert "one native Zetta2GO GetLog call" in source
-    assert "for hour in range(24)" not in source
-    assert "timedelta(hours=1)" not in source
 
-def test_1234_hour_zero_leadin_does_not_merge_previous_day_rows_removed_by_1236():
-    # 1.2.36 deliberately removed hourly/lead-in stitching.
-    from radiocharts.zetta2go import Zetta2GoClient
-    source = __import__("inspect").getsource(Zetta2GoClient.get_log)
-    assert "one native Zetta2GO GetLog call" in source
-    assert "for hour in range(24)" not in source
-    assert "timedelta(hours=1)" not in source
+def test_1237_parser_uses_native_airtime_not_toh_relative_60plus():
+    payload = _payload(
+        _toh_row(at="2026-10-04T00:00:00.0000000", uid="toh-00"),
+        _asset_row(seq=1, at="2026-10-04T01:00:10.0000000", uid="x", asset_id="a", title="X"),
+    )
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="played")
+    row = next(r for r in rows if r["event_type"] == "song")
+    assert row["air_time_raw"] == "01:00:10.0"
+    assert row["schedule_hour"] == 1
+    assert row["gap_seconds"] is None
 
-def test_1235_leadin_context_does_not_leak_previous_scheduling_group_removed_by_1236():
-    # 1.2.36 deliberately removed hourly/lead-in stitching.
-    from radiocharts.zetta2go import Zetta2GoClient
-    source = __import__("inspect").getsource(Zetta2GoClient.get_log)
-    assert "one native Zetta2GO GetLog call" in source
-    assert "for hour in range(24)" not in source
-    assert "timedelta(hours=1)" not in source
 
+def test_1237_payload_keeps_raw_zetta_cells_for_diagnostics():
+    raw = _asset_row(seq=1, at="2026-10-04T12:03:04.2000000", uid="current", asset_id="a", title="Now", status=2)
+    rows = parse_zetta2go_log(_payload(raw), "2026-10-04", kind="played")
+    meta = rows[0]["payload"]
+    assert meta["native_air_time"] == "2026-10-04T12:03:04.2000000"
+    assert meta["raw_cell"][9] == "2"
+    assert meta["raw_row"]["id"] == "current"
 
 def test_1236_same_visible_song_matches_when_zetta_guid_changed(tmp_path, monkeypatch):
     _use_db(monkeypatch, tmp_path / "guid-fallback.db")
@@ -519,15 +511,51 @@ def test_1236_shared_zetta_guid_still_detects_replacement(tmp_path, monkeypatch)
     assert result["changed"] == 1
 
 
-def test_1236_repeated_current_title_uses_nearest_occurrence_contract():
+def test_1237_played_is_native_live_log_without_scheduled_tail():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
-    assert "def _local_best_occurrence_index" in app
-    assert "same scheduling hour" in app
-    assert "pivot_index = _local_best_occurrence_index(pivot, scheduled)" in app
-    assert "current_index = _local_best_occurrence_index(current, out)" in app
+    assert "never splice in Scheduled locally" in app
+    assert 'row["_display_phase"] = "future_live"' in app
+    assert "pivot_index = _local_best_occurrence_index(pivot, scheduled)" not in app
     assert "full_day_rows.sort(key=_local_display_order_key)" in app
 
 def test_1235_comparison_does_not_label_60plus_airtime_as_etm_gap():
     app = (ROOT / "radiocharts/app.py").read_text(encoding="utf-8")
     assert 'time_label = raw_time + (f"  ({gap} gap)" if gap else "")' not in app
     assert "time_label = raw_time" in app
+
+
+def test_1237_duplicate_native_toh_is_collapsed_once():
+    payload = _payload(
+        _toh_row(at="2026-10-04T00:00:00.0000000", uid="toh-a"),
+        _toh_row(at="2026-10-04T00:00:00.0000000", uid="toh-b"),
+        _asset_row(seq=1, at="2026-10-04T00:01:00.0000000", uid="song", asset_id="asset", title="Song", status=3),
+    )
+    rows = parse_zetta2go_log(payload, "2026-10-04", kind="played")
+    assert sum(1 for r in rows if r["event_type"] == "toh") == 1
+
+
+def test_1237_current_and_future_rows_are_kept_directly_from_live_zetta(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "live-direct.db")
+    live = _payload(
+        _asset_row(seq=1, at="2026-10-04T12:03:04.0000000", uid="now", asset_id="now-a", title="NOW", status=2),
+        _asset_row(seq=2, at="2026-10-04T12:07:00.0000000", uid="next", asset_id="next-a", title="NEXT", status=1),
+    )
+    import_zetta2go_snapshot(live, service_date="2026-10-04", kind="played", replace_live=True)
+    rows = events_for_day("played", "2026-10-04", include_nonplayed=True)
+    assert [(r["title"], r["zetta_status_code"]) for r in rows] == [("NOW", 2), ("NEXT", 1)]
+
+
+def test_1237_future_ready_same_content_is_not_a_comparison_difference(tmp_path, monkeypatch):
+    _use_db(monkeypatch, tmp_path / "future-ready.db")
+    schedule = _payload(
+        _asset_row(seq=1, at="2026-10-04T18:00:00.0000000", uid="sched-a", asset_id="same-a", artist="A", title="SAME", status=1),
+    )
+    live = _payload(
+        _asset_row(seq=1, at="2026-10-04T18:00:00.0000000", uid="live-a", asset_id="same-a", artist="A", title="SAME", status=1),
+    )
+    import_zetta2go_snapshot(schedule, service_date="2026-10-04", kind="schedule", source="zetta2go-cutoff")
+    import_zetta2go_snapshot(live, service_date="2026-10-04", kind="played", replace_live=True)
+    result = compare_hour("2026-10-04", 18)
+    assert result["differences"] == 0
+    assert result["waiting"] == 1
+    assert result["missed"] == 0 and result["added"] == 0

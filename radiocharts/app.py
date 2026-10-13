@@ -2944,6 +2944,9 @@ def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "sche
             meta_bits.append(edit_name)
     elif phase == "future_schedule":
         meta_bits.append("Scheduled — jeszcze nie zagrano")
+    elif phase == "future_live":
+        status_name = str(row.get("zetta_status") or "").strip()
+        meta_bits.append(f"Zetta · {status_name or 'oczekuje'}")
     elif phase == "current_schedule":
         meta_bits.append("Scheduled · TERAZ")
     elif kind == "played":
@@ -2976,7 +2979,7 @@ def _local_timeline_row_html(row: dict, kind: str, *, anchor_prefix: str = "sche
         classes.append("rc-now")
     elif phase == "played_past":
         classes.append("rc-played-past")
-    elif phase == "future_schedule":
+    elif phase in {"future_schedule", "future_live"}:
         classes.append("rc-future-schedule")
 
     preview_html = ""
@@ -3046,7 +3049,19 @@ def _local_with_toh_separators(rows: list[dict]) -> list[dict]:
         return rows
     has_native = any(str(row.get("event_type") or "") == "toh" for row in rows)
     if has_native:
-        return rows
+        # Zetta can return duplicate helper TOH rows with different row ids.
+        # The log UI shows one hour separator, so collapse only exact same-hour
+        # TOH helpers while leaving every real event untouched.
+        out: list[dict] = []
+        seen_toh: set[tuple[object, str]] = set()
+        for row in rows:
+            if str(row.get("event_type") or "") == "toh":
+                key = (row.get("schedule_hour"), str(row.get("air_time_raw") or ""))
+                if key in seen_toh:
+                    continue
+                seen_toh.add(key)
+            out.append(row)
+        return out
     if not any(str(row.get("source_system") or "") == "zetta2go" for row in rows):
         return rows
     out: list[dict] = []
@@ -3205,67 +3220,29 @@ def _local_schedule_current_rows(revision: str, service_date: str, rows: list[di
 
 
 def _local_played_continuity_rows(revision: str, service_date: str, played_rows: list[dict]) -> list[dict]:
-    """Played history + authoritative CURRENT item + Scheduled tail."""
-    out=[dict(row) for row in played_rows]
-    current = next((r for r in out if int(r.get("zetta_status_code") or 0) in {2,9} and str(r.get("event_type") or "") not in {"etm","toh","command"}), None)
-    current_sort = float(current.get("sort_seconds")) if current and current.get("sort_seconds") is not None else None
+    """Render the live Zetta log directly; never splice in Scheduled locally.
+
+    GetLog already contains past, CURRENT and future READY/WAITING rows.  Older
+    builds tried to cut the live list at CURRENT and append the cutoff Scheduled
+    tail. That required guessing which repeated occurrence was the pivot and was
+    the source of 06:xx rows appearing after a 12:xx CURRENT item.  The Played
+    tab now reflects Zetta2GO itself end-to-end.
+    """
+    out = [dict(row) for row in played_rows]
     for row in out:
-        try: status=int(row.get("zetta_status_code") or 0)
-        except (TypeError,ValueError): status=0
-        if status in {2,9}:
-            row["_display_phase"]="current"
-        elif status in {3,6,7,8} or (status == -3 and current_sort is not None and float(row.get("sort_seconds") or 1e12) <= current_sort):
-            row["_display_phase"]="played_past"
-
-    if service_date != date.today().isoformat() or service_date not in set(cached_local_dates(revision,"schedule")):
-        return out
-    playable_past=[r for r in out if str(r.get("event_type") or "") not in {"etm","toh","command"} and str(r.get("_display_phase") or "") in {"played_past","current"}]
-    pivot=current or (playable_past[-1] if playable_past else None)
-    if pivot is None: return out
-    scheduled=[dict(r) for r in cached_local_day_events(revision,"schedule",service_date)]
-    pivot_index = _local_best_occurrence_index(pivot, scheduled)
-    if pivot_index is None:
-        try: ps=float(pivot.get("sort_seconds"))
-        except (TypeError,ValueError): ps=None
-        if ps is not None:
-            pivot_index=next((i for i,r in enumerate(scheduled) if r.get("sort_seconds") is not None and float(r.get("sort_seconds"))>=ps),None)
-    if pivot_index is None: return out
-    try: ps=float(pivot.get("sort_seconds"))
-    except (TypeError,ValueError): ps=None
-    if ps is not None:
-        filtered=[]
-        for r in out:
-            event_type = str(r.get("event_type") or "")
-            try:
-                row_status = int(r.get("zetta_status_code") or 0)
-            except (TypeError, ValueError):
-                row_status = 0
-            if event_type in {"etm", "toh"}:
-                if r.get("sort_seconds") is not None and float(r.get("sort_seconds")) > ps + .05:
-                    continue
-            elif row_status in {1, 10} and r.get("sort_seconds") is not None and float(r.get("sort_seconds")) > ps + .05:
-                # Future READY/WAITING comes from the live GetLog too, but the
-                # Scheduled tail below is the authoritative future view.
-                continue
-            filtered.append(r)
-        out=filtered
-    authoritative_live = [
-        existing for existing in out
-        if str(existing.get("event_type") or "") not in {"toh", "command"}
-        and int(existing.get("zetta_status_code") or 0) in {4, 5}
-    ]
-    for row in scheduled[pivot_index+1:]:
-        if any(_local_same_occurrence(existing, row) for existing in authoritative_live):
-            # A future row can already be present in Played as NOT_PLAYED /
-            # skipped. Keep that authoritative occurrence instead of duplicating
-            # it from the Scheduled tail. Repeated titles elsewhere in the day
-            # no longer suppress the real future occurrence.
-            continue
-        row["_display_phase"] = "future_schedule"
-        out.append(row)
-    out.sort(key=_local_display_order_key)
+        try:
+            status = int(row.get("zetta_status_code") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if status in {2, 9}:
+            row["_display_phase"] = "current"
+        elif status in {3, 6, 7, 8, -3}:
+            row["_display_phase"] = "played_past"
+        elif status in {1, 10}:
+            row["_display_phase"] = "future_live"
+        elif status in {4, 5}:
+            row["_display_phase"] = "not_played"
     return out
-
 
 def _local_traffic_block_html(rows: list[dict], kind: str, *, anchor_prefix: str) -> str:
     body = "".join(_local_timeline_row_html(row, kind, anchor_prefix=anchor_prefix) for row in rows)
@@ -3399,11 +3376,13 @@ def _render_local_timeline_content(
     etm_kinds = set(etm_kinds)
     full_day_rows = [dict(row) for row in cached_local_day_events(revision, kind, selected_date)]
     if kind == "schedule":
-        # Zetta ETM gaps are already normalized from GetLog cell[16] /
-        # CalculatedTimes by local_station. Never rebuild them from neighbouring
-        # rows, RESET carry or hour-boundary airtimes in the UI.
-        full_day_rows = _local_schedule_current_rows(revision, selected_date, full_day_rows)
+        # Scheduled is the immutable cutoff snapshot. Do not overlay CURRENT or
+        # splice live rows into it; the native Zetta cutoff should stay exactly
+        # as captured before emission.
+        pass
     elif kind == "played":
+        # Played is the native live Zetta log including past, CURRENT and future
+        # READY/WAITING rows. No local Scheduled tail is appended.
         full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
 
     # Never trust stitched/import sequence order for the visual day.  Sort by
@@ -3439,8 +3418,8 @@ def _render_local_timeline_content(
         st.info("Brak elementów dla wybranych filtrów.")
         return
 
-    if selected_hour != "Cały dzień" and "gap_seconds" in pd.DataFrame(rows).columns:
-        over = [float(r.get("gap_seconds")) for r in rows if r.get("gap_seconds") is not None]
+    if selected_hour != "Cały dzień" and any(str(r.get("source_system") or "") != "zetta2go" for r in rows):
+        over = [float(r.get("gap_seconds")) for r in rows if str(r.get("source_system") or "") != "zetta2go" and r.get("gap_seconds") is not None]
         if over:
             peak = max(over)
             mins, secs = divmod(peak, 60)
@@ -3450,7 +3429,7 @@ def _render_local_timeline_content(
         _render_local_now_playing_fragment(selected_date, revision)
     _render_local_timeline_cards(rows, kind, anchor_prefix=f"{key_prefix}-list")
     if kind == "played" and selected_date == date.today().isoformat():
-        st.caption("Played: zakończone elementy są lekko wyszarzone i kursywą; wyskipowane i niezagrane pozostają widoczne z czerwonym ✕; po aktualnie granym elemencie lista przechodzi w cutoff Scheduled.")
+        st.caption("Played: bezpośredni live log Zetta2GO. Zakończone elementy są lekko wyszarzone; CURRENT jest zielony; READY/WAITING pokazują przyszłość z Zetty; wyskipowane i niezagrane pozostają widoczne z czerwonym ✕.")
     else:
         st.caption("Kolory: piosenki białe · linki/jingle/audycje żółte · ETM niebieskie · Top of the hour różowe · reklama/autopromocja czerwona i zwijana.")
 

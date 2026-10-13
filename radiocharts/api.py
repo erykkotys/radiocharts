@@ -561,74 +561,35 @@ def _mobile_local_event_match(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 
 def _mobile_played_continuity(service_date: date, hour: int | None) -> list[dict[str, Any]]:
+    """Mobile Played mirrors the native live Zetta log end-to-end.
+
+    No Scheduled tail is appended and no CURRENT pivot is guessed. Future
+    READY/WAITING rows come directly from GetLog, matching the web view.
+    """
     played = [dict(row) for row in local_events_for_day("played", service_date, include_nonplayed=True)]
-    current = next((r for r in played if int(r.get("zetta_status_code") or 0) in {2,9} and str(r.get("event_type") or "") not in {"etm","toh","command"}), None)
-    try:
-        current_sort = float(current.get("sort_seconds")) if current is not None else None
-    except (TypeError, ValueError):
-        current_sort = None
     for row in played:
         try:
             status = int(row.get("zetta_status_code") or 0)
         except (TypeError, ValueError):
             status = 0
-        if status in {2,9}:
+        if status in {2, 9}:
             row["display_phase"] = "current"
-        elif status in {3,6,7,8} or (status == -3 and current_sort is not None and row.get("sort_seconds") is not None and float(row.get("sort_seconds")) <= current_sort):
+        elif status in {3, 6, 7, 8, -3}:
             row["display_phase"] = "played_past"
+        elif status in {1, 10}:
+            row["display_phase"] = "future_live"
+        elif status in {4, 5}:
+            row["display_phase"] = "not_played"
         else:
             row["display_phase"] = ""
-    if service_date == date.today():
-        scheduled = [dict(row) for row in local_events_for_day("schedule", service_date)]
-        current = next((r for r in played if r.get("display_phase") == "current" and str(r.get("event_type") or "") not in {"etm", "toh", "command"}), None)
-        actual = [r for r in played if str(r.get("event_type") or "") not in {"etm", "toh", "command"}]
-        pivot = current or (actual[-1] if actual else None)
-        if pivot is not None and scheduled:
-            pivot_index = next((i for i, row in enumerate(scheduled) if _mobile_local_event_match(pivot, row)), None)
-            if pivot_index is None:
-                try:
-                    pivot_sort = float(pivot.get("sort_seconds"))
-                except (TypeError, ValueError):
-                    pivot_sort = None
-                if pivot_sort is not None:
-                    pivot_index = next((i for i, row in enumerate(scheduled) if row.get("sort_seconds") is not None and float(row.get("sort_seconds")) >= pivot_sort), None)
-            if pivot_index is not None:
-                # GetLog may already expose future technical markers (TOH/ETM)
-                # in the live Played response. Drop those after the current
-                # playout pivot before appending the Scheduled tail, otherwise
-                # mobile would show duplicate future anchors.
-                try:
-                    pivot_sort = float(pivot.get("sort_seconds"))
-                except (TypeError, ValueError):
-                    pivot_sort = None
-                if pivot_sort is not None:
-                    kept: list[dict[str, Any]] = []
-                    for row in played:
-                        try:
-                            row_sort = float(row.get("sort_seconds"))
-                        except (TypeError, ValueError):
-                            row_sort = None
-                        if (
-                            str(row.get("event_type") or "") in {"etm", "toh", "command"}
-                            and row_sort is not None
-                            and row_sort > pivot_sort
-                        ):
-                            continue
-                        kept.append(row)
-                    played = kept
-                for row in scheduled[pivot_index + 1:]:
-                    if any(
-                        _mobile_local_event_match(existing, row)
-                        for existing in played
-                        if str(existing.get("event_type") or "") not in {"etm", "toh", "command"}
-                    ):
-                        continue
-                    row["display_phase"] = "future_schedule"
-                    played.append(row)
+    played.sort(key=lambda row: (
+        int(row.get("schedule_hour")) if row.get("schedule_hour") is not None else 99,
+        float(row.get("sort_seconds")) if row.get("sort_seconds") is not None else 1e12,
+        int(row.get("sequence_no") or 0),
+    ))
     if hour is not None:
         played = [row for row in played if row.get("schedule_hour") == int(hour)]
     return played
-
 
 def _apply_mobile_ignore_resets(rows: list[dict[str, Any]]) -> None:
     for row in rows:

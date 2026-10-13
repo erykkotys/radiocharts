@@ -1,12 +1,15 @@
-## 1.2.36 — stabilizacja Scheduled / Played / Porównania i powrót do natywnego GetLog
+## 1.2.37 — Zetta2GO jako źródło prawdy dla logu, bez lokalnego sklejania
 
-- Wycofano godzinne, nakładające się pobieranie GetLog z lead-inem z wersji 1.2.33–1.2.35. RadioCharts pobiera dzień jednym natywnym zapytaniem `00:00:00–23:59:59.9`, zachowując kolejność zwróconą przez Zettę. To usuwa mieszanie grup godzinowych i przypadki, w których po bieżącym 12:xx pojawiały się wiersze 06:xx.
-- ETM znów działa dokładnie jak ustalone dla Emaus Hub: źródłem jest wyłącznie `GetLog → cell[16] = CalculatedTimes`. HIT: `HitETMGap → GapToETM`; pozostałe: `GapToETM → OriginalGap/generic`. `Asset.gap`/`Asset.ogap` są tylko diagnostyką i nie wpływają na wynik. Brak wartości = `—`; brak lokalnego zgadywania.
-- Naprawiono dopasowanie aktualnie granego, gdy ten sam tytuł/link występuje wiele razy w ciągu dnia. CURRENT jest teraz wiązany z najbliższym czasowo wystąpieniem (z preferencją tego samego ID/godziny), zamiast z pierwszym takim tytułem rano.
-- Naprawiono budowanie ogona Played: po CURRENT przechodzimy do Scheduled od właściwego wystąpienia, a nie od pierwszego powtarzającego się elementu. Powtarzalne jingle/linki z wcześniejszych godzin nie blokują już późniejszych wystąpień.
-- Porównanie używa GUID tylko wtedy, gdy ten sam GUID istnieje po obu stronach. Gdy Zetta odbuduje wiersz i zmieni GUID, ale utwór/element jest ten sam, następuje fallback do tożsamości semantycznej zamiast fałszywej pary `Niezagrane + Dodane`. Wspólny GUID nadal pozwala wykryć prawdziwą podmianę assetu jako `Zmieniony`.
-- Widoki Scheduled/Played są przed renderowaniem porządkowane po logicznej godzinie planowej i czasie wewnątrz godziny, co zabezpiecza przed skokami typu 12:xx → 06:xx.
-- Testy: 275/275. Android: wersja `1.2.36`, `versionCode = 59`.
+- Cofnięto eksperyment z jednym pełnodniowym `GetLog`. Na tej instalacji szerokie zapytanie nie jest równoważne widokowi Zetta Full i potrafi zwrócić niepełny/nieadekwatny kontekst. RadioCharts znów pobiera **24 natywne okna godzinowe `HH:00:00–HH:59:59.9`**, dokładnie jak log Zetty. Nie ma lead-inu z poprzedniej godziny.
+- Każdy wiersz Zetty używa teraz **bezpośrednio `cell[5] = AirTime`**. RadioCharts nie przelicza czasu względem lokalnie śledzonego TOH i nie tworzy dla danych Zetty wartości `10:60`, `11:79` itd. `schedule_hour` dla Zetty pochodzi z natywnego AirTime.
+- Parser zapisuje znacznie więcej surowych danych: pełne `cell[]`, cały surowy wiersz GetLog, `cell[7]` Asset, `cell[16]` CalculatedTimes, request hour, StatusCode, EditCode, Skip, Fixed, RuntimeMilliseconds i DurationMilliseconds. Dzięki temu późniejsze widoki mogą korzystać z danych Zetty zamiast rekonstruować je lokalnie.
+- **Played nie jest już sklejany z Scheduled.** Widok pokazuje bezpośredni live log Zetta2GO: PLAYED/FADE/STOPPED jako historię, CURRENT/PAUSED jako TERAZ, READY/WAITING jako przyszłość, NOT_PLAYED/EVENT_ERROR jako niezagrane. Usunięto zgadywanie pivotu CURRENT i dokładanie ogona cutoff Scheduled. To samo obowiązuje API/Android.
+- **Scheduled jest czystym cutoffem** — bez nakładania CURRENT z Played. Dzięki temu powtarzający się link o 06:xx nie może już zostać podświetlony jako bieżący o 12:xx.
+- Dla wierszy Zetty usunięto lokalne `gap` liczone z zapisu 60+. Gap istnieje tylko dla ETM i pochodzi z natywnego `cell[16] / CalculatedTimes`: HIT `HitETMGap → GapToETM`, pozostałe `GapToETM → OriginalGap → pola legacy`. Brak wartości = `—`.
+- Usunięto lokalne wyliczanie długości emisji z czasu startu następnego elementu. Completed/FADE/STOPPED korzystają z natywnego `cell[15] RuntimeMilliseconds`; bieżący progress jest tylko prezentacją czasu od natywnego AirTime.
+- Duplikaty pomocniczego `Top of Hour` dla tej samej granicy są zwijane do jednego separatora.
+- Porównanie: wspólny GUID nadal jest najmocniejszym kluczem; gdy Zetta przebuduje GUID, piosenki dopasowują się po wykonawcy/tytule, a linki/jingle/traffic po natywnym `AssetID`. READY/WAITING tego samego elementu nie jest różnicą.
+- Testy: **277/277**. Android: wersja `1.2.37`, `versionCode = 60`.
 
 ## 1.2.35 — naprawa regresji logu po kontekście ETM
 

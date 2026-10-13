@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timezone
@@ -299,32 +300,83 @@ class Zetta2GoClient:
         return data
 
     def get_log(self, service_date: date | str) -> dict[str, Any]:
-        """Fetch one complete broadcast day with one native Zetta2GO GetLog call.
+        """Fetch the day exactly the way the Zetta log grid does: hour by hour.
 
-        RadioCharts must not stitch 24 partially overlapping GetLog responses.
-        Zetta calculates ``CalculatedTimes`` in the context of the requested log
-        range; changing that range hour by hour can change the ETM values and it
-        also creates duplicate scheduling groups at hour boundaries.  That was
-        the source of the 1.2.33-1.2.35 regressions (wrong ETM gaps, 06:xx rows
-        appearing after the 12:xx CURRENT item, and false Scheduled/Played
-        differences).
+        A wide 00:00-23:59 request is *not* equivalent to the Zetta Full log
+        grid on this installation: it can return only a fragment of the day and
+        CalculatedTimes can differ from the values shown by the hourly log view.
+        RadioCharts therefore requests the same 24 native hour windows used by
+        the UI and merges only rows whose native ``cell[5]`` AirTime belongs to
+        that requested clock hour.
 
-        The Emaus Hub path that proved reliable uses the native day log.  Keep
-        the response exactly in Zetta order and let ``parse_zetta2go_log`` use
-        TOH rows to preserve 60+ scheduling-hour semantics.  No lead-in rows,
-        no deduplication, no local gap reconstruction.
+        Important: this function does not calculate airtimes, ETM gaps, carry or
+        60+ values.  It only retrieves native GetLog rows and annotates each row
+        with the request hour so the raw source remains auditable.
         """
         d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
-        start = datetime.combine(d, dt_time(0, 0, 0))
-        end = datetime.combine(d, dt_time(23, 59, 59, 900000))
-        payload = self.get_log_range(start, end)
-        rows = payload.get("rows") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise RuntimeError("Zetta2GO GetLog nie zwrócił tablicy rows dla pełnego dnia.")
-        result = dict(payload)
-        result["records"] = len(rows)
-        result["radiocharts_full_day_fetch"] = True
-        return result
+        merged_rows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        hour_meta: list[dict[str, Any]] = []
+        last_userdata: Any = None
+
+        def native_airtime(row: dict[str, Any]) -> datetime | None:
+            cell = row.get("cell") if isinstance(row, dict) else None
+            if not isinstance(cell, list) or len(cell) <= 5:
+                return None
+            raw = str(cell[5] or "").strip()
+            if not raw:
+                return None
+            raw = re.sub(r"(\.\d{6})\d+(?=([+-]\d\d:\d\d)?$)", r"\1", raw)
+            try:
+                return datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+
+        for hour in range(24):
+            start = datetime.combine(d, dt_time(hour, 0, 0))
+            end = datetime.combine(d, dt_time(hour, 59, 59, 900000))
+            payload = self.get_log_range(start, end)
+            rows = payload.get("rows") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                raise RuntimeError(f"Zetta2GO GetLog nie zwrócił tablicy rows dla godziny {hour:02d}.")
+            last_userdata = payload.get("userdata") if isinstance(payload, dict) else last_userdata
+            accepted = 0
+            for index, original in enumerate(rows):
+                if not isinstance(original, dict):
+                    continue
+                actual = native_airtime(original)
+                # Helper/parent rows with no native AirTime are not usable in
+                # the timeline. Playable children and ETM/TOH rows do have it.
+                if actual is None or actual.date() != d or actual.hour != hour:
+                    continue
+                row = dict(original)
+                row["_radiocharts_request_hour"] = hour
+                row["_radiocharts_request_index"] = index
+                row_id = str(row.get("id") or "").strip()
+                if row_id:
+                    if row_id in seen_ids:
+                        continue
+                    seen_ids.add(row_id)
+                merged_rows.append(row)
+                accepted += 1
+            hour_meta.append({
+                "hour": hour,
+                "returned": len(rows),
+                "accepted": accepted,
+                "records": int(payload.get("records") or len(rows)) if isinstance(payload, dict) else len(rows),
+            })
+
+        # Keep native request order: hours ascending, rows in the exact order
+        # returned by Zetta for that hour. Do not re-sort by a derived clock.
+        return {
+            "total": 1,
+            "page": 1,
+            "records": len(merged_rows),
+            "rows": merged_rows,
+            "userdata": last_userdata,
+            "radiocharts_hourly_fetch": True,
+            "radiocharts_hour_meta": hour_meta,
+        }
 
     def close(self) -> None:
         self.session.close()

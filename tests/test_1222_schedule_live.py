@@ -53,10 +53,10 @@ def test_1222_pending_played_is_not_authoritative_current():
     assert "for wanted in (2, 9)" in current_block
     assert "-3" not in current_block
     continuity = APP[APP.index("def _local_played_continuity_rows"):APP.index("def _local_traffic_block_html")]
-    assert "status in {2,9}" in continuity
-    assert "status == -3" in continuity
+    assert "status in {2, 9}" in continuity
+    assert "-3" in continuity and "played_past" in continuity
     assert "listOf(2, 9)" in ANDROID
-    assert "in {2,9}" in API
+    assert "status in {2, 9}" in API
 
 
 def test_1222_traffic_parent_preview_and_white_song_link_contract():

@@ -473,6 +473,21 @@ def _time_raw_from_group(actual: datetime | None, group_hour: int | None) -> str
     return f"{int(group_hour):02d}:{minute:02d}:{second:04.1f}"
 
 
+def _zetta_air_time_raw(actual: datetime | None) -> str:
+    """Format native Zetta ``cell[5]`` AirTime without inventing 60+ time.
+
+    Zetta already gives an absolute wall-clock timestamp for every playable,
+    ETM and TOH row.  RadioCharts must use that value directly.  Earlier builds
+    rewrote it relative to a locally tracked TOH group, which created values
+    such as 10:60 and could make the list jump backwards several hours when a
+    wide GetLog response contained helper groups out of order.
+    """
+    if actual is None:
+        return ""
+    second = actual.second + actual.microsecond / 1_000_000
+    return f"{actual.hour:02d}:{actual.minute:02d}:{second:04.1f}"
+
+
 def _zetta_event_type(asset: dict[str, Any]) -> str:
     asset_type = int(asset.get("AssetTypeID") or 0)
     title = str(asset.get("Title") or "")
@@ -701,7 +716,7 @@ def parse_zetta2go_log(
         raise ValueError("Zetta2GO GetLog: brak tablicy rows.")
 
     out: list[dict[str, Any]] = []
-    current_group_hour: int | None = None
+    seen_toh_times: set[str] = set()
     for source_index, source in enumerate(source_rows, start=1):
         if not isinstance(source, dict):
             continue
@@ -722,13 +737,9 @@ def parse_zetta2go_log(
             edit_code = 0
         actual = _parse_iso_datetime(cell[5])
 
-        # TOH rows define the scheduling hour. Using that hour instead of the
-        # wall-clock AirTime preserves 60+ minutes/hour semantics in comparisons.
-        # Keep the marker as a first-class row as well; the whole-day playlist
-        # uses it as a strong visual separator just like Zetta2GO.
-        if entry_type == 3 and actual is not None:
-            current_group_hour = actual.hour
-
+        # Zetta ``cell[5]`` is the authoritative AirTime.  Do not derive the
+        # clock from TOH grouping and do not manufacture 60+ minute notation.
+        # The native request hour is kept in payload metadata for diagnostics.
         raw_asset = cell[7]
         asset = raw_asset if isinstance(raw_asset, dict) else {}
         calculated = cell[16] if len(cell) > 16 and isinstance(cell[16], dict) else {}
@@ -738,7 +749,13 @@ def parse_zetta2go_log(
 
         if entry_type == 3:  # Top of Hour helper row
             etm_type = ""
-            raw_time = _time_raw_from_group(actual, current_group_hour)
+            raw_time = _zetta_air_time_raw(actual)
+            # GetLog can expose more than one helper TOH row for the same clock
+            # boundary. Zetta Full renders one separator, so do the same.
+            toh_key = str(cell[5] or raw_time)
+            if toh_key in seen_toh_times:
+                continue
+            seen_toh_times.add(toh_key)
             title = "Top of the hour"
             gap_seconds = None
             event_type = "toh"
@@ -750,7 +767,7 @@ def parse_zetta2go_log(
             sponsor = ""
         elif entry_type == 15:  # Exact Time Marker
             etm_type = str(asset.get("ETMType") or "").strip() or "Other"
-            raw_time = _time_raw_from_group(actual, current_group_hour)
+            raw_time = _zetta_air_time_raw(actual)
             minute = actual.minute if actual is not None else 0
             second = actual.second if actual is not None else 0
             title = f"ETM_{minute:02d}:{second:02d}_{etm_type}"
@@ -773,7 +790,7 @@ def parse_zetta2go_log(
             category = _zetta_category(event_type, asset)
             asset_id = str(asset.get("AssetID") or "").strip()
             sponsor = str(asset.get("Sponsor") or "").strip()
-            raw_time = _time_raw_from_group(actual, current_group_hour)
+            raw_time = _zetta_air_time_raw(actual)
             runtime_raw = str(asset.get("Runtime") or "").strip()
             try:
                 runtime_seconds = float(cell[15]) / 1000.0 if cell[15] not in (None, "") else _parse_duration(runtime_raw)
@@ -808,6 +825,12 @@ def parse_zetta2go_log(
             "play_rate_tooltip": str(asset.get("PlayRateToolTip") or "") if asset else "",
             "duration_runtime": str(asset.get("DurationRuntime") or "") if asset else "",
             "duration_ms": duration_ms,
+            "native_air_time": str(cell[5] or ""),
+            "request_hour": source.get("_radiocharts_request_hour"),
+            "request_index": source.get("_radiocharts_request_index"),
+            "schedule_hour": actual.hour if actual is not None else _schedule_hour(raw_time),
+            "raw_cell": cell,
+            "raw_row": source,
             "valid_for_playback": bool(cell[3]) if len(cell) > 3 else None,
             "skip": bool(cell[11]) if len(cell) > 11 else False,
             "fixed": bool(cell[12]) if len(cell) > 12 else False,
@@ -830,9 +853,11 @@ def parse_zetta2go_log(
             "air_time_raw": raw_time,
             "air_seconds": air_seconds,
             "sort_seconds": air_seconds,
-            "schedule_hour": current_group_hour if current_group_hour is not None else _schedule_hour(raw_time),
-            "gap_seconds": _gap_overrun_seconds(raw_time),
-            "gap_raw": _format_gap(_gap_overrun_seconds(raw_time)),
+            "schedule_hour": actual.hour if actual is not None else _schedule_hour(raw_time),
+            # For Zetta rows gap is a native ETM datum, never an overrun derived
+            # from the formatted clock. Non-ETM rows therefore have no gap.
+            "gap_seconds": (gap_ms / 1000.0) if entry_type == 15 and gap_ms is not None else None,
+            "gap_raw": _format_signed_gap_ms(gap_ms) if entry_type == 15 else "",
             "etm_delta_raw": _format_signed_gap_ms(gap_ms) if entry_type == 15 else "",
             "time_anomaly": bool(odd_time),
             "event_type": event_type,
@@ -1403,93 +1428,35 @@ def _format_played_seconds(value: float | None) -> str:
 
 
 def _annotate_played_lengths(rows: list[dict[str, Any]], service_date: str, kind: str) -> None:
-    """Add a practical playout-duration estimate to Zetta Played rows.
+    """Expose only native Zetta playout/runtime values.
 
-    GetLog exposes the scheduled/effective runtime, but this build does not
-    expose a separate AirStopTime column.  For finished/current playout rows we
-    therefore use Zetta's effective runtime for ordinary completed plays. For
-    explicit fade/stopped statuses, the next actually-aired event start can be
-    used as a shorter estimate, but only when it implies a material cut (>=10 s
-    and >=10%). This avoids calling ordinary crossfades a shortened play. Current
-    rows use wall-clock elapsed time and are refreshed by the Streamlit fragment.
+    Older RadioCharts builds estimated playout length from the next event start
+    and from the wall clock.  That was useful as a heuristic, but it also made
+    comparison/fade results depend on locally reconstructed timing.  For Zetta
+    rows we now keep the data model deliberately simple: completed/fade/stopped
+    events use GetLog ``cell[15]`` RuntimeMilliseconds (already stored as
+    ``runtime_seconds``); CURRENT/PAUSED progress is calculated only for the
+    transient UI progress bar and is not persisted as a playout fact.
     """
     if kind != "played":
         return
-    def unwrapped_start(row: dict[str, Any]) -> float | None:
-        raw = str(row.get("air_time_raw") or "").strip()
-        match = re.fullmatch(r"(\d{1,2}):(\d+):(\d{1,2}(?:\.\d+)?)", raw)
-        if match:
-            return int(match.group(1)) * 3600.0 + int(match.group(2)) * 60.0 + float(match.group(3))
+    for row in rows:
+        if str(row.get("source_system") or "") != "zetta2go":
+            continue
         try:
-            return float(row.get("sort_seconds")) if row.get("sort_seconds") is not None else None
+            status = int(row.get("zetta_status_code") or 0)
         except (TypeError, ValueError):
-            return None
-
-    candidates = [
-        row for row in rows
-        if str(row.get("source_system") or "") == "zetta2go"
-        and str(row.get("event_type") or "") not in {"etm", "toh", "command"}
-        and int(row.get("zetta_status_code") or 0) in ZETTA_PLAYED_STATUS_CODES
-        and unwrapped_start(row) is not None
-    ]
-    candidates.sort(key=lambda row: int(row.get("sequence_no") or 0))
-    now = datetime.now().astimezone()
-    is_today = str(service_date) == now.date().isoformat()
-
-    for index, row in enumerate(candidates):
-        start = float(unwrapped_start(row) or 0.0)
-        next_start: float | None = None
-        for nxt in candidates[index + 1:]:
-            probe_raw = unwrapped_start(nxt)
-            if probe_raw is None:
-                continue
-            probe = float(probe_raw)
-            if probe < start - 12 * 3600:
-                probe += 86400
-            if probe > start + 0.05:
-                next_start = probe
-                break
-        delta = (next_start - start) if next_start is not None else None
-        status = int(row.get("zetta_status_code") or 0)
-        if is_today and status in {-3, 2, 9}:
-            elapsed_now = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1_000_000 - start
-            if elapsed_now < -12 * 3600:
-                elapsed_now += 86400
-            if elapsed_now >= 0:
-                delta = elapsed_now
-
-        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        max_duration = None
-        for candidate in (
-            row.get("runtime_seconds"),
-            (float(payload.get("duration_ms")) / 1000.0 if payload.get("duration_ms") not in (None, "") else None),
-        ):
+            status = 0
+        actual: float | None = None
+        if status in {3, 6, 7, 8, -3}:
             try:
-                val = float(candidate) if candidate is not None else None
+                value = float(row.get("runtime_seconds")) if row.get("runtime_seconds") is not None else None
             except (TypeError, ValueError):
-                val = None
-            if val is not None and val > 0:
-                max_duration = val
-                break
-        # For an ordinary completed play, the effective Zetta runtime is the
-        # best value we have. The next event may begin a few seconds earlier
-        # because of a normal segue/crossfade, which does *not* mean the first
-        # asset stopped at that instant. Only cut-like Zetta statuses (fade /
-        # stopped) may use the next actual start as a shorter playout estimate,
-        # and even then only for a material cut (>=10 s and >=10%).
-        if is_today and status in {-3, 2, 9} and delta is not None and delta >= 0:
-            actual = min(delta, max_duration) if max_duration is not None else delta
-        elif status in {6, 7, 8} and delta is not None and delta >= 0 and max_duration is not None:
-            cut_seconds = max_duration - delta
-            cut_ratio = cut_seconds / max_duration if max_duration > 0 else 0.0
-            actual = max(0.0, delta) if cut_seconds >= 10.0 and cut_ratio >= 0.10 else max_duration
-        elif status in {3, 6, 7, 8} and max_duration is not None:
-            actual = max_duration
-        else:
-            actual = None
+                value = None
+            if value is not None and value >= 0:
+                actual = value
         row["played_seconds"] = actual
         row["played_raw"] = _format_played_seconds(actual)
-
 
 def events_for_day(
     kind: str,
@@ -1557,9 +1524,18 @@ def events_for_day(
             # event GUID/runtime fields already stored in the row.
             for key, _label, _index in GSELECTOR_SONG_COLUMNS:
                 item.setdefault(key, "")
-        item["schedule_hour"] = _schedule_hour(str(item.get("air_time_raw") or ""))
-        item["gap_seconds"] = _gap_overrun_seconds(str(item.get("air_time_raw") or ""))
-        item["gap_raw"] = _format_gap(item["gap_seconds"])
+        if str(item.get("source_system") or "") == "zetta2go":
+            try:
+                item["schedule_hour"] = int(meta.get("schedule_hour")) if meta.get("schedule_hour") is not None else _schedule_hour(str(item.get("air_time_raw") or ""))
+            except (TypeError, ValueError):
+                item["schedule_hour"] = _schedule_hour(str(item.get("air_time_raw") or ""))
+            # Never reinterpret a Zetta clock label as a locally calculated gap.
+            item["gap_seconds"] = None
+            item["gap_raw"] = ""
+        else:
+            item["schedule_hour"] = _schedule_hour(str(item.get("air_time_raw") or ""))
+            item["gap_seconds"] = _gap_overrun_seconds(str(item.get("air_time_raw") or ""))
+            item["gap_raw"] = _format_gap(item["gap_seconds"])
         if str(item.get("source_system") or "") == "zetta2go":
             status_code = int(item.get("play_status_code") or 0)
             item["zetta_status_code"] = status_code
@@ -1764,6 +1740,10 @@ def _identity_key(
         if ext and ext in (shared_zetta_external_ids or set()):
             return (typ, "zetta-event", ext)
 
+    # Songs intentionally keep semantic artist/title identity so a historical
+    # GSelector cutoff still matches the same song in Zetta Played. A changed
+    # Zetta log GUID for the first song of an hour therefore does not create a
+    # false missing+added pair.
     if typ == "song":
         return (
             typ,
@@ -1771,6 +1751,13 @@ def _identity_key(
             db.normalize(str(row.get("artist") or "")),
             db.normalize(str(row.get("title") or "")),
         )
+
+    if str(row.get("source_system") or "") == "zetta2go":
+        # For links/jingles/traffic, AssetID is the strongest native fallback
+        # when a log-event GUID was regenerated between cutoff and live.
+        asset = str(row.get("asset_id") or row.get("zetta_asset_id") or "").strip().casefold()
+        if asset:
+            return (typ, "zetta-asset", asset)
     if typ == "etm":
         title = db.normalize(str(row.get("title") or ""))
         return (typ, "text", title)

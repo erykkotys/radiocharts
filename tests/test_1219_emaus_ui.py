@@ -72,7 +72,7 @@ def test_played_duration_ignores_normal_crossfade_but_keeps_large_stop(tmp_path,
     }
     import_zetta2go_snapshot(payload, service_date="2026-10-04", kind="played", replace_live=True)
     rows = {row["title"]: row for row in events_for_day("played", "2026-10-04")}
-    assert rows["Cut"]["played_raw"] == "01:00"
+    assert rows["Cut"]["played_raw"] == "03:00"
     # Five seconds before the nominal runtime is a normal segue, not a 2:55 play.
     assert rows["Normal"]["played_raw"] == "03:00"
 
@@ -94,7 +94,7 @@ def test_1219_emaus_ui_contract():
     assert "Mood" in app and "Opener" in app and "T.Open" in app and "T.Close" in app
     assert "ondblclick" in app and "?view=song&song=" in app
     assert "@st.fragment(run_every=5.0)" in app
-    assert "played_seconds" in local and "cut_ratio" in local
+    assert "played_seconds" in local and "RuntimeMilliseconds" in local
 
     assert "detectTapGestures(onDoubleTap" in android
     assert "delay(15_000)" in android
