@@ -5,7 +5,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, time as dt_time, timezone, timedelta
 from typing import Any
 from urllib.parse import urljoin
 
@@ -300,18 +300,25 @@ class Zetta2GoClient:
         return data
 
     def get_log(self, service_date: date | str) -> dict[str, Any]:
-        """Fetch the day exactly the way the Zetta log grid does: hour by hour.
+        """Fetch the Zetta log hour-by-hour and enrich only boundary ETMs.
 
-        A wide 00:00-23:59 request is *not* equivalent to the Zetta Full log
-        grid on this installation: it can return only a fragment of the day and
-        CalculatedTimes can differ from the values shown by the hourly log view.
-        RadioCharts therefore requests the same 24 native hour windows used by
-        the UI and merges only rows whose native ``cell[5]`` AirTime belongs to
-        that requested clock hour.
+        The timeline itself is always built from the 24 native ``HH:00-HH:59``
+        GetLog responses. Those responses match Zetta's own log pagination and
+        keep every normal event in the exact order returned by the server.
 
-        Important: this function does not calculate airtimes, ETM gaps, carry or
-        60+ values.  It only retrieves native GetLog rows and annotates each row
-        with the request hour so the raw source remains auditable.
+        Zetta has one awkward boundary behaviour: an ETM exactly at ``HH:00`` is
+        the first row of an hourly request, and on this installation its
+        ``CalculatedTimes`` can be zero/missing even though Zetta Full shows a
+        non-zero native gap. Half-hour ETMs do not have that problem because the
+        same request already contains preceding log context.
+
+        To mirror Zetta Full without calculating anything locally, RadioCharts
+        performs a *separate* context probe for each hour that has an ``HH:00``
+        ETM. The probe spans the previous hour through two minutes after the
+        boundary. Only the exact matching ETM row's native ``cell[16]``
+        ``CalculatedTimes`` is copied back to the already-fetched timeline row.
+        No probe rows are merged into the playlist, no airtimes/runtime are
+        derived and no carry is calculated by RadioCharts.
         """
         d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
         merged_rows: list[dict[str, Any]] = []
@@ -332,6 +339,18 @@ class Zetta2GoClient:
             except ValueError:
                 return None
 
+        def entry_type(row: dict[str, Any]) -> int:
+            cell = row.get("cell") if isinstance(row, dict) else None
+            try:
+                return int(cell[0]) if isinstance(cell, list) and cell else 0
+            except (TypeError, ValueError):
+                return 0
+
+        def marker_type(row: dict[str, Any]) -> str:
+            cell = row.get("cell") if isinstance(row, dict) else None
+            asset = cell[7] if isinstance(cell, list) and len(cell) > 7 and isinstance(cell[7], dict) else {}
+            return str(asset.get("ETMType") or "").strip().casefold()
+
         for hour in range(24):
             start = datetime.combine(d, dt_time(hour, 0, 0))
             end = datetime.combine(d, dt_time(hour, 59, 59, 900000))
@@ -345,11 +364,14 @@ class Zetta2GoClient:
                 if not isinstance(original, dict):
                     continue
                 actual = native_airtime(original)
-                # Helper/parent rows with no native AirTime are not usable in
-                # the timeline. Playable children and ETM/TOH rows do have it.
+                # Timeline rows come *only* from the native target-hour request.
                 if actual is None or actual.date() != d or actual.hour != hour:
                     continue
                 row = dict(original)
+                # Copy the cell list as well: boundary enrichment below must not
+                # mutate the response object retained by test/debug callers.
+                if isinstance(original.get("cell"), list):
+                    row["cell"] = list(original["cell"])
                 row["_radiocharts_request_hour"] = hour
                 row["_radiocharts_request_index"] = index
                 row_id = str(row.get("id") or "").strip()
@@ -364,10 +386,93 @@ class Zetta2GoClient:
                 "returned": len(rows),
                 "accepted": accepted,
                 "records": int(payload.get("records") or len(rows)) if isinstance(payload, dict) else len(rows),
+                "etm_context_probe": False,
             })
 
-        # Keep native request order: hours ascending, rows in the exact order
-        # returned by Zetta for that hour. Do not re-sort by a derived clock.
+        # Enrich only exact HH:00 ETMs. This is deliberately separate from the
+        # timeline fetch so contextual rows can never leak into Played/Scheduled.
+        boundary_targets: dict[int, list[dict[str, Any]]] = {}
+        for row in merged_rows:
+            if entry_type(row) != 15:
+                continue
+            actual = native_airtime(row)
+            if actual is None or actual.date() != d:
+                continue
+            if actual.minute == 0 and actual.second == 0 and actual.microsecond == 0:
+                boundary_targets.setdefault(actual.hour, []).append(row)
+
+        context_meta: list[dict[str, Any]] = []
+        for hour, targets in boundary_targets.items():
+            boundary = datetime.combine(d, dt_time(hour, 0, 0))
+            probe_start = boundary - timedelta(hours=1)
+            probe_end = boundary + timedelta(minutes=2)
+            try:
+                probe_payload = self.get_log_range(probe_start, probe_end)
+                probe_rows = probe_payload.get("rows") if isinstance(probe_payload, dict) else None
+                if not isinstance(probe_rows, list):
+                    probe_rows = []
+            except Exception as exc:
+                # A failed enrichment probe must never break the normal log.
+                context_meta.append({
+                    "hour": hour, "ok": False, "error": str(exc),
+                    "start": probe_start.isoformat(), "end": probe_end.isoformat(),
+                })
+                continue
+
+            candidates: list[dict[str, Any]] = []
+            for probe_row in probe_rows:
+                if not isinstance(probe_row, dict) or entry_type(probe_row) != 15:
+                    continue
+                actual = native_airtime(probe_row)
+                if actual is None:
+                    continue
+                if abs((actual.replace(tzinfo=None) - boundary).total_seconds()) <= 0.5:
+                    candidates.append(probe_row)
+
+            enriched = 0
+            for target in targets:
+                target_id = str(target.get("id") or "").strip()
+                target_kind = marker_type(target)
+                match = next(
+                    (r for r in candidates if target_id and str(r.get("id") or "").strip() == target_id),
+                    None,
+                )
+                if match is None:
+                    match = next((r for r in candidates if marker_type(r) == target_kind), None)
+                if match is None:
+                    continue
+                tcell = target.get("cell")
+                pcell = match.get("cell")
+                if not isinstance(tcell, list) or not isinstance(pcell, list) or len(pcell) <= 16:
+                    continue
+                native_calc = pcell[16] if isinstance(pcell[16], dict) else None
+                if native_calc is None:
+                    continue
+                base_calc = tcell[16] if len(tcell) > 16 and isinstance(tcell[16], dict) else {}
+                target["_radiocharts_base_calculated_times"] = base_calc
+                target["_radiocharts_etm_context_probe"] = {
+                    "start": probe_start.isoformat(),
+                    "end": probe_end.isoformat(),
+                    "matched_row_id": str(match.get("id") or ""),
+                }
+                while len(tcell) <= 16:
+                    tcell.append(None)
+                tcell[16] = native_calc
+                enriched += 1
+
+            context_meta.append({
+                "hour": hour,
+                "ok": True,
+                "returned": len(probe_rows),
+                "candidate_etms": len(candidates),
+                "enriched": enriched,
+                "start": probe_start.isoformat(),
+                "end": probe_end.isoformat(),
+            })
+            if 0 <= hour < len(hour_meta):
+                hour_meta[hour]["etm_context_probe"] = True
+                hour_meta[hour]["etm_context_enriched"] = enriched
+
         return {
             "total": 1,
             "page": 1,
@@ -376,6 +481,7 @@ class Zetta2GoClient:
             "userdata": last_userdata,
             "radiocharts_hourly_fetch": True,
             "radiocharts_hour_meta": hour_meta,
+            "radiocharts_etm_context_meta": context_meta,
         }
 
     def close(self) -> None:

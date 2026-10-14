@@ -1,3 +1,14 @@
+## 1.2.38 — natywne ETM :00, porządek Played/Porównania i wspólna nawigacja daty
+
+- **ETM pełnogodzinne (`HH:00`)**: podstawowa playlista nadal pochodzi wyłącznie z 24 natywnych godzinnych `GetLog`. Dla markera dokładnie o pełnej godzinie worker robi osobny kontekstowy odczyt `GetLog` obejmujący poprzednią godzinę i kopiuje z niego **wyłącznie natywne `cell[16] / CalculatedTimes` tego samego ETM**. Żaden wiersz z kontekstowego requestu nie trafia do Scheduled/Played i RadioCharts nadal nie liczy gapu sam. Rozwiązuje to przypadek, w którym `:30` zgadzało się z Zetta Full, a `:00` dostawało sztuczne `+00:00` jako pierwszy wiersz godzinnego requestu.
+- Diagnostyka ETM pokazuje teraz, czy marker `HH:00` został wzbogacony przez kontekstowy probe oraz zachowuje bazowe `GapToETM`, więc można porównać odpowiedź bez kontekstu z natywną odpowiedzią używaną do wyświetlenia.
+- **Played** zachowuje teraz dokładną kolejność natywnego GetLog/`sequence_no`; dla danych Zetta nie ma już wtórnego sortowania po lokalnie interpretowanym zegarze.
+- **Porównanie**: `AssetID` jest kluczem tylko wtedy, gdy ten sam AssetID istnieje po obu stronach. Stare cutoffy bez AssetID dopasowują się symetrycznie po treści zamiast generować setki fałszywych par `Niezagrane/Dodane` dla identycznych linków i jingli.
+- Przyszły element Scheduled, którego live Zetta jeszcze nie zwróciła, ma stan **Oczekuje**, a nie `Niezagrane`, i nie zwiększa licznika różnic. READY/WAITING zwrócone przez Zettę są w Porównaniu wyświetlane normalnie, bez mocnego ghostingu.
+- W Porównaniu elementy już odegrane są lekko wyszarzone i zapisane kursywą. `Zmieniony` dostaje delikatne, wyblakłe czerwone tło; pominięte/ghost pozostają wyraźnie bardziej wyblakłe.
+- Scheduled, Played, ETM i Porównanie używają jednego selektora dnia: **← · klikana data z kalendarzem · → · Dzisiaj**.
+- Testy: **281/281**. Android: wersja `1.2.38`, `versionCode = 61`.
+
 ## 1.2.37 — Zetta2GO jako źródło prawdy dla logu, bez lokalnego sklejania
 
 - Cofnięto eksperyment z jednym pełnodniowym `GetLog`. Na tej instalacji szerokie zapytanie nie jest równoważne widokowi Zetta Full i potrafi zwrócić niepełny/nieadekwatny kontekst. RadioCharts znów pobiera **24 natywne okna godzinowe `HH:00:00–HH:59:59.9`**, dokładnie jak log Zetty. Nie ma lead-inu z poprzedniej godziny.

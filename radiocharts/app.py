@@ -2649,9 +2649,11 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
         st.caption(
             f"{len(markers)} markerów · ≠ 0: {nonzero} · brak wartości: {missing} · "
             f"max +: {max_late} · max −: {max_early}. "
-            "RadioCharts pokazuje wyłącznie natywną wartość z GetLog → cell[16] / CalculatedTimes, tak jak Emaus Hub. "
+            "RadioCharts pokazuje wyłącznie natywną wartość z GetLog → cell[16] / CalculatedTimes. "
             "HIT → HitETMGap → GapToETM; pozostałe ETM → GapToETM, potem OriginalGap/generic. "
-            "Jeśli Zetta nie poda żadnej wartości, jest —; nie liczymy carry i nie rekonstruujemy gapu z AirTime/runtime."
+            "Markery dokładnie o HH:00 są dodatkowo odczytywane z osobnego GetLog z poprzednią godziną jako kontekstem, "
+            "bo Zetta na początku godzinnego okna potrafi zwrócić 0 mimo innej wartości w Zetta Full. "
+            "Do playlisty nie dokładamy żadnych wierszy z tego probe; nadal niczego nie liczymy lokalnie."
         )
     else:
         st.markdown("#### ETM Hard / Soft — gapy planu GSelector")
@@ -2701,7 +2703,19 @@ def _local_set_date_picker(widget_key: str, target_iso: str) -> None:
     st.session_state[widget_key] = date.fromisoformat(target_iso)
 
 
-def _local_schedule_date_nav(dates: list[str], key_prefix: str, default_date: date) -> str:
+def _local_date_nav(
+    dates: list[str],
+    key_prefix: str,
+    default_date: date,
+    *,
+    label: str = "Dzień",
+) -> str:
+    """Compact previous/date/next/today navigator used by all EMAUS views.
+
+    The date field is a normal Streamlit date_input, so clicking it opens the
+    calendar. Arrow buttons only move between dates that actually exist in the
+    selected dataset.
+    """
     available = sorted({date.fromisoformat(raw) for raw in dates})
     if not available:
         return default_date.isoformat()
@@ -2727,29 +2741,43 @@ def _local_schedule_date_nav(dates: list[str], key_prefix: str, default_date: da
     today = date.today()
     today_enabled = available[0] <= today <= available[-1]
 
-    prev_col, date_col, today_col, next_col = st.columns([.24, 1.18, .48, .24], vertical_alignment="bottom")
+    prev_col, date_col, next_col, today_col = st.columns(
+        [.18, 1.05, .18, .42], vertical_alignment="bottom"
+    )
     prev_col.button(
         "←", key=f"{key_prefix}_date_prev", disabled=previous is None,
         on_click=_local_set_date_picker if previous is not None else None,
         args=(widget_key, previous.isoformat()) if previous is not None else (),
         help="Poprzedni dostępny dzień",
+        use_container_width=True,
     )
     selected = date_col.date_input(
-        "Dzień", min_value=available[0], max_value=available[-1],
-        key=widget_key, format="DD.MM.YYYY",
-    )
-    today_col.button(
-        "Dzisiaj", key=f"{key_prefix}_date_today", disabled=not today_enabled,
-        on_click=_local_set_date_picker if today_enabled else None,
-        args=(widget_key, today.isoformat()) if today_enabled else (),
+        label,
+        min_value=available[0],
+        max_value=available[-1],
+        key=widget_key,
+        format="DD.MM.YYYY",
+        help="Kliknij datę, aby otworzyć kalendarz.",
     )
     next_col.button(
         "→", key=f"{key_prefix}_date_next", disabled=following is None,
         on_click=_local_set_date_picker if following is not None else None,
         args=(widget_key, following.isoformat()) if following is not None else (),
         help="Następny dostępny dzień",
+        use_container_width=True,
+    )
+    today_col.button(
+        "Dzisiaj", key=f"{key_prefix}_date_today", disabled=not today_enabled,
+        on_click=_local_set_date_picker if today_enabled else None,
+        args=(widget_key, today.isoformat()) if today_enabled else (),
+        use_container_width=True,
     )
     return selected.isoformat()
+
+
+def _local_schedule_date_nav(dates: list[str], key_prefix: str, default_date: date) -> str:
+    # Backward-compatible name kept for older tests/bookmarks.
+    return _local_date_nav(dates, key_prefix, default_date, label="Dzień")
 
 
 def _local_timeline_frame(rows: list[dict]) -> pd.DataFrame:
@@ -3385,10 +3413,14 @@ def _render_local_timeline_content(
         # READY/WAITING rows. No local Scheduled tail is appended.
         full_day_rows = _local_played_continuity_rows(revision, selected_date, full_day_rows)
 
-    # Never trust stitched/import sequence order for the visual day.  Sort by
-    # logical scheduling hour + within-hour time so CURRENT at 12:xx cannot be
-    # followed by stale 06:xx rows.
-    full_day_rows.sort(key=_local_display_order_key)
+    # Native Zetta snapshots already arrive in authoritative GetLog order.
+    # Preserve that order instead of re-sorting by a locally derived clock; this
+    # matters for backtimed rows and boundary helpers. Manual/GSelector imports
+    # still use the legacy logical display sort.
+    if full_day_rows and all(str(row.get("source_system") or "") == "zetta2go" for row in full_day_rows):
+        full_day_rows.sort(key=lambda row: int(row.get("sequence_no") or 0))
+    else:
+        full_day_rows.sort(key=_local_display_order_key)
 
     # TOH is a navigation separator in both whole-day and single-hour views.
     full_day_rows = _local_with_toh_separators(full_day_rows)
@@ -3463,18 +3495,8 @@ def _render_local_timeline(kind: str, key_prefix: str, revision: str) -> None:
         return
 
     default_date = _local_default_date(dates, kind) or date.fromisoformat(dates[-1])
-    if kind == "schedule":
-        selected_date = _local_schedule_date_nav(dates, key_prefix, default_date)
-        hcol, pcol = st.columns([.82, 1.55], vertical_alignment="bottom")
-    else:
-        dcol, hcol, pcol = st.columns([.82, .82, 1.55], vertical_alignment="bottom")
-        selected_date = dcol.selectbox(
-            "Dzień",
-            dates,
-            index=dates.index(default_date.isoformat()) if default_date.isoformat() in dates else len(dates) - 1,
-            format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
-            key=f"{key_prefix}_date",
-        )
+    selected_date = _local_date_nav(dates, key_prefix, default_date, label="Dzień")
+    hcol, pcol = st.columns([.82, 1.55], vertical_alignment="bottom")
     hour_options: list[object] = ["Cały dzień", *range(24)]
     selected_hour = hcol.selectbox(
         "Godzina",
@@ -3560,14 +3582,8 @@ def _render_local_etm_page(revision: str) -> None:
         st.info("Brak danych Zetta2GO — nie ma danych ETM.")
         return
     default_date = _local_default_date(dates, "schedule") or date.fromisoformat(dates[-1])
-    c1, c2, c3 = st.columns([1.0, 1.2, 1.35], vertical_alignment="bottom")
-    selected_date = c1.selectbox(
-        "Dzień",
-        dates,
-        index=dates.index(default_date.isoformat()) if default_date.isoformat() in dates else len(dates)-1,
-        format_func=lambda raw: date.fromisoformat(raw).strftime("%d.%m.%Y"),
-        key="our_radio_etm_date",
-    )
+    selected_date = _local_date_nav(dates, "our_radio_etm", default_date, label="Dzień")
+    c2, c3 = st.columns([1.0, 1.25], vertical_alignment="bottom")
     marker_filter = c2.segmented_control(
         "Markery",
         ["Hard + Soft", "Hard", "Soft"],
@@ -3593,10 +3609,11 @@ def _render_local_etm_page(revision: str) -> None:
     ]
     _render_local_etm_gap_summary(filtered)
     st.caption(
-        f"Widok: {source_label}. Źródło ETM: Zetta2GO GetLog → cell[16] / CalculatedTimes, dokładnie jak w Emaus Hub. "
+        f"Widok: {source_label}. Źródło ETM: Zetta2GO GetLog → cell[16] / CalculatedTimes. "
         "HIT: HitETMGap → GapToETM; pozostałe: GapToETM → OriginalGap/generic. "
-        "Dla bieżącego dnia domyślny jest Live Zetta2GO, żeby diagnostyka pokazywała aktualny log, a nie stary cutoff. "
-        "Nie ma rekonstrukcji pełnej godziny ani carry; brak wartości w Zetta = —."
+        "Dla HH:00 worker robi osobny kontekstowy GetLog obejmujący poprzednią godzinę i kopiuje wyłącznie natywne CalculatedTimes "
+        "dokładnie tego markera; pozostałe wiersze z probe są odrzucane. "
+        "Dla bieżącego dnia domyślny jest Live Zetta2GO. Brak wartości w Zetta = —."
     )
 
     diag = []
@@ -3606,13 +3623,17 @@ def _render_local_etm_page(revision: str) -> None:
         calculated = row.get("payload", {}).get("calculated_times") if isinstance(row.get("payload"), dict) else {}
         if not isinstance(calculated, dict):
             calculated = {}
+        payload_meta = row.get("payload", {}) if isinstance(row.get("payload"), dict) else {}
+        base_calculated = payload_meta.get("base_calculated_times") if isinstance(payload_meta.get("base_calculated_times"), dict) else {}
         diag.append({
             "Czas": str(row.get("air_time_raw") or "")[:8],
             "ETM": _local_etm_kind(row).upper(),
             "Gap": _local_normalize_gap(str(row.get("etm_delta_raw") or "")) or "—",
             "Źródło": str(row.get("zetta_gap_source") or "Zetta: brak"),
-            "Asset.gap": row.get("payload", {}).get("zetta_asset_gap_ms") if isinstance(row.get("payload"), dict) else None,
-            "Asset.ogap": row.get("payload", {}).get("zetta_asset_original_gap_ms") if isinstance(row.get("payload"), dict) else None,
+            "Probe HH:00": "tak" if payload_meta.get("etm_context_probe") else "",
+            "Bazowe GapToETM": base_calculated.get("GapToETM"),
+            "Asset.gap": payload_meta.get("zetta_asset_gap_ms"),
+            "Asset.ogap": payload_meta.get("zetta_asset_original_gap_ms"),
             "HitETMGap": calculated.get("HitETMGap"),
             "GapToETM": calculated.get("GapToETM"),
             "OriginalGap": calculated.get("OriginalGap"),
@@ -3652,6 +3673,7 @@ def _local_log_row_html(
     ghost_note: str = "",
     runtime_override: str = "",
     runtime_delta: str = "",
+    played_past: bool = False,
 ) -> str:
     event_type = str(row.get("event_type") or "other")
     category = str(row.get("category_code") or row.get("category") or "")
@@ -3686,6 +3708,10 @@ def _local_log_row_html(
         badge = '<span class="rc-log-badge rc-log-badge-fade">FADE</span>'
 
     classes = ["rc-log-row", _local_event_tone_class(row)]
+    if played_past:
+        classes.append("rc-log-played-past")
+    if "zmieniony" in str(status or "").casefold():
+        classes.append("rc-log-changed")
     if ghost:
         classes.append("rc-log-ghost")
 
@@ -3736,27 +3762,58 @@ def _local_compare_pair_html(pair: dict, *, anchor_prefix: str = "our-radio-comp
     played_status = str(pair.get("played_status") or status or "OK")
     runtime_cut = str(pair.get("runtime_cut") or "")
     planned_runtime = str((scheduled or {}).get("runtime_raw") or "") if isinstance(scheduled, dict) else ""
+
+    played_code = None
+    if isinstance(played, dict):
+        try:
+            played_code = int(played.get("zetta_status_code") or 0)
+        except (TypeError, ValueError):
+            played_code = None
+    already_played = played_code in {3, 6, 7, 8, -3}
+
     if scheduled is None and played is not None:
-        left = _local_log_row_html(played, played_status, ghost=True, ghost_note="brak w Scheduled — element dodany")
-        right = _local_log_row_html(played, played_status)
+        left = _local_log_row_html(
+            played, played_status, ghost=True,
+            ghost_note="brak w Scheduled — element dodany",
+            played_past=already_played,
+        )
+        right = _local_log_row_html(played, played_status, played_past=already_played)
     elif played is None and scheduled is not None:
         left = _local_log_row_html(scheduled, scheduled_status)
-        right = _local_log_row_html(scheduled, scheduled_status, ghost=True, ghost_note="nie zagrano — pozycja z Scheduled")
+        if scheduled_status == "Oczekuje":
+            # Future Scheduled rows should remain readable, not look like
+            # skipped/missing history merely because live Zetta has not returned
+            # that row yet.
+            right = _local_log_row_html(
+                scheduled, "Oczekuje", ghost=False,
+                ghost_note="przyszły Scheduled — brak jeszcze w live Zetta",
+            )
+        else:
+            right = _local_log_row_html(
+                scheduled, scheduled_status, ghost=True,
+                ghost_note="nie zagrano — pozycja z Scheduled",
+            )
     elif scheduled is not None and played is not None:
-        left = _local_log_row_html(scheduled, scheduled_status)
+        left = _local_log_row_html(scheduled, scheduled_status, played_past=already_played)
         right = _local_log_row_html(
             played, played_status,
-            ghost=(played_status == "Oczekuje"),
-            ghost_note="jeszcze nie zagrano — oczekuje w Zetta" if played_status == "Oczekuje" else "",
+            # READY/WAITING is a real native Zetta row and should be shown
+            # normally. Ghosting is reserved for a side that truly does not
+            # exist in one of the snapshots.
+            ghost=False,
             runtime_override=planned_runtime if runtime_cut else "",
             runtime_delta=runtime_cut,
+            played_past=already_played,
         )
     else:
         return ""
+
     is_now = False
     if isinstance(played, dict):
-        try: is_now = int(played.get("zetta_status_code") or 0) in {2,9}
-        except (TypeError,ValueError): pass
+        try:
+            is_now = int(played.get("zetta_status_code") or 0) in {2, 9}
+        except (TypeError, ValueError):
+            pass
     row_id = f' id="{anchor_prefix}-now"' if is_now else ""
     return f'<div{row_id} class="rc-compare-pair">{left}{right}</div>'
 
@@ -3811,9 +3868,14 @@ def _render_local_comparison(revision: str) -> None:
       .rc-compare-head{position:sticky;top:0;z-index:4}.rc-compare-head>div{padding:.48rem .62rem;background:#11161d;border-bottom:1px solid #313844;font-weight:700}
       .rc-log-row{display:grid;grid-template-columns:28px 118px 52px minmax(0,1fr) 62px;gap:.42rem;align-items:start;padding:.31rem .48rem;border-bottom:1px solid #1b222c;background:#090d12;font-size:.80rem;min-width:0;height:100%}
       .rc-log-row:hover{background:#0f151d}.rc-log-status{display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:850}.rc-status-ok{color:#45c878}.rc-status-bad{color:#ff5d5d}.rc-status-move{color:#f4b942}.rc-status-cut{color:#ff8c5a}
-      .rc-log-time{font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:650}.rc-log-cat{font-weight:760;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-log-main{min-width:0}.rc-log-title{font-weight:650;overflow-wrap:anywhere}.rc-log-meta{font-size:.67rem;opacity:.66;overflow-wrap:anywhere}.rc-log-runtime{text-align:right;white-space:nowrap}.rc-log-runtime-delta{display:block;color:#ff5d5d;font-size:.68rem;font-weight:800}.rc-log-flags{grid-column:4/6}.rc-log-ghost{opacity:.27;filter:grayscale(.85)}.rc-log-empty{padding:1rem;color:#858c96}
+      .rc-log-time{font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:650}.rc-log-cat{font-weight:760;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-log-main{min-width:0}.rc-log-title{font-weight:650;overflow-wrap:anywhere}.rc-log-meta{font-size:.67rem;opacity:.66;overflow-wrap:anywhere}.rc-log-runtime{text-align:right;white-space:nowrap}.rc-log-runtime-delta{display:block;color:#ff5d5d;font-size:.68rem;font-weight:800}.rc-log-flags{grid-column:4/6}
+      .rc-log-row.rc-log-played-past{opacity:.74;font-style:italic}
+      .rc-log-row.rc-log-changed{background:rgba(115,34,42,.24);box-shadow:inset 3px 0 rgba(255,93,93,.32)}
+      .rc-log-row.rc-log-changed.rc-log-played-past{background:rgba(115,34,42,.18);opacity:.76}
+      .rc-log-ghost{opacity:.28;filter:grayscale(.82)}.rc-log-empty{padding:1rem;color:#858c96}
     </style>""", unsafe_allow_html=True)
-    selected_date=st.selectbox("Dzień do porównania",overlap,index=len(overlap)-1,format_func=lambda raw:date.fromisoformat(raw).strftime("%d.%m.%Y"),key="our_radio_compare_date")
+    compare_default = date.fromisoformat(overlap[-1])
+    selected_date = _local_date_nav(overlap, "our_radio_compare", compare_default, label="Dzień do porównania")
     day_cmp=cached_local_compare_day(revision,selected_date)
     hour_meta={int(x["hour"]):x for x in day_cmp.get("hours",[])}
     hour_details={int(x["hour"]):x for x in day_cmp.get("hour_details",[])}

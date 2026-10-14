@@ -828,6 +828,8 @@ def parse_zetta2go_log(
             "native_air_time": str(cell[5] or ""),
             "request_hour": source.get("_radiocharts_request_hour"),
             "request_index": source.get("_radiocharts_request_index"),
+            "etm_context_probe": source.get("_radiocharts_etm_context_probe"),
+            "base_calculated_times": source.get("_radiocharts_base_calculated_times"),
             "schedule_hour": actual.hour if actual is not None else _schedule_hour(raw_time),
             "raw_cell": cell,
             "raw_row": source,
@@ -1545,6 +1547,9 @@ def events_for_day(
             item["zetta_edit_name"] = ZETTA_EDIT_CODE_NAMES.get(edit_int, f"EditCode {edit_int}" if edit_int else "")
             item["edit_code"] = " · ".join(x for x in [str(edit_int) if edit_int else "", item["zetta_edit_name"]] if x)
             item["zetta_asset_id"] = str(item.get("asset_id") or meta.get("asset_id") or "")
+            item["zetta_request_hour"] = meta.get("request_hour")
+            item["zetta_request_index"] = meta.get("request_index")
+            item["zetta_etm_context_probe"] = meta.get("etm_context_probe")
             item["play_rate_tooltip"] = str(meta.get("play_rate_tooltip") or "")
             item["duration_runtime"] = str(meta.get("duration_runtime") or "")
             item["zetta_skip"] = bool(meta.get("skip"))
@@ -1720,6 +1725,7 @@ def _identity_key(
     row: dict[str, Any],
     *,
     shared_zetta_external_ids: set[str] | None = None,
+    shared_zetta_asset_ids: set[str] | None = None,
 ) -> tuple[str, ...]:
     """Stable identity used inside one hourly reconciliation block.
 
@@ -1756,7 +1762,7 @@ def _identity_key(
         # For links/jingles/traffic, AssetID is the strongest native fallback
         # when a log-event GUID was regenerated between cutoff and live.
         asset = str(row.get("asset_id") or row.get("zetta_asset_id") or "").strip().casefold()
-        if asset:
+        if asset and asset in (shared_zetta_asset_ids or set()):
             return (typ, "zetta-asset", asset)
     if typ == "etm":
         title = db.normalize(str(row.get("title") or ""))
@@ -1783,17 +1789,45 @@ def _shared_zetta_external_ids(
     return ids(scheduled) & ids(played)
 
 
+
+
+def _shared_zetta_asset_ids(
+    scheduled: list[dict[str, Any]],
+    played: list[dict[str, Any]],
+) -> set[str]:
+    """Asset IDs safe to use symmetrically on both sides of reconciliation.
+
+    Older immutable cutoff snapshots may not have an AssetID even when the live
+    Zetta row does.  Using an AssetID on only one side makes two visibly
+    identical links/jingles impossible to match.  Just like log-event GUIDs,
+    AssetID is therefore authoritative only when it is actually present in both
+    snapshots.
+    """
+    def ids(rows: list[dict[str, Any]]) -> set[str]:
+        return {
+            str(row.get("asset_id") or row.get("zetta_asset_id") or "").strip().casefold()
+            for row in rows
+            if str(row.get("source_system") or "") == "zetta2go"
+            and str(row.get("asset_id") or row.get("zetta_asset_id") or "").strip()
+        }
+    return ids(scheduled) & ids(played)
+
 def _occurrence_tokens(
     rows: list[dict[str, Any]],
     *,
     shared_zetta_external_ids: set[str] | None = None,
+    shared_zetta_asset_ids: set[str] | None = None,
 ) -> tuple[list[tuple[Any, ...]], dict[tuple[Any, ...], dict[str, Any]]]:
     """Make duplicate-safe tokens: the second play of a song is a separate event."""
     seen: Counter[tuple[str, ...]] = Counter()
     tokens: list[tuple[Any, ...]] = []
     lookup: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
-        key = _identity_key(row, shared_zetta_external_ids=shared_zetta_external_ids)
+        key = _identity_key(
+            row,
+            shared_zetta_external_ids=shared_zetta_external_ids,
+            shared_zetta_asset_ids=shared_zetta_asset_ids,
+        )
         seen[key] += 1
         token: tuple[Any, ...] = (*key, "occ", int(seen[key]))
         tokens.append(token)
@@ -1963,6 +1997,28 @@ def _comparison_display_pairs(
     return pairs
 
 
+def _comparison_row_is_future(row: dict[str, Any], service_date: date | str) -> bool:
+    """Whether a Scheduled row is still in the future at comparison time.
+
+    This is only a presentation/reconciliation state.  It never changes Zetta
+    data or derives playout facts.  A future Scheduled item that is not yet
+    present in the live response must not be called ``Niezagrane``.
+    """
+    d = service_date if isinstance(service_date, date) else date.fromisoformat(str(service_date))
+    today = date.today()
+    if d > today:
+        return True
+    if d < today:
+        return False
+    try:
+        seconds = float(row.get("sort_seconds"))
+    except (TypeError, ValueError):
+        return False
+    now = datetime.now().astimezone()
+    wall = now.hour * 3600.0 + now.minute * 60.0 + now.second + now.microsecond / 1_000_000.0
+    return seconds > wall
+
+
 def _compare_hour_rows(
     service_date: date | str,
     hour: int,
@@ -1986,11 +2042,16 @@ def _compare_hour_rows(
     # missing+added pairs for the same visible first item of an hour when Zetta
     # rebuilt that row and changed its GUID between cutoff and live.
     shared_external_ids = _shared_zetta_external_ids(scheduled, played)
+    shared_asset_ids = _shared_zetta_asset_ids(scheduled, played)
     sched_tokens, sched_lookup = _occurrence_tokens(
-        scheduled, shared_zetta_external_ids=shared_external_ids
+        scheduled,
+        shared_zetta_external_ids=shared_external_ids,
+        shared_zetta_asset_ids=shared_asset_ids,
     )
     play_tokens, play_lookup = _occurrence_tokens(
-        played, shared_zetta_external_ids=shared_external_ids
+        played,
+        shared_zetta_external_ids=shared_external_ids,
+        shared_zetta_asset_ids=shared_asset_ids,
     )
     common = set(sched_tokens) & set(play_tokens)
 
@@ -2010,7 +2071,12 @@ def _compare_hour_rows(
         sched = sched_lookup[token]
         sid = int(sched["id"])
         if token not in common:
-            missing_status = "Wyskipowane" if _zetta_row_is_skipped(sched) else "Niezagrane"
+            if _comparison_row_is_future(sched, service_date):
+                missing_status = "Oczekuje"
+                missing_note = "Przyszły element Scheduled — nie oznaczamy go jako niezagrany przed emisją."
+            else:
+                missing_status = "Wyskipowane" if _zetta_row_is_skipped(sched) else "Niezagrane"
+                missing_note = "Nie ma odpowiadającego elementu w Played tej godziny."
             schedule_status[sid] = missing_status
             rows.append({
                 "status": missing_status,
@@ -2030,7 +2096,7 @@ def _compare_hour_rows(
                 "scheduled_id": sid,
                 "played_id": None,
                 "external_id": sched.get("external_id") or "",
-                "note": "Nie ma odpowiadającego elementu w Played tej godziny.",
+                "note": missing_note,
             })
             continue
 
@@ -2252,13 +2318,16 @@ def compare_day(
     # hour, compare it in the Scheduled hour instead. This changes comparison
     # grouping only; the raw time and stored scheduling semantics stay untouched.
     shared_external_ids = _shared_zetta_external_ids(scheduled_rows, played_rows)
+    shared_asset_ids = _shared_zetta_asset_ids(scheduled_rows, played_rows)
     scheduled_identity_hours: dict[tuple[str, ...], list[int]] = defaultdict(list)
     for row in scheduled_rows:
         hour = row.get("schedule_hour")
         if hour is None:
             continue
         scheduled_identity_hours[_identity_key(
-            row, shared_zetta_external_ids=shared_external_ids
+            row,
+            shared_zetta_external_ids=shared_external_ids,
+            shared_zetta_asset_ids=shared_asset_ids,
         )].append(int(hour))
 
     for row in played_rows:
@@ -2267,7 +2336,9 @@ def compare_day(
             continue
         target_hour = int(hour)
         candidates = scheduled_identity_hours.get(_identity_key(
-            row, shared_zetta_external_ids=shared_external_ids
+            row,
+            shared_zetta_external_ids=shared_external_ids,
+            shared_zetta_asset_ids=shared_asset_ids,
         ), [])
         unique = sorted(set(candidates))
         if target_hour not in unique:
