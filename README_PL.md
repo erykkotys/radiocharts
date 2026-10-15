@@ -1,3 +1,11 @@
+## 1.2.39 — wspólna data, ręczne odświeżanie i Soft ETM na granicy godziny
+
+- **Data EMAUS jest wspólna między Scheduled / ETM / Played / Porównanie**. Przełączenie widoku nie resetuje już dnia. Nawigacja pozostaje kompaktowa: `← · data/kalendarz · → · Dzisiaj`, a obok doszedł przycisk **Odśwież**.
+- **Odśwież** w Played/ETM/Porównaniu wykonuje ręczny sync wybranego bieżącego/historycznego dnia z Zetta2GO; w Scheduled nie narusza immutable cutoffu i tylko przeładowuje stan aplikacji.
+- **Soft ETM / granica godziny**: porównanie nie wymaga już, aby element rozpoczął się po dokładnej stronie `HH:00`. Jeśli ten sam element zagra do 3 minut po drugiej stronie granicy, wybierane jest najbliższe wystąpienie Scheduled. Rozwiązuje przypadki typu `Scheduled 02:00:00` vs `Played 01:59:59.5`, także gdy ten sam tytuł wystąpił wcześniej w poprzedniej godzinie. Natywnego AirTime Zetty nie zmieniamy — korekta dotyczy wyłącznie grupowania do Porównania.
+- **Zmienione elementy** w Porównaniu mają wyraźniejsze, ale nadal przygaszone czerwone tło i mocniejszy lewy akcent; odegrane pozostają lekko wyszarzone/kursywą.
+- Test regresyjny odtwarza powtarzający się utwór przy Soft ETM na granicy godziny.
+
 ## 1.2.38 — natywne ETM :00, porządek Played/Porównania i wspólna nawigacja daty
 
 - **ETM pełnogodzinne (`HH:00`)**: podstawowa playlista nadal pochodzi wyłącznie z 24 natywnych godzinnych `GetLog`. Dla markera dokładnie o pełnej godzinie worker robi osobny kontekstowy odczyt `GetLog` obejmujący poprzednią godzinę i kopiuje z niego **wyłącznie natywne `cell[16] / CalculatedTimes` tego samego ETM**. Żaden wiersz z kontekstowego requestu nie trafia do Scheduled/Played i RadioCharts nadal nie liczy gapu sam. Rozwiązuje to przypadek, w którym `:30` zgadzało się z Zetta Full, a `:00` dostawało sztuczne `+00:00` jako pierwszy wiersz godzinnego requestu.

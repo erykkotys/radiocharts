@@ -19,7 +19,7 @@ def test_now_playing_is_not_a_separate_fragment_anymore():
 
 
 def test_release_version():
-    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.38"
+    assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.39"
     gradle = (ROOT / "android" / "RadioChartsAndroid" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-    assert 'versionCode = 61' in gradle
-    assert 'versionName = "1.2.38"' in gradle
+    assert 'versionCode = 62' in gradle
+    assert 'versionName = "1.2.39"' in gradle

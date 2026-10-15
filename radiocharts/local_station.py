@@ -2311,53 +2311,81 @@ def compare_day(
         if hour is not None:
             scheduled_by_hour[int(hour)].append(row)
 
-    # Reconciled logs often express a boundary asset as 00:59:60 / 00:60:00
-    # while cutoff Scheduled has the same asset at 01:00:00. Comparing 24 hour
-    # buckets independently used to count that one event twice (Dodane +
-    # Niezagrane). If the identity is unique and points to an adjacent Scheduled
-    # hour, compare it in the Scheduled hour instead. This changes comparison
-    # grouping only; the raw time and stored scheduling semantics stay untouched.
+    # Soft ETMs are *soft*: the item belonging to the next clock hour may start
+    # a little before HH:00 (for example Scheduled 02:00:00, Played 01:59:59.5).
+    # Comparing rigid hour buckets then creates the familiar false pair
+    # Niezagrane + Dodane even though it is visibly the same event.  The older
+    # fix only handled a unique identity within five seconds of the boundary;
+    # that still failed when the same song/link occurred elsewhere in the
+    # neighbouring hour.  Use the nearest matching Scheduled occurrence around
+    # the boundary instead.  This changes *comparison grouping only*: native
+    # Zetta AirTime and stored schedule_hour are never rewritten.
     shared_external_ids = _shared_zetta_external_ids(scheduled_rows, played_rows)
     shared_asset_ids = _shared_zetta_asset_ids(scheduled_rows, played_rows)
-    scheduled_identity_hours: dict[tuple[str, ...], list[int]] = defaultdict(list)
-    for row in scheduled_rows:
-        hour = row.get("schedule_hour")
-        if hour is None:
-            continue
-        scheduled_identity_hours[_identity_key(
+
+    def boundary_identity(row: dict[str, Any]) -> tuple[str, ...]:
+        if str(row.get("event_type") or "") == "etm":
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            kind = str(payload.get("etm_type") or "").strip().casefold()
+            if not kind:
+                title = str(row.get("title") or "")
+                match = re.search(r"_(Hard|Soft|Reset|Hit|Other)$", title, flags=re.IGNORECASE)
+                kind = match.group(1).casefold() if match else "etm"
+            return ("etm-boundary", kind)
+        return _identity_key(
             row,
             shared_zetta_external_ids=shared_external_ids,
             shared_zetta_asset_ids=shared_asset_ids,
-        )].append(int(hour))
+        )
 
+    scheduled_identity_rows: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for sched in scheduled_rows:
+        sched_hour = sched.get("schedule_hour")
+        if sched_hour is None:
+            continue
+        scheduled_identity_rows[boundary_identity(sched)].append((int(sched_hour), sched))
+
+    def clock_distance(a: float, b: float) -> float:
+        raw = abs(a - b)
+        return min(raw, abs(86400.0 - raw))
+
+    boundary_tolerance = 180.0
     for row in played_rows:
         hour = row.get("schedule_hour")
         if hour is None:
             continue
         target_hour = int(hour)
-        candidates = scheduled_identity_hours.get(_identity_key(
-            row,
-            shared_zetta_external_ids=shared_external_ids,
-            shared_zetta_asset_ids=shared_asset_ids,
-        ), [])
-        unique = sorted(set(candidates))
-        if target_hour not in unique:
-            adjacent = [candidate for candidate in unique if abs(candidate - target_hour) == 1]
-            if len(adjacent) == 1:
-                candidate = adjacent[0]
-                raw = str(row.get("air_time_raw") or "")
-                match = re.fullmatch(r"(\d{1,2}):(\d+):(\d{1,2}(?:\.\d+)?)", raw)
-                boundary_alias = False
-                if match:
-                    minute = int(match.group(2))
-                    second = float(match.group(3))
-                    offset = minute * 60.0 + second
-                    if candidate == target_hour + 1:
-                        boundary_alias = abs(offset - 3600.0) <= 5.0
-                    elif candidate == target_hour - 1:
-                        boundary_alias = offset <= 5.0
-                if boundary_alias:
-                    target_hour = candidate
+        try:
+            played_sec = float(row.get("sort_seconds"))
+        except (TypeError, ValueError):
+            played_sec = None
+
+        if played_sec is not None:
+            candidates = scheduled_identity_rows.get(boundary_identity(row), [])
+            same_hour_best: float | None = None
+            adjacent_best: tuple[float, int] | None = None
+            for candidate_hour, candidate_row in candidates:
+                try:
+                    scheduled_sec = float(candidate_row.get("sort_seconds"))
+                except (TypeError, ValueError):
+                    continue
+                distance = clock_distance(played_sec, scheduled_sec)
+                if candidate_hour == target_hour:
+                    same_hour_best = distance if same_hour_best is None else min(same_hour_best, distance)
+                    continue
+                hour_gap = abs(candidate_hour - target_hour)
+                adjacent = hour_gap == 1 or {candidate_hour, target_hour} == {0, 23}
+                if not adjacent or distance > boundary_tolerance:
+                    continue
+                if adjacent_best is None or distance < adjacent_best[0]:
+                    adjacent_best = (distance, candidate_hour)
+
+            # Prefer the adjacent occurrence only when it is the clearly nearest
+            # one.  This handles Soft-ETM spill across HH:00 without stealing a
+            # repeated title that genuinely belongs to the current hour.
+            if adjacent_best is not None and (same_hour_best is None or adjacent_best[0] + 0.25 < same_hour_best):
+                target_hour = adjacent_best[1]
+
         played_by_hour[target_hour].append(row)
 
     hourly = [

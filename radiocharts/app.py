@@ -2699,7 +2699,13 @@ def _local_default_date(values: list[str], kind: str) -> date | None:
     return max(parsed)
 
 
+LOCAL_SHARED_DATE_WIDGET_KEY = "our_radio_shared_date_picker"
+
+
 def _local_set_date_picker(widget_key: str, target_iso: str) -> None:
+    # One shared date_input backs Scheduled / ETM / Played / Porównanie.  The
+    # segmented subview renders only one navigator at a time, so keeping the
+    # widget key stable makes the selected day survive a tab/subview switch.
     st.session_state[widget_key] = date.fromisoformat(target_iso)
 
 
@@ -2710,18 +2716,18 @@ def _local_date_nav(
     *,
     label: str = "Dzień",
 ) -> str:
-    """Compact previous/date/next/today navigator used by all EMAUS views.
+    """Shared EMAUS date navigator: ←, calendar, →, Today, Refresh.
 
-    The date field is a normal Streamlit date_input, so clicking it opens the
-    calendar. Arrow buttons only move between dates that actually exist in the
-    selected dataset.
+    The selected day is intentionally shared by Scheduled, ETM, Played and
+    Porównanie.  Arrow buttons move only among dates that exist in the current
+    dataset.  ``Odśwież`` performs an explicit Zetta2GO Played refresh for the
+    selected current/past day (except in the immutable Scheduled-cutoff view)
+    and otherwise simply reloads the current DB state.
     """
     available = sorted({date.fromisoformat(raw) for raw in dates})
     if not available:
         return default_date.isoformat()
-    widget_key = f"{key_prefix}_date_picker"
-    if widget_key not in st.session_state:
-        st.session_state[widget_key] = default_date
+    widget_key = LOCAL_SHARED_DATE_WIDGET_KEY
     current = st.session_state.get(widget_key, default_date)
     if isinstance(current, datetime):
         current = current.date()
@@ -2732,17 +2738,22 @@ def _local_date_nav(
             current = default_date
     if not isinstance(current, date):
         current = default_date
-    if current < available[0] or current > available[-1]:
-        current = default_date
+    if current not in available:
+        # Keep the same day whenever possible. If one subview lacks that exact
+        # snapshot, choose the nearest available day instead of resetting to an
+        # unrelated per-tab default.
+        current = min(available, key=lambda candidate: abs((candidate - current).days))
+        st.session_state[widget_key] = current
+    elif widget_key not in st.session_state:
         st.session_state[widget_key] = current
 
     previous = next((candidate for candidate in reversed(available) if candidate < current), None)
     following = next((candidate for candidate in available if candidate > current), None)
     today = date.today()
-    today_enabled = available[0] <= today <= available[-1]
+    today_enabled = today in available
 
-    prev_col, date_col, next_col, today_col = st.columns(
-        [.18, 1.05, .18, .42], vertical_alignment="bottom"
+    prev_col, date_col, next_col, today_col, refresh_col = st.columns(
+        [.16, .96, .16, .34, .38], vertical_alignment="bottom"
     )
     prev_col.button(
         "←", key=f"{key_prefix}_date_prev", disabled=previous is None,
@@ -2772,6 +2783,30 @@ def _local_date_nav(
         args=(widget_key, today.isoformat()) if today_enabled else (),
         use_container_width=True,
     )
+    if refresh_col.button("Odśwież", key=f"{key_prefix}_date_refresh", use_container_width=True):
+        try:
+            # Scheduled is an immutable pre-emission cutoff. Do not rewrite it
+            # from a manual refresh. Other views may explicitly refresh the
+            # selected live/historical Played snapshot straight from Zetta2GO.
+            if key_prefix != "our_radio_schedule" and selected <= today:
+                cfg = zetta2go_settings()
+                if cfg.configured and cfg.live_enabled:
+                    with st.spinner("Odświeżam Zetta2GO…"):
+                        result = local_sync_zetta2go_live(selected)
+                    st.session_state["our_radio_refresh_notice"] = (
+                        f"Zetta2GO: {result.get('rows', 0)} elementów dla {selected.strftime('%d.%m.%Y')}."
+                    )
+            st.rerun()
+        except Exception as exc:
+            st.session_state["our_radio_refresh_error"] = f"Zetta2GO: {exc}"
+            st.rerun()
+
+    notice = st.session_state.pop("our_radio_refresh_notice", None)
+    error = st.session_state.pop("our_radio_refresh_error", None)
+    if notice:
+        st.toast(notice)
+    if error:
+        st.error(error)
     return selected.isoformat()
 
 
@@ -3870,8 +3905,9 @@ def _render_local_comparison(revision: str) -> None:
       .rc-log-row:hover{background:#0f151d}.rc-log-status{display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:850}.rc-status-ok{color:#45c878}.rc-status-bad{color:#ff5d5d}.rc-status-move{color:#f4b942}.rc-status-cut{color:#ff8c5a}
       .rc-log-time{font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:650}.rc-log-cat{font-weight:760;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-log-main{min-width:0}.rc-log-title{font-weight:650;overflow-wrap:anywhere}.rc-log-meta{font-size:.67rem;opacity:.66;overflow-wrap:anywhere}.rc-log-runtime{text-align:right;white-space:nowrap}.rc-log-runtime-delta{display:block;color:#ff5d5d;font-size:.68rem;font-weight:800}.rc-log-flags{grid-column:4/6}
       .rc-log-row.rc-log-played-past{opacity:.74;font-style:italic}
-      .rc-log-row.rc-log-changed{background:rgba(115,34,42,.24);box-shadow:inset 3px 0 rgba(255,93,93,.32)}
-      .rc-log-row.rc-log-changed.rc-log-played-past{background:rgba(115,34,42,.18);opacity:.76}
+      .rc-log-row.rc-log-changed{background:linear-gradient(90deg,rgba(132,38,48,.46),rgba(92,29,37,.31));box-shadow:inset 4px 0 rgba(255,93,93,.72),inset 0 0 0 1px rgba(255,93,93,.14)}
+      .rc-log-row.rc-log-changed:hover{background:linear-gradient(90deg,rgba(150,43,54,.53),rgba(105,32,41,.36))}
+      .rc-log-row.rc-log-changed.rc-log-played-past{background:linear-gradient(90deg,rgba(120,35,44,.36),rgba(82,27,34,.24));opacity:.82}
       .rc-log-ghost{opacity:.28;filter:grayscale(.82)}.rc-log-empty{padding:1rem;color:#858c96}
     </style>""", unsafe_allow_html=True)
     compare_default = date.fromisoformat(overlap[-1])
