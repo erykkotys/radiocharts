@@ -1,3 +1,12 @@
+## 1.2.40 — Unscheduled Song / Link w ETM
+
+- Zakładka **ETM** ma nową, małą tabelę **Unscheduled** pokazującą wszystkie natywne pozycje `Unscheduled Song` i `Unscheduled Link` zwrócone przez Zetta2GO `GetLog`.
+- Najważniejsza kolumna to **Czas** — pochodzi bezpośrednio z `cell[5] / AirTime`; RadioCharts niczego tu nie wylicza ani nie zgaduje. Tabela pokazuje też typ (`Song` / `Link`) i oryginalną etykietę pozycji.
+- Pozycje Unscheduled są zapisywane jako osobny techniczny typ danych, ale **nie trafiają do normalnej playlisty Scheduled/Played i nie wpływają na Porównanie ani licznik różnic**. Są widoczne wyłącznie w dedykowanej tabeli ETM.
+- Tabela korzysta z tego samego dnia i źródła (`Live Zetta2GO` / `Scheduled cutoff`) co ETM, więc współpracuje z istniejącą nawigacją daty i przyciskiem **Odśwież**.
+- Parser rozpoznaje po natywnej etykiecie `cell[7] = Unscheduled Song/Link`, bez zakładania konkretnego numeru typu wpisu.
+- Testy regresyjne obejmują zachowanie natywnego AirTime, zapis do SQLite i ignorowanie Unscheduled w Porównaniu. Android: wersja `1.2.40`, `versionCode = 63`.
+
 ## 1.2.39 — wspólna data, ręczne odświeżanie i Soft ETM na granicy godziny
 
 - **Data EMAUS jest wspólna między Scheduled / ETM / Played / Porównanie**. Przełączenie widoku nie resetuje już dnia. Nawigacja pozostaje kompaktowa: `← · data/kalendarz · → · Dzisiaj`, a obok doszedł przycisk **Odśwież**.

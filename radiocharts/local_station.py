@@ -742,6 +742,9 @@ def parse_zetta2go_log(
         # The native request hour is kept in payload metadata for diagnostics.
         raw_asset = cell[7]
         asset = raw_asset if isinstance(raw_asset, dict) else {}
+        raw_asset_label = str(raw_asset or "").strip() if not isinstance(raw_asset, dict) else ""
+        unscheduled_match = re.match(r"^unscheduled\s+(song|link)\b", raw_asset_label, flags=re.IGNORECASE)
+        unscheduled_kind = unscheduled_match.group(1).casefold() if unscheduled_match else ""
         calculated = cell[16] if len(cell) > 16 and isinstance(cell[16], dict) else {}
         row_id = str(source.get("id") or "")
         universal_id = str(asset.get("UniversalIdentifier") or "") if asset else ""
@@ -797,6 +800,22 @@ def parse_zetta2go_log(
             except (TypeError, ValueError):
                 runtime_seconds = _parse_duration(runtime_raw)
             gap_seconds = None
+        elif unscheduled_kind in {"song", "link"}:
+            # GSelector/Zetta exposes empty clock positions as dedicated helper
+            # rows (for example entry type 19 + cell[7] == "Unscheduled Link").
+            # Keep those native rows so the ETM page can list their exact
+            # AirTime. They are deliberately a separate technical event type:
+            # normal Scheduled/Played presets and comparison ignore them.
+            event_type = "unscheduled"
+            artist = ""
+            title = raw_asset_label or f"Unscheduled {unscheduled_kind.title()}"
+            category = "UNSCHED"
+            asset_id = ""
+            sponsor = ""
+            raw_time = _zetta_air_time_raw(actual)
+            runtime_raw = ""
+            runtime_seconds = 0.0
+            gap_seconds = None
         else:
             # Spot Block parents, TOH and helper rows are not audio files. Their
             # playable children (entry type 106) are already returned separately.
@@ -826,6 +845,8 @@ def parse_zetta2go_log(
             "duration_runtime": str(asset.get("DurationRuntime") or "") if asset else "",
             "duration_ms": duration_ms,
             "native_air_time": str(cell[5] or ""),
+            "unscheduled_kind": unscheduled_kind if event_type == "unscheduled" else "",
+            "unscheduled_label": raw_asset_label if event_type == "unscheduled" else "",
             "request_hour": source.get("_radiocharts_request_hour"),
             "request_index": source.get("_radiocharts_request_index"),
             "etm_context_probe": source.get("_radiocharts_etm_context_probe"),
@@ -2032,7 +2053,7 @@ def _compare_hour_rows(
 
     def relevant(row: dict[str, Any]) -> bool:
         event_type = str(row.get("event_type") or "")
-        return include_technical or event_type not in {"command", "toh"}
+        return include_technical or event_type not in {"command", "toh", "unscheduled"}
 
     scheduled = [row for row in scheduled_all if relevant(row)]
     played = [row for row in played_all if relevant(row)]

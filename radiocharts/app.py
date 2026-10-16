@@ -2688,6 +2688,50 @@ def _render_local_etm_gap_summary(rows: list[dict]) -> None:
         unsafe_allow_html=True,
     )
 
+
+
+def _render_local_unscheduled_summary(rows: list[dict]) -> None:
+    """Compact list of native Zetta/GSelector Unscheduled Song/Link slots."""
+    unscheduled = [
+        row for row in rows
+        if str(row.get("event_type") or "") == "unscheduled"
+        and str((row.get("payload") or {}).get("unscheduled_kind") or "") in {"song", "link"}
+    ]
+    unscheduled.sort(key=lambda row: (
+        float(row.get("sort_seconds") or row.get("air_seconds") or 0.0),
+        int(row.get("sequence_no") or 0),
+    ))
+
+    st.markdown("#### Unscheduled")
+    if not unscheduled:
+        st.caption("Brak pozycji Unscheduled Song / Unscheduled Link w wybranym dniu i źródle.")
+        return
+
+    link_count = sum(1 for row in unscheduled if str((row.get("payload") or {}).get("unscheduled_kind") or "") == "link")
+    song_count = sum(1 for row in unscheduled if str((row.get("payload") or {}).get("unscheduled_kind") or "") == "song")
+    st.caption(f"{len(unscheduled)} pozycji · Link: {link_count} · Song: {song_count}. Czas pochodzi bezpośrednio z Zetta2GO GetLog / cell[5] AirTime.")
+
+    table_rows = []
+    for row in unscheduled:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        kind = str(payload.get("unscheduled_kind") or "").casefold()
+        table_rows.append({
+            "Czas": str(row.get("air_time_raw") or "")[:8],
+            "Typ": "Link" if kind == "link" else "Song",
+            "Pozycja": str(payload.get("unscheduled_label") or row.get("title") or "Unscheduled"),
+        })
+    st.dataframe(
+        pd.DataFrame(table_rows),
+        hide_index=True,
+        use_container_width=True,
+        height=min(300, 42 + 32 * len(table_rows)),
+        column_config={
+            "Czas": st.column_config.TextColumn("Czas", width="small"),
+            "Typ": st.column_config.TextColumn("Typ", width="small"),
+            "Pozycja": st.column_config.TextColumn("Pozycja", width="large"),
+        },
+    )
+
 def _local_default_date(values: list[str], kind: str) -> date | None:
     if not values:
         return None
@@ -3643,6 +3687,7 @@ def _render_local_etm_page(revision: str) -> None:
         if str(row.get("event_type") or "") != "etm" or _local_etm_kind(row) in allowed
     ]
     _render_local_etm_gap_summary(filtered)
+    _render_local_unscheduled_summary(rows)
     st.caption(
         f"Widok: {source_label}. Źródło ETM: Zetta2GO GetLog → cell[16] / CalculatedTimes. "
         "HIT: HitETMGap → GapToETM; pozostałe: GapToETM → OriginalGap/generic. "
